@@ -171,10 +171,25 @@ class ApplyRateLimitSubscriptionTask(Task):
     async def run(self, ctx: TaskContext) -> TaskResult:
         start = time.monotonic()
 
-        sub_name = str(self.params.get("subscription_name", "maaspal-test-subscription"))
+        sub_name = str(self.params.get("new_subscription_name", "maaspal-test-subscription"))
         namespace = str(self.params["namespace"])
-        model_name = str(self.params["model_name"])
-        model_namespace = str(self.params["model_namespace"])
+        # ADR-018's third Update: lets a subscription target a model
+        # deploy_simulated_model (harness/tasks/model.py) just created at
+        # runtime — task params can't reference shared_state via YAML
+        # templating, same reason owner_users_from_shared_state exists below.
+        model_from_shared_state = self.params.get("model_from_shared_state")
+        if model_from_shared_state:
+            models = ctx.shared_state.get(model_from_shared_state, [])
+            if not models:
+                raise RuntimeError(
+                    f"model_from_shared_state={model_from_shared_state!r} but "
+                    "shared_state has no entries — run deploy_simulated_model first"
+                )
+            model_name = str(models[0]["name"])
+            model_namespace = str(models[0]["namespace"])
+        else:
+            model_name = str(self.params["model_name"])
+            model_namespace = str(self.params["model_namespace"])
         token_limit = int(self.params.get("token_limit", 10))
         token_window = str(self.params.get("token_window") or _DEFAULT_TOKEN_WINDOW)
         priority = int(self.params.get("priority", _DEFAULT_PRIORITY))
@@ -212,7 +227,7 @@ class ApplyRateLimitSubscriptionTask(Task):
             api, sub_name, namespace, ready_max_wait_s, "apply_rate_limit_subscription"
         )
 
-        ctx.shared_state["subscription_name"] = sub_name
+        ctx.shared_state["new_subscription_name"] = sub_name
         ctx.shared_state["subscription_namespace"] = namespace
         await ctx.emit_assertion_state()
 
@@ -223,7 +238,7 @@ class ApplyRateLimitSubscriptionTask(Task):
         )
 
     async def cleanup(self, ctx: TaskContext) -> None:
-        sub_name = ctx.shared_state.get("subscription_name")
+        sub_name = ctx.shared_state.get("new_subscription_name")
         namespace = ctx.shared_state.get("subscription_namespace")
         if not sub_name or not namespace:
             return
@@ -255,7 +270,7 @@ class ApplyPriorityTestSubscriptionsTask(Task):
 
     A second YAML task entry for ApplyRateLimitSubscriptionTask (even under a
     different registered name) would NOT work here: that task's shared_state
-    bookkeeping (subscription_name/_sub_created/original_subscription) is a
+    bookkeeping (new_subscription_name/_sub_created/original_subscription) is a
     fixed key, not namespaced per task instance — two instances in one
     scenario would silently clobber each other's cleanup state before
     cleanup() ever runs. This task tracks a *list* instead, one entry per

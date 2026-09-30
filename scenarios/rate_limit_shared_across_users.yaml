@@ -6,7 +6,7 @@ description: >-
   FINDING ("limits are shared"), not necessarily a harness bug — see ADR-023.
 category: "Rate Limiting"
 config:
-  subscription_name: "maaspal-shared-pool-test"
+  new_subscription_name: "maaspal-shared-pool-test"
   subscription_namespace: "models-as-a-service"  # install-specific tenant namespace; override if yours differs
   target_model_name: ""       # required — the MaaSModelRef's own name
   target_model_namespace: ""  # required — the namespace that MaaSModelRef lives in
@@ -33,7 +33,7 @@ tasks:
       name_prefix: "maaspal-pool-user"
   - name: apply_rate_limit_subscription
     params:
-      subscription_name: "${config.subscription_name}"
+      new_subscription_name: "${config.new_subscription_name}"
       namespace: "${config.subscription_namespace}"
       model_name: "${config.target_model_name}"
       model_namespace: "${config.target_model_namespace}"
@@ -48,7 +48,7 @@ tasks:
   - name: provision_keys_for_users
     params:
       key_name_prefix: "maaspal-pool-key"
-      subscription: "${config.subscription_name}"
+      subscription: "${config.new_subscription_name}"
     # REST-only check (ADR-019 pattern): the create response actually
     # echoes the shared subscription for both users' keys.
     assertions:

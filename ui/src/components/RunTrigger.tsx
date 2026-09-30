@@ -18,7 +18,7 @@ interface Props {
 type ConfigValues = Record<string, string | number>;
 
 // Fields a MaaSModelRef-backed scenario (rate_limit_validation,
-// access_denied_no_policy) uses to target a specific model CR — these two
+// subscription_without_authpolicy) uses to target a specific model CR — these two
 // always travel together, so they get one combined picker instead of two
 // blank text boxes the user has to copy exact CR names/namespaces into by
 // hand (previously required an `oc get maasmodelrefs -A` first).

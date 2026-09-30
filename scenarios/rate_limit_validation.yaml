@@ -2,7 +2,7 @@ name: rate_limit_validation
 description: "Rate-limit validation — applies a MaaSSubscription CR (per-model token rate limit) and asserts observed token throughput stays at or below it"
 category: "Rate Limiting"
 config:
-  subscription_name: "maaspal-rate-limit-test"
+  new_subscription_name: "maaspal-rate-limit-test"
   subscription_namespace: "models-as-a-service"  # install-specific tenant namespace; override if yours differs
   target_model_name: ""       # required — the MaaSModelRef's own name, e.g. "facebook-opt-125m-simulated" (not the plain model id)
   target_model_namespace: ""  # required — the namespace that MaaSModelRef lives in, e.g. "llm"
@@ -23,7 +23,7 @@ metrics_queries:
 tasks:
   - name: apply_rate_limit_subscription
     params:
-      subscription_name: "${config.subscription_name}"
+      new_subscription_name: "${config.new_subscription_name}"
       namespace: "${config.subscription_namespace}"
       model_name: "${config.target_model_name}"
       model_namespace: "${config.target_model_namespace}"
@@ -32,7 +32,7 @@ tasks:
     params:
       key_name: "maaspal-rate-key"
       count: "${config.key_count}"
-      subscription: "${config.subscription_name}"
+      subscription: "${config.new_subscription_name}"
     # REST-only check (ADR-019): the create response actually echoes the
     # subscription we asked for, rather than silently auto-selecting a
     # different eligible one — this scenario already needs the subscription

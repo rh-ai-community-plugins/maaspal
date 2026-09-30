@@ -4,7 +4,7 @@ metadata:
   name: maaspal-global-config
   namespace: maaspal
 data:
-  MAAS_API_URL: "https://maas.apps.cluster-rkmhx.rkmhx.sandbox1230.opentlc.com"
+  MAAS_API_URL: "https://maas.apps.cluster-2ppnp.2ppnp.sandbox449.opentlc.com"
   DEFAULT_MODEL: "RedHatAI/Ministral-3-3B-Instruct-2512" #"publishers/llms/models/redhataiministral-3-3b-instruc"
   DEFAULT_SUBSCRIPTION: ""  # empty = auto-select highest priority
   NAMESPACE: "maaspal"
@@ -16,4 +16,4 @@ data:
   # The actual PromQL queries live in each scenario's own `metrics_queries:` block
   # (e.g. scenarios/metrics_fill.yaml) rather than here, so they're visible next to
   # the assertions that use them — this stays cluster wiring only.
-  MAAS_METRICS_URL: "https://thanos-querier-openshift-monitoring.apps.cluster-rkmhx.rkmhx.sandbox1230.opentlc.com/api/v1/query"
+  MAAS_METRICS_URL: "https://thanos-querier-openshift-monitoring.apps.cluster-2ppnp.2ppnp.sandbox449.opentlc.com/api/v1/query"

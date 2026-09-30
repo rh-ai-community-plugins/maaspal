@@ -13,12 +13,12 @@ config:
   subscription_namespace: "models-as-a-service"  # install-specific tenant namespace; override if yours differs
   target_model_name: ""       # required — the MaaSModelRef's own name, e.g. "facebook-opt-125m-simulated" (not the plain model id)
   target_model_namespace: ""  # required — the namespace that MaaSModelRef lives in, e.g. "llm"
-  low_priority_subscription_name: "maaspal-priority-low"
-  high_priority_subscription_name: "maaspal-priority-high"
+  new_low_priority_subscription_name: "maaspal-priority-low"
+  new_high_priority_subscription_name: "maaspal-priority-high"
   # Chosen to sit clearly outside the 100 default used elsewhere
   # (harness/tasks/subscription.py's _DEFAULT_PRIORITY), so this scenario's
   # outcome doesn't depend on whether rate_limit_validation/
-  # access_denied_no_policy happen to be running concurrently.
+  # subscription_without_authpolicy happen to be running concurrently.
   low_priority: 50
   high_priority: 200
   low_priority_token_limit: 10
@@ -33,10 +33,10 @@ tasks:
       model_name: "${config.target_model_name}"
       model_namespace: "${config.target_model_namespace}"
       subscriptions:
-        - name: "${config.low_priority_subscription_name}"
+        - name: "${config.new_low_priority_subscription_name}"
           priority: "${config.low_priority}"
           token_limit: "${config.low_priority_token_limit}"
-        - name: "${config.high_priority_subscription_name}"
+        - name: "${config.new_high_priority_subscription_name}"
           priority: "${config.high_priority}"
           token_limit: "${config.high_priority_token_limit}"
   - name: provision_api_key
@@ -45,7 +45,7 @@ tasks:
       # Deliberately NOT pinning `subscription` — auto-selection is exactly
       # what this scenario is testing. expect_subscription only checks the
       # outcome (ADR-021), it never influences the request.
-      expect_subscription: "${config.high_priority_subscription_name}"
+      expect_subscription: "${config.new_high_priority_subscription_name}"
     assertions:
       expected_subscription_match_count:
         promql: "${harness.key_provision_checks.expected_subscription_match_count}"

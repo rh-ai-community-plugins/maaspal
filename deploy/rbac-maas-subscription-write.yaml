@@ -1,6 +1,6 @@
 # Grants the harness SA write access to MaaSSubscription CRs (for
 # rate_limit_validation, harness/tasks/subscription.py) and MaaSAuthPolicy CRs
-# (for access_denied_no_policy, harness/tasks/access_policy.py). Cluster-scoped
+# (for subscription_without_authpolicy, harness/tasks/access_policy.py). Cluster-scoped
 # ClusterRole/ClusterRoleBinding, NOT the maaspal namespace's own Role
 # (deploy/rbac.yaml) — both CRDs only get reconciled by the MaaS controller
 # when they live in the install's actual tenant namespace (e.g.

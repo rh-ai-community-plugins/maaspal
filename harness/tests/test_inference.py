@@ -327,6 +327,40 @@ async def test_key_index_overrides_static_token_param() -> None:
     mock_cls.assert_called_with(api_key="sk-from-pool", base_url="http://m.test")
 
 
+async def test_model_from_shared_state_sets_model_param() -> None:
+    """ADR-018's third Update: targets a model deploy_simulated_model just
+    created at runtime — the same shared_state-lookup reason key_index
+    exists above."""
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        ctx = _make_ctx(
+            {"deployed_models": [{"name": "maaspal-fail-closed-model-abcd1234-1", "namespace": "llm"}]}
+        )
+        task = SendRequestsTask(
+            "send_requests",
+            {"count": "1", "url": "http://m.test", "model_from_shared_state": "deployed_models"},
+        )
+        await task.run(ctx)
+
+    assert client.chat.completions.create.call_args.kwargs["model"] == "llm/maaspal-fail-closed-model-abcd1234-1"
+
+
+async def test_model_from_shared_state_absent_is_noop() -> None:
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        task = SendRequestsTask(
+            "send_requests",
+            {"count": "1", "url": "http://m.test", "model": "static-model", "model_from_shared_state": "deployed_models"},
+        )
+        await task.run(_make_ctx())
+
+    assert client.chat.completions.create.call_args.kwargs["model"] == "static-model"
+
+
 async def test_result_key_writes_to_custom_shared_state_key() -> None:
     with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
         mock_cls.return_value = _mock_client()

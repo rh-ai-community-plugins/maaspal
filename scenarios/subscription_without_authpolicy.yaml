@@ -1,0 +1,90 @@
+name: subscription_without_authpolicy
+description: >-
+  Access-control fail-closed check — deploys a dedicated throwaway model with
+  no MaaSAuthPolicy anywhere on the cluster, mints a throwaway ServiceAccount
+  identity, grants it quota via a MaaSSubscription bound directly to that
+  identity, but leaves the model policy-less, then asserts the gateway
+  actually denies inference (gateway-default-deny) rather than trusting the
+  "quota_without_access" badge the MaaS Setup UI's Access Control tab shows
+  for this exact situation (see docs/architecture/maas-domain-reference.md
+  Catalog item C).
+category: "Access Control"
+config:
+  new_subscription_name: "maaspal-fail-closed-test"
+  subscription_namespace: "models-as-a-service"  # install-specific tenant namespace; override if yours differs
+  model_name_prefix: "maaspal-fail-closed-model"
+  # confirmed-live reconciliation namespace (the cluster's existing simulator
+  # model lives here) — NOT "maaspal" (deploy_simulated_model's own default),
+  # which deploy/rbac-model-write.yaml's own comment flags as unverified.
+  model_namespace: "llm"
+  model_ready_timeout: 120
+  # Deliberately generous — rate limiting must not be why requests fail here,
+  # or the scenario wouldn't isolate access-control enforcement from
+  # rate-limit enforcement (see rate_limit_validation.yaml for that check).
+  token_limit: 1000000
+  request_count: 20
+  concurrency: 5
+  key_count: 1
+  prompt: "Hello, world!"
+tasks:
+  - name: deploy_simulated_model
+    params:
+      count: 1
+      name_prefix: "${config.model_name_prefix}"
+      namespace: "${config.model_namespace}"
+      ready_max_wait_s: "${config.model_ready_timeout}"
+  - name: create_user
+    params:
+      count: "${config.key_count}"
+      name_prefix: "maaspal-fail-closed-user"
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_from_shared_state: "deployed_models"
+      token_limit: "${config.token_limit}"
+      # Bind quota to the minted identity directly (ADR-018's second Update),
+      # not a group — an explicit empty owner_groups (ADR-023 bugfix: this
+      # sticks, doesn't silently default) keeps this identity's access
+      # scoped to exactly this one check. The model itself (deployed above)
+      # never gets a matching MaaSAuthPolicy from anything on the cluster,
+      # so denial no longer depends on which group the caller belongs to
+      # (ADR-018's third Update — system:authenticated already has blanket
+      # access to the cluster's shared simulator model, which is why that
+      # approach silently passed instead of denying).
+      owner_groups: []
+      owner_users_from_shared_state: "users"
+  - name: provision_keys_for_users
+    params:
+      key_name_prefix: "maaspal-fail-closed-key"
+      subscription: "${config.new_subscription_name}"
+    # REST-only check (ADR-019 pattern): the create response actually echoes
+    # the subscription this scenario just created for the minted identity.
+    assertions:
+      subscription_echo_match_count:
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== ${config.key_count}"
+  - name: send_requests
+    params:
+      model_from_shared_state: "deployed_models"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_pool: true
+    # promql pass-through form (ADR-015) — see single_key_load.yaml. No real
+    # MaaS-side metric distinguishes "denied for lack of auth policy" from
+    # any other gateway rejection, so these three harness-side counters
+    # together are what actually isolates the failure mode under test:
+    # almost everything should fail, none of it via rate limiting, and via
+    # an auth denial specifically.
+    assertions:
+      error_rate_pct:
+        promql: "${harness.inference_results.error_rate_pct}"
+        expect: "> 90"
+      rate_limited_count:
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "== 0"
+      unauthorized_count:
+        promql: "${harness.inference_results.unauthorized_count}"
+        expect: "> 0"
+cleanup: automatic

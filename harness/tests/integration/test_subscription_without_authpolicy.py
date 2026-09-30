@@ -1,4 +1,4 @@
-"""Integration test for the access_denied_no_policy scenario."""
+"""Integration test for the subscription_without_authpolicy scenario."""
 import os
 import uuid
 
@@ -10,21 +10,21 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def test_access_denied_no_policy_passes() -> None:
+async def test_subscription_without_authpolicy_passes() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/access_denied_no_policy.yaml", run_id)
+    runner = ScenarioRunner("scenarios/subscription_without_authpolicy.yaml", run_id)
     result = await runner.run()
 
     assert result.status == "PASS", (
-        f"access_denied_no_policy returned {result.status}. "
+        f"subscription_without_authpolicy returned {result.status}. "
         f"Task results: {result.tasks}. "
         f"Assertions: {result.assertions}"
     )
 
 
-async def test_access_denied_no_policy_subscription_restored() -> None:
+async def test_subscription_without_authpolicy_subscription_restored() -> None:
     """MaaSSubscription CR must be restored or deleted after the run."""
     from kubernetes import client as k8s_client, config as k8s_config
     from harness.runner import ScenarioRunner
@@ -35,9 +35,10 @@ async def test_access_denied_no_policy_subscription_restored() -> None:
         k8s_config.load_kube_config()
 
     api = k8s_client.CustomObjectsApi()
-    # Must match scenarios/access_denied_no_policy.yaml's config defaults
-    # (subscription_namespace/subscription_name) — see ADR-009's Update
-    # section for why this must be the MaaS tenant namespace, never maaspal.
+    # Must match scenarios/subscription_without_authpolicy.yaml's config
+    # defaults (subscription_namespace/new_subscription_name) — see ADR-009's
+    # Update section for why this must be the MaaS tenant namespace, never
+    # maaspal.
     namespace = os.environ.get("MAAS_SUBSCRIPTION_NAMESPACE", "models-as-a-service")
     sub_name = "maaspal-fail-closed-test"
 
@@ -53,7 +54,7 @@ async def test_access_denied_no_policy_subscription_restored() -> None:
         before = None if exc.status == 404 else (_ for _ in ()).throw(exc)  # type: ignore[assignment]
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/access_denied_no_policy.yaml", run_id)
+    runner = ScenarioRunner("scenarios/subscription_without_authpolicy.yaml", run_id)
     await runner.run()
 
     try:

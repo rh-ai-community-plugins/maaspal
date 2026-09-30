@@ -59,6 +59,15 @@ class SendRequestsTask(Task):
             api_keys = ctx.shared_state.get("api_keys", [])
             self.params["token"] = api_keys[int(key_index)]["key"]
 
+        model_from_shared_state = self.params.get("model_from_shared_state")
+        if model_from_shared_state:
+            # ADR-018's third Update: targets a model deploy_simulated_model
+            # (harness/tasks/model.py) just created at runtime, the same
+            # shared_state-lookup reason key_index exists above.
+            models = ctx.shared_state.get(model_from_shared_state, [])
+            if models:
+                self.params["model"] = f"{models[0]['namespace']}/{models[0]['name']}"
+
         url, model, token = await self._resolve_url_model_and_token(ctx)
         key_pool_entries = self._resolve_key_pool_entries(ctx)
 

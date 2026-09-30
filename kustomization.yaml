@@ -29,7 +29,7 @@ configMapGenerator:
       - scenarios/rate_limit_validation.yaml
       - scenarios/rate_limit_validation_existing_subscription.yaml
       - scenarios/metrics_fill.yaml
-      - scenarios/access_denied_no_policy.yaml
+      - scenarios/subscription_without_authpolicy.yaml
       - scenarios/api_key_lifecycle.yaml
       - scenarios/rate_limit_priority_precedence.yaml
       - scenarios/platform_health_check.yaml

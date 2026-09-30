@@ -11,7 +11,7 @@ from harness.tasks.subscription import (
 )
 
 _PARAMS = {
-    "subscription_name": "test-sub",
+    "new_subscription_name": "test-sub",
     "namespace": "models-as-a-service",
     "model_name": "facebook-opt-125m-simulated",
     "model_namespace": "llm",
@@ -128,7 +128,7 @@ async def test_cleanup_deletes_when_created() -> None:
             {
                 "original_subscription": None,
                 "_sub_created": True,
-                "subscription_name": "test-sub",
+                "new_subscription_name": "test-sub",
                 "subscription_namespace": "models-as-a-service",
             }
         )
@@ -150,7 +150,7 @@ async def test_cleanup_restores_when_preexisting() -> None:
             {
                 "original_subscription": original,
                 "_sub_created": False,
-                "subscription_name": "test-sub",
+                "new_subscription_name": "test-sub",
                 "subscription_namespace": "models-as-a-service",
             }
         )
@@ -285,9 +285,43 @@ async def test_owner_users_from_shared_state_absent_is_noop() -> None:
 
 async def test_missing_required_param_raises() -> None:
     task = ApplyRateLimitSubscriptionTask(
-        "apply_rate_limit_subscription", {"subscription_name": "test-sub"}
+        "apply_rate_limit_subscription", {"new_subscription_name": "test-sub"}
     )
     with pytest.raises(KeyError):
+        await task.run(_make_ctx())
+
+
+async def test_model_from_shared_state_used_when_provided() -> None:
+    """ADR-018's third Update: targets a model deploy_simulated_model just
+    created at runtime — task params can't reference shared_state via YAML
+    templating, so this reads it directly, mirroring
+    owner_users_from_shared_state above."""
+    params = {k: v for k, v in _PARAMS.items() if k not in ("model_name", "model_namespace")}
+    params["model_from_shared_state"] = "deployed_models"
+
+    with patch("harness.tasks.subscription.k8s_client.CustomObjectsApi") as mock_cls:
+        api = MagicMock()
+        mock_cls.return_value = api
+        api.get_namespaced_custom_object.side_effect = _api_exc(404)
+
+        task = ApplyRateLimitSubscriptionTask("apply_rate_limit_subscription", params)
+        ctx = _make_ctx(
+            {"deployed_models": [{"name": "maaspal-fail-closed-model-abcd1234-1", "namespace": "llm"}]}
+        )
+        await task.run(ctx)
+
+    body = _body_from(api.create_namespaced_custom_object)
+    model_ref = body["spec"]["modelRefs"][0]
+    assert model_ref["name"] == "maaspal-fail-closed-model-abcd1234-1"
+    assert model_ref["namespace"] == "llm"
+
+
+async def test_model_from_shared_state_missing_raises() -> None:
+    params = {k: v for k, v in _PARAMS.items() if k not in ("model_name", "model_namespace")}
+    params["model_from_shared_state"] = "deployed_models"
+
+    task = ApplyRateLimitSubscriptionTask("apply_rate_limit_subscription", params)
+    with pytest.raises(RuntimeError, match="deploy_simulated_model"):
         await task.run(_make_ctx())
 
 
