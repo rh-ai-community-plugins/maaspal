@@ -1,14 +1,26 @@
 name: rate_limit_validation
-description: "Rate-limit validation — applies a MaaSSubscription CR (per-model token rate limit) and asserts observed token throughput stays at or below it"
+description: "Rate-limit validation — applies a MaaSSubscription CR (per-model token rate limit) and asserts enforcement actually kicks in at the configured budget, not early or with excessive overshoot"
 category: "Rate Limiting"
 config:
   new_subscription_name: "maaspal-rate-limit-test"
   subscription_namespace: "models-as-a-service"  # install-specific tenant namespace; override if yours differs
   target_model_name: ""       # required — the MaaSModelRef's own name, e.g. "facebook-opt-125m-simulated" (not the plain model id)
   target_model_namespace: ""  # required — the namespace that MaaSModelRef lives in, e.g. "llm"
-  token_limit: 50             # tokens/sec — see harness/tasks/subscription.py for why the window defaults to 1s to make this directly comparable
-  request_count: 100
-  concurrency: 20
+  token_limit: 50             # the budget this whole run should exceed exactly once, near the start
+  # Deliberately much longer than this scenario's own runtime — effectively
+  # "never resets during the test" (the subscription gets deleted at cleanup
+  # regardless). A short window (e.g. the "1s" harness/tasks/subscription.py
+  # otherwise defaults to) lets the budget silently refill mid-run, which
+  # both hides whether enforcement is actually working (confirmed live:
+  # concurrency: 1 sequential requests only generate ~30-40 tokens/sec of
+  # demand, so a 1s/50-token budget never even gets exceeded) and lets the
+  # OpenAI SDK's own automatic retry-on-429 land in a fresh window and
+  # quietly succeed, masking a real denial. With a window this long, once
+  # the budget is exceeded it stays exceeded for the rest of the run, so
+  # first_rate_limited_at_tokens below is a clean, reliable signal.
+  token_window: "24h"
+  request_count: 20
+  concurrency: 1
   key_count: 1
   prompt: "Hello, world!"
   # Limitador's gateway counters are scoped by the target model's HTTPRoute name
@@ -28,6 +40,7 @@ tasks:
       model_name: "${config.target_model_name}"
       model_namespace: "${config.target_model_namespace}"
       token_limit: "${config.token_limit}"
+      token_window: "${config.token_window}"
   - name: provision_api_key
     params:
       key_name: "maaspal-rate-key"
@@ -56,18 +69,29 @@ tasks:
       concurrency: "${config.concurrency}"
       prompt: "${config.prompt}"
       key_pool: true
-    # promql pass-through form (ADR-015) — see single_key_load.yaml.
+    # Confirmed live: "throughput stays <= the limit" and "error rate stays
+    # low" contradict the actual point of this scenario — we WANT the limit
+    # to bite, so a low error rate would mean it isn't. The precise,
+    # meaningful check is where enforcement first kicks in relative to the
+    # configured budget, not whether it stayed low.
     assertions:
-      token_throughput_per_sec:
-        promql: "${harness.inference_results.token_throughput_per_sec}"
-        expect: "<= ${config.token_limit}"
-      error_rate_pct:
-        promql: "${harness.inference_results.error_rate_pct}"
-        expect: "< 30"
+      # Must reach the full budget before triggering...
+      first_rate_limit_reaches_budget:
+        promql: "${harness.inference_results.first_rate_limited_at_tokens} - ${config.token_limit}"
+        expect: ">= 0"
+      # ...but also shouldn't overshoot it by more than one request's worth
+      # of spillover — with concurrency: 1, at most one request is ever
+      # in-flight, so the only possible overshoot is that single request's
+      # own token cost (it was already accepted when the budget ran out and
+      # still completes, see harness/tasks/inference.py's
+      # first_rate_limited_at_tokens comment).
+      first_rate_limit_within_spillover:
+        promql: "${harness.inference_results.first_rate_limited_at_tokens} - ${config.token_limit}"
+        expect: "<= 100"
       # Cross-checks that Limitador itself actually denied requests once the
       # configured token_limit was exceeded — not just that the harness's own
-      # client-side throughput math stayed under budget (ADR-015's flagged gap:
-      # this scenario's other assertions never verified real enforcement).
+      # client-side accounting agrees (ADR-015's flagged gap: this scenario's
+      # other assertions never verified real enforcement).
       maas_denied_by_rate_limit:
         promql: >-
           sum(limited_calls{limitador_namespace="${config.limitador_namespace}"})

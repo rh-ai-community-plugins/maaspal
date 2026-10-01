@@ -74,6 +74,80 @@ async def _wait_for_subscription_ready(
         await asyncio.sleep(_READY_POLL_INTERVAL_S)
 
 
+_KUADRANT_GROUP = "kuadrant.io"
+_KUADRANT_VERSION = "v1alpha1"
+_TRLP_PLURAL = "tokenratelimitpolicies"
+_DEFAULT_TRLP_READY_MAX_WAIT_S = 60.0
+_TRLP_POLL_INTERVAL_S = 3.0
+
+
+def _trlp_ready(api: k8s_client.CustomObjectsApi, model_name: str, model_namespace: str) -> bool:
+    # Same label-selector lookup as harness/tasks/platform_health.py:
+    # CheckModelHealthTask — found by label, not an assumed generated name.
+    items = api.list_namespaced_custom_object(
+        group=_KUADRANT_GROUP,
+        version=_KUADRANT_VERSION,
+        namespace=model_namespace,
+        plural=_TRLP_PLURAL,
+        label_selector=f"maas.opendatahub.io/model={model_name}",
+    ).get("items", [])
+    if not items:
+        return False
+    conditions = items[0].get("status", {}).get("conditions", [])
+    accepted = any(c.get("type") == "Accepted" and c.get("status") == "True" for c in conditions)
+    enforced = any(c.get("type") == "Enforced" and c.get("status") == "True" for c in conditions)
+    return accepted and enforced
+
+
+async def _wait_for_token_rate_limit_policies_ready(
+    api: k8s_client.CustomObjectsApi,
+    models: list[dict],
+    max_wait_s: float,
+    log_prefix: str,
+) -> None:
+    """Poll each model's TokenRateLimitPolicy until both its Accepted and
+    Enforced conditions are True.
+
+    Distinct from _wait_for_subscription_ready above: multiple subscriptions
+    can reference overlapping models and race each other reconciling the
+    SAME per-model TokenRateLimitPolicy — confirmed live: "the object has
+    been modified; please apply your changes to the latest version and try
+    again" conflicts, auto-retried by the controller, while creating several
+    subscriptions in a distributed spread (harness/tasks/subscription.py's
+    ProvisionSubscriptionsDistributedTask). A subscription's own
+    status.phase can be set (even "Degraded") before those races finish
+    resolving, so it isn't the signal that actually gates traffic — this
+    checks the real thing instead, same principle as _settle_and_evaluate()
+    in harness/runner.py uses for metrics.
+    """
+    unique = {(m["name"], m["namespace"]) for m in models}
+    pending = set(unique)
+    start = time.monotonic()
+    while pending:
+        for key in list(pending):
+            name, namespace = key
+            if _trlp_ready(api, name, namespace):
+                pending.discard(key)
+        if not pending:
+            print(
+                f"[{log_prefix}] TokenRateLimitPolicy ready (Accepted+Enforced) for "
+                f"all {len(unique)} model(s)",
+                flush=True,
+            )
+            return
+        elapsed = time.monotonic() - start
+        if elapsed >= max_wait_s:
+            still_pending = sorted(name for name, _ in pending)
+            print(
+                f"[{log_prefix}] TokenRateLimitPolicy still not Accepted+Enforced after "
+                f"{max_wait_s}s for {still_pending} — proceeding anyway; the next task "
+                "will surface the real error if it's still not ready",
+                flush=True,
+            )
+            return
+        await asyncio.sleep(_TRLP_POLL_INTERVAL_S)
+
+
 def _subscription_body(
     sub_name: str,
     namespace: str,
@@ -408,6 +482,9 @@ class ProvisionSubscriptionsDistributedTask(Task):
         owner_groups = self.params.get("owner_groups", _DEFAULT_OWNER_GROUPS)
         owner_users = self.params.get("owner_users") or []
         ready_max_wait_s = float(self.params.get("ready_max_wait_s", _DEFAULT_READY_MAX_WAIT_S))
+        token_rate_limit_ready_max_wait_s = float(
+            self.params.get("token_rate_limit_ready_max_wait_s", _DEFAULT_TRLP_READY_MAX_WAIT_S)
+        )
 
         cap = min(max_models_per_sub, len(deployed_models)) if max_models_per_sub > 0 else len(deployed_models)
         usage_counts: dict[str, int] = {m["name"]: 0 for m in deployed_models}
@@ -450,6 +527,12 @@ class ProvisionSubscriptionsDistributedTask(Task):
             await ctx.emit_assertion_state()
 
         ctx.shared_state["distributed_subscriptions"] = records
+
+        all_model_refs = [m for rec in records for m in rec["model_refs"]]
+        await _wait_for_token_rate_limit_policies_ready(
+            api, all_model_refs, token_rate_limit_ready_max_wait_s, "provision_subscriptions_distributed"
+        )
+
         return TaskResult(
             task_name=self.name,
             status="PASS",

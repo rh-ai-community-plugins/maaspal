@@ -1,5 +1,5 @@
 name: stub_failing
-description: "Phase 1 stub scenario — fails mid-way; cleanup must still run"
+description: "Test fixture — fails mid-way; cleanup must still run"
 config: {}
 tasks:
   - name: stub_pass

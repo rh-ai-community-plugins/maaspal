@@ -28,10 +28,23 @@ class ApplyAuthPolicyTask(Task):
 
         policy_name = str(self.params.get("policy_name", "maaspal-test-auth-policy"))
         namespace = str(self.params["namespace"])
-        model_name = str(self.params["model_name"])
-        model_namespace = str(self.params["model_namespace"])
         subject_groups = self.params.get("subject_groups") or []
         subject_users = self.params.get("subject_users") or []
+
+        # Covers every model deploy_simulated_model created this run in one
+        # policy — a scenario deploying N models (e.g. multi_model_full_load)
+        # needs gateway access granted for all of them, not just one; task
+        # params can't reference runtime shared_state via YAML templating,
+        # same reason model_from_shared_state exists on send_requests/
+        # apply_rate_limit_subscription.
+        model_refs_from_shared_state = self.params.get("model_refs_from_shared_state")
+        if model_refs_from_shared_state:
+            models = ctx.shared_state.get(model_refs_from_shared_state, [])
+            model_refs = [{"name": m["name"], "namespace": m["namespace"]} for m in models]
+        else:
+            model_refs = [
+                {"name": str(self.params["model_name"]), "namespace": str(self.params["model_namespace"])}
+            ]
 
         api = k8s_client.CustomObjectsApi()
 
@@ -61,9 +74,10 @@ class ApplyAuthPolicyTask(Task):
                     "groups": [{"name": g} for g in subject_groups],
                     "users": subject_users,
                 },
-                "modelRefs": [{"name": model_name, "namespace": model_namespace}],
+                "modelRefs": model_refs,
             },
         }
+        models_summary = ", ".join(f"{m['namespace']}/{m['name']}" for m in model_refs)
 
         if ctx.shared_state["_policy_created"]:
             api.create_namespaced_custom_object(
@@ -71,7 +85,7 @@ class ApplyAuthPolicyTask(Task):
             )
             print(
                 f"[apply_auth_policy] created {policy_name} "
-                f"subjects={subject_groups}/{subject_users} for {model_namespace}/{model_name}",
+                f"subjects={subject_groups}/{subject_users} for {models_summary}",
                 flush=True,
             )
         else:
@@ -85,7 +99,7 @@ class ApplyAuthPolicyTask(Task):
             )
             print(
                 f"[apply_auth_policy] patched {policy_name} "
-                f"subjects={subject_groups}/{subject_users} for {model_namespace}/{model_name}",
+                f"subjects={subject_groups}/{subject_users} for {models_summary}",
                 flush=True,
             )
 

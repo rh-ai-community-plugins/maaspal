@@ -4,10 +4,9 @@ description: >-
   eligible for the same caller identity (system:authenticated) with
   different priorities, then confirms auto-selection (no explicit
   `subscription` pinned) actually picks the higher-priority one, via the
-  create response's echoed `subscription` field (see ADR-021). Confirmed live
-  (this cluster): priority isn't arbitrated per-request — MaaS resolves it
-  once, at key-creation time, deciding which subscription's rate limit a
-  caller's key gets bound to.
+  create response's echoed `subscription` field. Priority isn't arbitrated
+  per-request — MaaS resolves it once, at key-creation time, deciding which
+  subscription's rate limit a caller's key gets bound to.
 category: "Rate Limiting"
 config:
   subscription_namespace: "models-as-a-service"  # install-specific tenant namespace; override if yours differs

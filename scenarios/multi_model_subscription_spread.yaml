@@ -1,5 +1,5 @@
 name: multi_model_subscription_spread
-description: "Deploy N simulated models via ExternalModel CRs, then create M subscriptions randomly distributed across them (each subscription can reference multiple models)"
+description: "Deploy N simulated models, then create M subscriptions randomly distributed across them (each subscription can reference multiple models)"
 category: "Load Testing"
 config:
   model_count: 3

@@ -2,18 +2,22 @@ name: rate_limit_shared_across_users
 description: >-
   Empirically checks whether two distinct caller identities sharing one
   MaaSSubscription get one pooled token-rate-limit allowance or independent
-  per-user allowances. ASSERTION FAILURE on error_rate_pct_user_b HERE IS THE
-  FINDING ("limits are shared"), not necessarily a harness bug — see ADR-023.
+  per-user allowances. ASSERTION FAILURE on first_rate_limit_reaches_budget_user_b
+  HERE IS THE FINDING ("limits are shared"), not necessarily a harness bug.
 category: "Rate Limiting"
 config:
   new_subscription_name: "maaspal-shared-pool-test"
   subscription_namespace: "models-as-a-service"  # install-specific tenant namespace; override if yours differs
   target_model_name: ""       # required — the MaaSModelRef's own name
   target_model_namespace: ""  # required — the namespace that MaaSModelRef lives in
-  # Deliberately tight: one user's own burst alone should mostly succeed,
-  # but both users' combined usage would exceed this if the allowance were
-  # pooled rather than per-user. Tune against request_count/prompt size once
-  # run live — see ADR-023's Verification notes.
+  # Deliberately tight relative to request_count/prompt size: user A's burst
+  # alone should fully exhaust this (first_rate_limit_reaches_budget_user_a
+  # below) — a clean, unambiguous precondition. What happens next to user B
+  # is the actual signal: a fresh, untouched 200-token budget of their own
+  # (isolated) looks the same as user A's *first* burst did; a depleted
+  # shared pool (shared) means user B starts getting denied close to
+  # immediately. Tune against request_count/prompt size once run live if
+  # user A doesn't reliably exhaust it — see ADR-023's Verification notes.
   token_limit: 200
   # Deliberately long relative to the scenario's own runtime (two users
   # minted, subscription applied and awaited-ready, two sequential bursts) —
@@ -24,7 +28,12 @@ config:
   # outlasts the whole run so both bursts land in the same window.
   token_window: "10m"
   request_count: 20
-  concurrency: 5
+  # Sequential on purpose (same reasoning as rate_limit_validation.yaml):
+  # keeps "did this user exhaust the budget" a clean one-request-at-a-time
+  # question. The long token_window above means sequential round trips
+  # (a handful of seconds for request_count requests) still comfortably
+  # accumulate well within the window — no race to worry about here.
+  concurrency: 1
   prompt: "Hello, world!"
 tasks:
   - name: create_user
@@ -66,12 +75,16 @@ tasks:
       prompt: "${config.prompt}"
       key_index: 0
       result_key: "inference_results_user_a"
-    # User A goes first, against a fresh quota — should mostly succeed
-    # regardless of whether the limit is shared or per-user.
+    # User A goes first, against a fresh quota. Same precise mechanic as
+    # rate_limit_validation.yaml: confirms user A's burst genuinely exhausts
+    # the *entire* shared budget (not just "got some 429s") — the necessary
+    # precondition for user B's outcome below to mean anything. Without this,
+    # user B succeeding wouldn't distinguish "isolated" from "shared, but
+    # user A happened not to use it all" — an inconclusive test either way.
     assertions:
-      error_rate_pct_user_a:
-        promql: "${harness.inference_results_user_a.error_rate_pct}"
-        expect: "< 20"
+      first_rate_limit_reaches_budget_user_a:
+        promql: "${harness.inference_results_user_a.first_rate_limited_at_tokens} - ${config.token_limit}"
+        expect: ">= 0"
   - name: send_requests_as_second_user
     params:
       model: "${config.target_model_namespace}/${config.target_model_name}"
@@ -81,15 +94,17 @@ tasks:
       key_index: 1
       result_key: "inference_results_user_b"
     # User B goes immediately after, on their OWN key but the SAME
-    # subscription. Encodes the "independent per-user allowance" hypothesis
-    # (see docs/architecture/empirical-verification-checklist.md's
-    # counters: [{expression: auth.identity.userid}] observation) as the
-    # expected outcome. A FAIL here — user B getting rate-limited because
-    # user A already consumed the "shared" quota — is the actual empirical
-    # finding this scenario exists to surface, not a sign the harness is
-    # broken. See ADR-023 for how to interpret either result.
+    # subscription. Same assertion as user A above, reused as the actual
+    # signal: under isolation, user B has an untouched budget and should
+    # exhaust it at roughly the same token count user A did (PASS). Under
+    # sharing, user B's pool is already nearly empty from user A's burst, so
+    # user B gets denied almost immediately — at a token count far below
+    # token_limit — and this assertion FAILS. That FAIL is the actual
+    # empirical finding this scenario exists to surface ("limits are
+    # shared"), not a sign the harness is broken. See ADR-023 for how to
+    # interpret either result.
     assertions:
-      error_rate_pct_user_b:
-        promql: "${harness.inference_results_user_b.error_rate_pct}"
-        expect: "< 20"
+      first_rate_limit_reaches_budget_user_b:
+        promql: "${harness.inference_results_user_b.first_rate_limited_at_tokens} - ${config.token_limit}"
+        expect: ">= 0"
 cleanup: automatic

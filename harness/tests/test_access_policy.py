@@ -169,3 +169,32 @@ async def test_missing_required_param_raises() -> None:
     task = ApplyAuthPolicyTask("apply_auth_policy", {"policy_name": "test-policy"})
     with pytest.raises(KeyError):
         await task.run(_make_ctx())
+
+
+async def test_model_refs_from_shared_state_covers_all_deployed_models() -> None:
+    """A scenario deploying N models (e.g. multi_model_full_load) needs
+    gateway access granted for all of them in one policy, not just one."""
+    params = {k: v for k, v in _PARAMS.items() if k not in ("model_name", "model_namespace")}
+    params["model_refs_from_shared_state"] = "deployed_models"
+
+    with patch("harness.tasks.access_policy.k8s_client.CustomObjectsApi") as mock_cls:
+        api = MagicMock()
+        mock_cls.return_value = api
+        api.get_namespaced_custom_object.side_effect = _api_exc(404)
+
+        task = ApplyAuthPolicyTask("apply_auth_policy", params)
+        ctx = _make_ctx(
+            {
+                "deployed_models": [
+                    {"name": "maaspal-sim-abcd-1", "namespace": "maaspal"},
+                    {"name": "maaspal-sim-abcd-2", "namespace": "maaspal"},
+                ]
+            }
+        )
+        await task.run(ctx)
+
+    body = _body_from(api.create_namespaced_custom_object)
+    assert body["spec"]["modelRefs"] == [
+        {"name": "maaspal-sim-abcd-1", "namespace": "maaspal"},
+        {"name": "maaspal-sim-abcd-2", "namespace": "maaspal"},
+    ]

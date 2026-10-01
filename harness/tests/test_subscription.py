@@ -8,6 +8,7 @@ from harness.tasks.subscription import (
     ApplyPriorityTestSubscriptionsTask,
     ApplyRateLimitSubscriptionTask,
     _wait_for_subscription_ready,
+    _wait_for_token_rate_limit_policies_ready,
 )
 
 _PARAMS = {
@@ -481,3 +482,88 @@ async def test_priority_subscriptions_cleanup_continues_after_one_failure() -> N
         await task.cleanup(ctx)
 
     assert api.delete_namespaced_custom_object.call_count == 2
+
+
+def _trlp(*, accepted: bool = True, enforced: bool = True) -> dict:
+    return {
+        "status": {
+            "conditions": [
+                {"type": "Accepted", "status": "True" if accepted else "False"},
+                {"type": "Enforced", "status": "True" if enforced else "False"},
+            ]
+        }
+    }
+
+
+async def test_wait_for_token_rate_limit_policies_ready_returns_immediately() -> None:
+    api = MagicMock()
+    api.list_namespaced_custom_object.return_value = {"items": [_trlp()]}
+
+    await _wait_for_token_rate_limit_policies_ready(
+        api,
+        [{"name": "model-a", "namespace": "maaspal"}],
+        max_wait_s=30.0,
+        log_prefix="test",
+    )
+
+    api.list_namespaced_custom_object.assert_called_once()
+
+
+async def test_wait_for_token_rate_limit_policies_ready_dedups_shared_models() -> None:
+    """Multiple subscriptions commonly reference the same model in a
+    distributed spread — must only poll each unique model once per tick."""
+    api = MagicMock()
+    api.list_namespaced_custom_object.return_value = {"items": [_trlp()]}
+
+    await _wait_for_token_rate_limit_policies_ready(
+        api,
+        [
+            {"name": "model-a", "namespace": "maaspal"},
+            {"name": "model-a", "namespace": "maaspal"},
+            {"name": "model-b", "namespace": "maaspal"},
+        ],
+        max_wait_s=30.0,
+        log_prefix="test",
+    )
+
+    assert api.list_namespaced_custom_object.call_count == 2
+
+
+async def test_wait_for_token_rate_limit_policies_ready_polls_until_conditions_true() -> None:
+    """The real race this closes: creating several subscriptions that share
+    a model races the controller reconciling that model's
+    TokenRateLimitPolicy ("the object has been modified" conflicts,
+    confirmed live) — the policy isn't Accepted+Enforced immediately."""
+    with patch("harness.tasks.subscription.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        api = MagicMock()
+        api.list_namespaced_custom_object.side_effect = [
+            {"items": [_trlp(accepted=False, enforced=False)]},
+            {"items": [_trlp()]},
+        ]
+
+        await _wait_for_token_rate_limit_policies_ready(
+            api,
+            [{"name": "model-a", "namespace": "maaspal"}],
+            max_wait_s=30.0,
+            log_prefix="test",
+        )
+
+    assert api.list_namespaced_custom_object.call_count == 2
+    assert mock_sleep.call_count == 1
+
+
+async def test_wait_for_token_rate_limit_policies_ready_gives_up_honestly_after_timeout() -> None:
+    """Never becoming ready must not hang forever or raise — the next task
+    (send_requests) surfaces the real error if it's still not ready."""
+    with patch("harness.tasks.subscription.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        api = MagicMock()
+        api.list_namespaced_custom_object.return_value = {"items": []}
+
+        await _wait_for_token_rate_limit_policies_ready(
+            api,
+            [{"name": "model-a", "namespace": "maaspal"}],
+            max_wait_s=0.0,
+            log_prefix="test",
+        )
+
+    mock_sleep.assert_not_called()

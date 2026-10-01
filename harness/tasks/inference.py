@@ -61,20 +61,82 @@ class SendRequestsTask(Task):
 
         model_from_shared_state = self.params.get("model_from_shared_state")
         if model_from_shared_state:
-            # ADR-018's third Update: targets a model deploy_simulated_model
-            # (harness/tasks/model.py) just created at runtime, the same
-            # shared_state-lookup reason key_index exists above.
+            # Targets a model deploy_simulated_model (harness/tasks/model.py)
+            # just created at runtime. Confirmed live: such a model never
+            # appears in GET /v1/models — that requires full governance
+            # pairing (a MaaSSubscription AND a MaaSAuthPolicy, which a
+            # scenario like subscription_without_authpolicy deliberately
+            # never has). But its own dedicated per-model route — auto-
+            # created by the LLMInferenceService controller, confirmed live
+            # to be reachable as soon as RuntimeReady — works directly at
+            # {MAAS_API_URL}/{namespace}/{name}/..., with the bare model
+            # name in the request body. Confirmed end-to-end live, including
+            # that this path still goes through the same gateway AuthPolicy
+            # (a subscription with no matching policy still correctly
+            # denies; one with a policy still succeeds).
             models = ctx.shared_state.get(model_from_shared_state, [])
             if models:
-                self.params["model"] = f"{models[0]['namespace']}/{models[0]['name']}"
+                namespace, name = models[0]["namespace"], models[0]["name"]
+                self.params["model"] = name
+                self.params["url"] = f"{ctx.maas_api_url}/{namespace}/{name}/v1"
+
+        key_pool_entries = self._resolve_key_pool_entries(ctx)
+        has_target_models = any(e.get("target_model") for e in key_pool_entries)
+
+        # The per-key loop below overrides both url and model for any entry
+        # carrying its own target_model, so the value resolved here is only
+        # ever used as a placeholder for entries that don't — this just
+        # avoids _resolve_url_model_and_token performing a real (and
+        # pointless) GET /v1/models discovery call in that case.
+        if has_target_models:
+            self.params.setdefault("url", f"{ctx.maas_api_url}/v1")
+
+        subscription_aware_models: dict[int, str] = {}
+        if (
+            key_pool_entries
+            and not has_target_models
+            and not self.params.get("model")
+            and any(e.get("subscription") for e in key_pool_entries)
+        ):
+            # No explicit model and no per-key target_model already resolved
+            # — an auto-selected subscription (blank `subscription` param)
+            # and an independently auto-discovered/DEFAULT_MODEL model are
+            # otherwise two unrelated choices with no guarantee they're
+            # compatible (confirmed live: exactly what broke
+            # multi_model_full_load before target_model was wired through).
+            # Cross-reference each key's own bound subscription against
+            # /v1/models' per-model subscriptions[] list so a key only ever
+            # targets a model it can actually reach.
+            subscription_aware_models = await self._resolve_models_by_subscription(
+                ctx, key_pool_entries
+            )
 
         url, model, token = await self._resolve_url_model_and_token(ctx)
-        key_pool_entries = self._resolve_key_pool_entries(ctx)
 
         if key_pool_entries:
             key_strings = [e["key"] for e in key_pool_entries]
-            key_models = [e.get("target_model") for e in key_pool_entries]
-            clients = [AsyncOpenAI(api_key=k, base_url=url) for k in key_strings]
+            key_urls: list[str] = []
+            key_models: list[str | None] = []
+            for i, entry in enumerate(key_pool_entries):
+                sub_model_id = subscription_aware_models.get(i)
+                target = entry.get("target_model")
+                if sub_model_id:
+                    # Already registered (found via /v1/models) — reachable
+                    # through the generic discovered gateway URL.
+                    key_urls.append(url)
+                    key_models.append(sub_model_id)
+                elif target and "/" in target:
+                    # A dynamically-deployed model (provision_keys_
+                    # distributed) — same reasoning as model_from_shared_
+                    # state above: use its own dedicated per-model route
+                    # since it isn't registered in /v1/models yet.
+                    t_namespace, t_name = target.split("/", 1)
+                    key_urls.append(f"{ctx.maas_api_url}/{t_namespace}/{t_name}/v1")
+                    key_models.append(t_name)
+                else:
+                    key_urls.append(url)
+                    key_models.append(target)
+            clients = [AsyncOpenAI(api_key=k, base_url=u) for k, u in zip(key_strings, key_urls)]
             print(
                 f"[send_requests] base_url={url} model={model} "
                 f"keys=[{', '.join(_redact(k) for k in key_strings)}] "
@@ -98,6 +160,13 @@ class SendRequestsTask(Task):
         total_tokens_sent = 0
         prompt_tokens_sent = 0
         completion_tokens_sent = 0
+        # Cumulative total_tokens_sent at the moment of the FIRST 429 — lets
+        # a scenario assert the rate limit actually triggered around the
+        # configured budget (with an expected spillover margin for whichever
+        # in-flight request pushed the total over, e.g. one request starting
+        # at 49/50 tokens used that still completes, taking the total to 57)
+        # instead of just "some requests eventually got denied".
+        first_rate_limited_at_tokens: int | None = None
         run_start = time.monotonic()
         last_emit = 0.0
 
@@ -106,6 +175,7 @@ class SendRequestsTask(Task):
         async def do_request(client_idx: int) -> None:
             nonlocal success, fail, last_emit, rate_limited_count, unauthorized_count
             nonlocal total_tokens_sent, prompt_tokens_sent, completion_tokens_sent
+            nonlocal first_rate_limited_at_tokens
             async with sem:
                 t0 = time.monotonic()
                 effective_model = (key_models[client_idx] if key_models else None) or model
@@ -129,6 +199,8 @@ class SendRequestsTask(Task):
                     fail += 1
                     if exc.status_code == 429:
                         rate_limited_count += 1
+                        if first_rate_limited_at_tokens is None:
+                            first_rate_limited_at_tokens = total_tokens_sent
                     elif exc.status_code in (401, 403):
                         unauthorized_count += 1
                     print(
@@ -142,7 +214,7 @@ class SendRequestsTask(Task):
                 latencies.append((time.monotonic() - t0) * 1000)
                 total = success + fail
                 elapsed = time.monotonic() - run_start
-                ctx.shared_state[result_key] = {
+                result_data = {
                     "total_requests": total,
                     "success_count": success,
                     "fail_count": fail,
@@ -156,6 +228,13 @@ class SendRequestsTask(Task):
                     "completion_tokens_sent": completion_tokens_sent,
                     **_percentiles(latencies),
                 }
+                # Only present once a 429 has actually happened — an absent
+                # key (not a 0/None placeholder) is what keeps a referencing
+                # assertion honestly PENDING instead of misreading "not yet
+                # rate limited" as "rate limited at 0 tokens".
+                if first_rate_limited_at_tokens is not None:
+                    result_data["first_rate_limited_at_tokens"] = first_rate_limited_at_tokens
+                ctx.shared_state[result_key] = result_data
                 ctx.shared_state["task_progress"] = {"current": total, "total": count}
                 now = time.monotonic()
                 if now - last_emit >= _DEBOUNCE_SECS:
@@ -267,6 +346,50 @@ class SendRequestsTask(Task):
         if not self.params.get("key_pool"):
             return []
         return list(ctx.shared_state.get("api_keys", []))
+
+    async def _resolve_models_by_subscription(
+        self, ctx: TaskContext, key_pool_entries: list[dict]
+    ) -> dict[int, str]:
+        """Map each key-pool index to a model id it's actually eligible for,
+        by cross-referencing the key's own bound `subscription` (echoed by
+        every provision_api_key/provision_keys_for_users/provision_keys_
+        distributed create response) against /v1/models' per-model
+        `subscriptions: [{name}]` list. A key whose subscription isn't
+        listed under any model is left unresolved — falls back to whatever
+        the default `model` param/discovery already resolves to, logged
+        rather than silently mismatched.
+        """
+        import httpx
+
+        discovery_url = f"{ctx.maas_api_url}/v1/models"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                discovery_url,
+                headers={"Authorization": f"Bearer {ctx.sa_token}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        sub_to_model: dict[str, str] = {}
+        for m in data.get("data", []):
+            for sub in m.get("subscriptions") or []:
+                sub_to_model.setdefault(sub.get("name"), m["id"])
+
+        resolved: dict[int, str] = {}
+        for i, entry in enumerate(key_pool_entries):
+            sub_name = entry.get("subscription")
+            if not sub_name:
+                continue
+            model_id = sub_to_model.get(sub_name)
+            if model_id:
+                resolved[i] = model_id
+            else:
+                print(
+                    f"[send_requests] key subscription={sub_name!r} not listed under "
+                    "any model in /v1/models — falling back to the default model",
+                    flush=True,
+                )
+        return resolved
 
     async def cleanup(self, ctx: TaskContext) -> None:
         pass

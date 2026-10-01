@@ -4,8 +4,7 @@ description: >-
   (/maas-api/v1/api-keys*), no Kubernetes CR read or write at all. Confirms
   the create response honestly echoes what was requested, that /search
   actually finds the keys this run created, and that revoking a key denies
-  the very next request rather than after some caching delay (see ADR-019 and
-  docs/architecture/empirical-verification-checklist.md).
+  the very next request rather than after some caching delay.
 category: "API Key Lifecycle"
 config:
   key_name: "maaspal-lifecycle-key"

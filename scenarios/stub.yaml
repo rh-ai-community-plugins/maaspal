@@ -1,5 +1,5 @@
 name: stub
-description: "Phase 1 stub scenario — two tasks that both pass"
+description: "Test fixture — two tasks that both pass"
 config:
   dummy_value: 42
 tasks:

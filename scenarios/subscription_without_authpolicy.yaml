@@ -6,8 +6,7 @@ description: >-
   identity, but leaves the model policy-less, then asserts the gateway
   actually denies inference (gateway-default-deny) rather than trusting the
   "quota_without_access" badge the MaaS Setup UI's Access Control tab shows
-  for this exact situation (see docs/architecture/maas-domain-reference.md
-  Catalog item C).
+  for this exact situation.
 category: "Access Control"
 config:
   new_subscription_name: "maaspal-fail-closed-test"

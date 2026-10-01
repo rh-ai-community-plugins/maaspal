@@ -173,6 +173,56 @@ async def test_send_requests_counts_unauthorized_status(status_code: int) -> Non
     assert ir["rate_limited_count"] == 0
 
 
+async def test_first_rate_limited_at_tokens_captures_cumulative_total() -> None:
+    """Precisely calibrates rate-limit enforcement, not just "some requests
+    eventually got denied": records total_tokens_sent at the moment of the
+    FIRST 429, so a scenario can assert the limit triggered around its
+    configured budget (allowing for one in-flight request's spillover)."""
+
+    def _response_with_usage(*args, **kwargs) -> MagicMock:
+        r = MagicMock()
+        r.usage.total_tokens = 30
+        return r
+
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = AsyncMock(
+            side_effect=[_response_with_usage(), _response_with_usage(), _api_status_error(429)]
+        )
+        mock_cls.return_value = m
+
+        task = SendRequestsTask(
+            "send_requests",
+            {"count": "3", "concurrency": "1", "url": "http://m.test", "token": "sk-t"},
+        )
+        ctx = _make_ctx()
+        await task.run(ctx)
+
+    ir = ctx.shared_state["inference_results"]
+    assert ir["first_rate_limited_at_tokens"] == 60
+
+
+async def test_first_rate_limited_at_tokens_absent_when_never_rate_limited() -> None:
+    def _response_with_usage(*args, **kwargs) -> MagicMock:
+        r = MagicMock()
+        r.usage.total_tokens = 30
+        return r
+
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = AsyncMock(side_effect=_response_with_usage)
+        mock_cls.return_value = m
+
+        task = SendRequestsTask(
+            "send_requests",
+            {"count": "2", "concurrency": "1", "url": "http://m.test", "token": "sk-t"},
+        )
+        ctx = _make_ctx()
+        await task.run(ctx)
+
+    assert "first_rate_limited_at_tokens" not in ctx.shared_state["inference_results"]
+
+
 async def test_send_requests_debounce() -> None:
     """Debounce: emit_assertion_state fires at most once per 100 ms burst."""
     emit_times: list[float] = []
@@ -208,7 +258,7 @@ async def test_key_pool_distribution() -> None:
     """Key-pool distribution: requests spread floor(M/N) each, remainder to first."""
     calls_by_key: dict[str, int] = {}
 
-    def _make_tracking_client(api_key: str | None = None, base_url: str | None = None) -> MagicMock:
+    def _make_tracking_client(api_key: str | None = None, base_url: str | None = None, **_kwargs) -> MagicMock:
         m = MagicMock()
 
         async def _complete(*args, **kwargs) -> MagicMock:
@@ -251,7 +301,7 @@ async def test_key_pool_distribution_with_remainder() -> None:
     """Key-pool distribution: remainder goes to first key."""
     calls_by_key: dict[str, int] = {}
 
-    def _make_tracking_client(api_key: str | None = None, base_url: str | None = None) -> MagicMock:
+    def _make_tracking_client(api_key: str | None = None, base_url: str | None = None, **_kwargs) -> MagicMock:
         m = MagicMock()
 
         async def _complete(*args, **kwargs) -> MagicMock:
@@ -328,9 +378,11 @@ async def test_key_index_overrides_static_token_param() -> None:
 
 
 async def test_model_from_shared_state_sets_model_param() -> None:
-    """ADR-018's third Update: targets a model deploy_simulated_model just
-    created at runtime — the same shared_state-lookup reason key_index
-    exists above."""
+    """Targets a model deploy_simulated_model just created at runtime — the
+    same shared_state-lookup reason key_index exists above. Confirmed live:
+    such a model is never listed in /v1/models (that needs full governance
+    pairing), but its own dedicated per-model route works directly, with
+    the bare model name (not "namespace/name") in the request body."""
     with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
         client = _mock_client()
         mock_cls.return_value = client
@@ -344,7 +396,106 @@ async def test_model_from_shared_state_sets_model_param() -> None:
         )
         await task.run(ctx)
 
-    assert client.chat.completions.create.call_args.kwargs["model"] == "llm/maaspal-fail-closed-model-abcd1234-1"
+    assert client.chat.completions.create.call_args.kwargs["model"] == "maaspal-fail-closed-model-abcd1234-1"
+    mock_cls.assert_called_with(
+        api_key="test-token",
+        base_url="http://maas.test/llm/maaspal-fail-closed-model-abcd1234-1/v1",
+    )
+
+
+async def test_key_pool_target_model_uses_dedicated_model_route() -> None:
+    """A key pool whose entries carry their own target_model (e.g. from
+    provision_keys_distributed) must not depend on GET /v1/models listing a
+    freshly-deployed model yet — route to that model's own dedicated path
+    instead (confirmed live: the generic /v1/chat/completions route 404s
+    for a model that isn't registered there, but /{namespace}/{name}/v1/...
+    reaches it directly and still goes through the same gateway auth)."""
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        ctx = _make_ctx(
+            {"api_keys": [{"id": "id-1", "key": "sk-key-1", "target_model": "maaspal/maaspal-sim-abcd-1"}]}
+        )
+        task = SendRequestsTask(
+            "send_requests",
+            {"count": "1", "key_pool": True},
+        )
+        await task.run(ctx)
+
+    mock_cls.assert_called_with(
+        api_key="sk-key-1",
+        base_url="http://maas.test/maaspal/maaspal-sim-abcd-1/v1",
+    )
+    assert client.chat.completions.create.call_args.kwargs["model"] == "maaspal-sim-abcd-1"
+
+
+async def test_key_pool_subscription_aware_model_resolution(httpx_mock) -> None:
+    """No explicit model/target_model given — resolve each key's own model
+    by cross-referencing its bound subscription against /v1/models'
+    subscriptions[] list, so an auto-selected subscription can't end up
+    paired with an incompatible auto-discovered/DEFAULT_MODEL model."""
+    models_response = {
+        "data": [
+            {
+                "id": "model-a-id",
+                "owned_by": "llm/model-a",
+                "url": "http://gateway.test",
+                "subscriptions": [{"name": "sub-a"}],
+            },
+            {
+                "id": "model-b-id",
+                "owned_by": "llm/model-b",
+                "url": "http://gateway.test",
+                "subscriptions": [{"name": "sub-b"}],
+            },
+        ]
+    }
+    httpx_mock.add_response(url="http://maas.test/v1/models", json=models_response)
+    httpx_mock.add_response(url="http://maas.test/v1/models", json=models_response)
+
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        ctx = _make_ctx(
+            {
+                "api_keys": [
+                    {"id": "id-1", "key": "sk-key-1", "subscription": "sub-a"},
+                    {"id": "id-2", "key": "sk-key-2", "subscription": "sub-b"},
+                ]
+            }
+        )
+        task = SendRequestsTask(
+            "send_requests", {"count": "2", "concurrency": "2", "key_pool": True}
+        )
+        await task.run(ctx)
+
+    models_used = {call.kwargs["model"] for call in client.chat.completions.create.call_args_list}
+    assert models_used == {"model-a-id", "model-b-id"}
+
+
+async def test_key_pool_subscription_not_listed_falls_back(httpx_mock) -> None:
+    """A key whose subscription isn't listed under any model must fall back
+    to the default model rather than crash or silently omit the request."""
+    httpx_mock.add_response(
+        url="http://maas.test/v1/models",
+        json={"data": [{"id": "model-a-id", "url": "http://gateway.test", "subscriptions": []}]},
+    )
+    httpx_mock.add_response(
+        url="http://maas.test/v1/models",
+        json={"data": [{"id": "model-a-id", "url": "http://gateway.test", "subscriptions": []}]},
+    )
+
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        client = _mock_client()
+        mock_cls.return_value = client
+
+        ctx = _make_ctx({"api_keys": [{"id": "id-1", "key": "sk-key-1", "subscription": "unlisted-sub"}]})
+        task = SendRequestsTask("send_requests", {"count": "1", "key_pool": True})
+        await task.run(ctx)
+
+    assert client.chat.completions.create.call_args.kwargs["model"] == "model-a-id"
 
 
 async def test_model_from_shared_state_absent_is_noop() -> None:

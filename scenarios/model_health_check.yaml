@@ -3,9 +3,9 @@ description: >-
   Read-only model health check — confirms the TokenRateLimitPolicy's
   Accepted/Enforced conditions, the MaaS gateway's Programmed condition, and
   the target model's HTTPRoute ownership all reflect real, healthy state
-  rather than trusting the MaaS Setup UI's display of the same CRs at face
-  value (see ADR-022). No writes, no keys provisioned, no traffic sent —
-  scoped to internally-hosted (LLMInferenceService-backed) models.
+  rather than trusting the MaaS Setup UI's display of the same resources at
+  face value. No writes, no keys provisioned, no traffic sent — scoped to
+  internally-hosted (LLMInferenceService-backed) models.
 category: "Platform Health"
 config:
   target_model_name: ""       # required — the MaaSModelRef's own name, e.g. "facebook-opt-125m-simulated" (not the plain model id)

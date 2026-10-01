@@ -2,7 +2,12 @@ import json
 
 from pytest_httpx import HTTPXMock
 
-from harness.tasks.auth import ProvisionApiKeyTask, RevokeApiKeysTask, VerifyApiKeySearchTask
+from harness.tasks.auth import (
+    ProvisionApiKeyTask,
+    ProvisionKeysDistributedTask,
+    RevokeApiKeysTask,
+    VerifyApiKeySearchTask,
+)
 from harness.tasks.base import TaskContext
 
 
@@ -309,6 +314,27 @@ async def test_revoke_api_keys_counts_partial_failure(httpx_mock: HTTPXMock) -> 
     assert ctx.shared_state["revoked_count"] == 1
 
 
+async def test_revoke_api_keys_already_revoked_logs_quietly(
+    httpx_mock: HTTPXMock, capsys
+) -> None:
+    """A 404 (key already revoked, e.g. cleanup re-running over a key
+    revoke_api_keys already deleted mid-scenario) is expected, not a
+    failure — it must not dump a full traceback into the run log."""
+    httpx_mock.add_response(
+        url="http://maas.test/maas-api/v1/api-keys/id-1", method="DELETE", status_code=404
+    )
+
+    ctx = _make_ctx({"api_keys": [{"id": "id-1", "key": "sk-1"}]})
+    task = RevokeApiKeysTask("revoke_api_keys", {})
+    result = await task.run(ctx)
+
+    assert result.status == "PASS"
+    assert ctx.shared_state["revoked_count"] == 0
+    out = capsys.readouterr().out
+    assert "already revoked, skipping" in out
+    assert "Traceback" not in out
+
+
 async def test_verify_api_key_search_matches_expected_count(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url="http://maas.test/maas-api/v1/api-keys/search",
@@ -344,3 +370,34 @@ async def test_verify_api_key_search_sends_name_prefix(httpx_mock: HTTPXMock) ->
     req = httpx_mock.get_requests()[0]
     body = json.loads(req.content)
     assert "subscription" not in body
+
+
+async def test_provision_keys_distributed_target_model_uses_namespace_name(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """target_model must be "<namespace>/<name>" (matching /v1/models' own
+    owned_by format) — a bare CR name never routes correctly, and a model
+    deployed this run may not even be visible in discovery yet."""
+    httpx_mock.add_response(
+        url="http://maas.test/maas-api/v1/api-keys",
+        method="POST",
+        json={"id": "id-1", "key": "sk-1", "name": "maaspal-dist-key-1", "subscription": "sub-1"},
+    )
+
+    ctx = _make_ctx(
+        {
+            "distributed_subscriptions": [
+                {
+                    "name": "sub-1",
+                    "namespace": "models-as-a-service",
+                    "model_refs": [{"name": "maaspal-sim-abcd-1", "namespace": "maaspal"}],
+                }
+            ]
+        }
+    )
+    task = ProvisionKeysDistributedTask(
+        "provision_keys_distributed", {"key_count": 1, "key_name_prefix": "maaspal-dist-key"}
+    )
+    await task.run(ctx)
+
+    assert ctx.shared_state["api_keys"][0]["target_model"] == "maaspal/maaspal-sim-abcd-1"

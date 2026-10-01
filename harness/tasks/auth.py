@@ -40,6 +40,14 @@ async def _revoke_keys(ctx: TaskContext) -> int:
                     del_url,
                     headers={"Authorization": f"Bearer {ctx.sa_token}"},
                 )
+                if resp.status_code == 404:
+                    # Expected, not a failure: the key was already revoked
+                    # earlier in this same run (mid-scenario revoke_api_keys,
+                    # or cleanup re-running over a key another task already
+                    # deleted) — a quiet note, not a traceback, so an
+                    # intentional no-op doesn't read as a crash in the logs.
+                    print(f"[revoke_keys] key {key_id} already revoked, skipping", flush=True)
+                    continue
                 if not resp.is_success:
                     print(
                         f"[revoke_keys] DELETE {del_url} → {resp.status_code}: {resp.text}",
@@ -326,7 +334,13 @@ class ProvisionKeysDistributedTask(Task):
                         "expiresAt": data.get("expiresAt"),
                     }
                     if model_refs:
-                        key_record["target_model"] = model_refs[0]["name"]
+                        # "<namespace>/<name>" — the same identifier form
+                        # /v1/models reports as owned_by, confirmed live to
+                        # be accepted directly by the inference endpoint even
+                        # before a freshly-deployed model becomes visible in
+                        # discovery (see SendRequestsTask's target_model/
+                        # model_from_shared_state handling).
+                        key_record["target_model"] = f"{model_refs[0]['namespace']}/{model_refs[0]['name']}"
                     ctx.shared_state.setdefault("api_keys", []).append(key_record)
 
                     checks["total_keys"] += 1
