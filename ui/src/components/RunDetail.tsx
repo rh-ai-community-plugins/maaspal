@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Button, ExpandableSection, Grid, GridItem, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
+import { Button, Grid, GridItem, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
 import { AssertionPanel } from './AssertionPanel';
 import { LogStream } from './LogStream';
 import {
@@ -7,6 +7,7 @@ import {
   FindingsPanel,
   MetricsChartsPanel,
   RunSteps,
+  TrafficGroupPanel,
   TrafficPanel,
   VerdictBanner,
 } from './RunInsights';
@@ -23,6 +24,7 @@ import {
   type ProgressResponse,
   type Run,
   type TaskProgressEntry,
+  type TrafficBurst,
 } from '../api/client';
 
 const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING']);
@@ -41,6 +43,51 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+/** Bursts in the same chart_group are shown together on one timeline; the
+ * rest stand alone. Charted ones first — they answer the scenario's question. */
+function groupTraffic(traffic: TrafficBurst[]): TrafficBurst[][] {
+  const groups = new Map<string, TrafficBurst[]>();
+  const alone: TrafficBurst[][] = [];
+  for (const b of traffic) {
+    if (b.chart_group) groups.set(b.chart_group, [...(groups.get(b.chart_group) ?? []), b]);
+    else alone.push([b]);
+  }
+  const charted = (g: TrafficBurst[]) => g.some((b) => b.chart || b.summary.stages?.length);
+  return [...groups.values(), ...alone].sort((a, b) => Number(charted(b)) - Number(charted(a)));
+}
+
+/** Logs as a clearly toggleable panel: line count and the latest line while
+ * collapsed, the full stream when open (always opened for a failed run). */
+function LogsPanel({ runId, failed }: { runId: string; failed: boolean }) {
+  const [open, setOpen] = useState<boolean | null>(null);
+  const [lines, setLines] = useState<string[]>([]);
+  const isOpen = open ?? failed;
+  return (
+    <section className="maaspal-panel maaspal-logs-panel" aria-label="Logs">
+      <div className="maaspal-panel__header">
+        <p className="maaspal-panel__title">
+          Logs{' '}
+          <span className="maaspal-stat__sub">
+            · {lines.length.toLocaleString()} {lines.length === 1 ? 'line' : 'lines'}
+          </span>
+        </p>
+        <Button variant="secondary" size="sm" onClick={() => setOpen(!isOpen)} aria-expanded={isOpen}>
+          {isOpen ? 'Hide logs' : 'Show logs'}
+        </Button>
+      </div>
+      {!isOpen && lines.length > 0 && (
+        <code className="maaspal-logs-panel__preview" title={lines[lines.length - 1]}>
+          {lines[lines.length - 1]}
+        </code>
+      )}
+      {/* Stays mounted while hidden so the count and preview keep updating. */}
+      <div hidden={!isOpen}>
+        <LogStream runId={runId} onLines={setLines} />
+      </div>
+    </section>
+  );
 }
 
 function StatusDot({ status }: { status: string }) {
@@ -81,8 +128,6 @@ export function RunDetail({ runId, onBack }: Props) {
   const [stopping, setStopping] = useState(false);
   const [cleaningUp, setCleaningUp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  // null = follow the default (open only when the run failed).
-  const [logsOpen, setLogsOpen] = useState<boolean | null>(null);
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -300,13 +345,13 @@ export function RunDetail({ runId, onBack }: Props) {
               cleanupStatus={run?.cleanup_status}
             />
             <MetricsChartsPanel charts={insights.metrics_charts ?? []} />
-            {/* Charted bursts first — they answer the scenario's question;
-                the rest are one-line summaries. */}
-            {[...(insights.traffic ?? [])]
-              .sort((a, b) => Number(!!b.chart) - Number(!!a.chart))
-              .map((burst) => (
-                <TrafficPanel key={burst.result_key} burst={burst} />
-              ))}
+            {groupTraffic(insights.traffic ?? []).map((group) =>
+              group.length > 1 ? (
+                <TrafficGroupPanel key={group[0].chart_group ?? group[0].result_key} bursts={group} />
+              ) : (
+                <TrafficPanel key={group[0].result_key} burst={group[0]} />
+              ),
+            )}
             {(insights.tables ?? []).map((table) => (
               <DetailTable key={table.title} table={table} />
             ))}
@@ -316,14 +361,9 @@ export function RunDetail({ runId, onBack }: Props) {
           </GridItem>
         </Grid>
 
-        <ExpandableSection
-          toggleText="Logs"
-          isExpanded={logsOpen ?? run?.status.toUpperCase() === 'FAIL'}
-          onToggle={(_e, expanded) => setLogsOpen(expanded)}
-          style={{ marginTop: '1rem' }}
-        >
-          <LogStream runId={runId} />
-        </ExpandableSection>
+        <div style={{ marginTop: '1rem' }}>
+          <LogsPanel runId={runId} failed={run?.status.toUpperCase() === 'FAIL'} />
+        </div>
       </PageSection>
 
       {showSettings && (

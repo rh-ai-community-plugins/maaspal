@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import time
 
 import httpx
 from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 
+from harness.durations import parse_duration_s
 from harness.result import TaskResult
 from harness.tasks.base import Task, TaskContext
 from harness.tasks.registry import REGISTRY
@@ -15,14 +17,81 @@ _DEBOUNCE_SECS = 0.1
 # retry can land in a fresh window and quietly succeed) sets `retries: 0`.
 _DEFAULT_RETRIES = 2
 
-# `until_throttled` bursts: hard ceiling on requests, and how many throttled
-# requests in a row end the burst. Internal, not user settings — the user's
-# question is "where does throttling start", not "how many requests to send".
-_UNTIL_THROTTLED_MAX_REQUESTS = 500
+# `until_throttled` bursts: send as fast as needed to use up the limit within
+# one window, ramping concurrency up while the measured token rate is too low.
+# The bounds are scenario settings (max_concurrency / max_duration_s /
+# max_requests); these are only their defaults.
 _UNTIL_THROTTLED_STOP_AFTER_429S = 3
-# Successful requests to average before estimating whether a limit can be
-# used up within the request ceiling at all.
-_ESTIMATE_AFTER_SUCCESSES = 3
+_DEFAULT_MAX_CONCURRENCY = 128
+_DEFAULT_MAX_REQUESTS = 20000
+# When the window is unknown, or longer than this, the time budget defaults
+# to this many seconds (a 24h window can't be waited out by a test).
+_DEFAULT_MAX_DURATION_S = 600.0
+_RAMP_INTERVAL_S = 2.0
+# Ramp while the measured rate is below this multiple of the required rate.
+_RAMP_HEADROOM = 1.2
+# Doubling concurrency that raises the token rate by less than this factor
+# means the model, not the harness, is the bottleneck.
+_SCALING_GAIN_THRESHOLD = 1.3
+
+
+def _diagnose_unthrottled(
+    history: list[dict],
+    required_tps: float | None,
+    max_concurrency: int,
+    stop_reason: str,
+    limit: float | None,
+    window_text: str,
+) -> tuple[str, str]:
+    """Why a burst never got throttled: (bound, plain-language explanation).
+
+    bound: "response" (the model answered too slowly — more concurrency
+    stopped helping), "send" (still scaling when the concurrency ceiling was
+    hit), "time" / "requests" (a budget ran out first), or "unknown"."""
+    peak = max((h["tokens_per_s"] for h in history), default=0.0)
+    last_c = history[-1]["concurrency"] if history else 1
+    need = (
+        f"Using up {limit:,.0f} tokens within {window_text} needs ~{required_tps:,.0f} tokens/s; "
+        if required_tps and limit
+        else ""
+    )
+    got = f"this run peaked at {peak:,.0f} tokens/s at concurrency {last_c}"
+    # Average rate at the top concurrency level vs the level below it —
+    # averaged, since a single short interval's rate is noisy.
+    samples: dict[int, list[float]] = {}
+    for h in history:
+        samples.setdefault(h["concurrency"], []).append(h["tokens_per_s"])
+    by_c = {c: sum(v) / len(v) for c, v in samples.items()}
+    levels = sorted(by_c)
+    gain = None
+    if len(levels) >= 2 and by_c[levels[-2]] > 0:
+        gain = by_c[levels[-1]] / by_c[levels[-2]]
+    latency = ""
+    if history:
+        latency = f" (median latency {history[0]['p50_ms']:,.0f} ms → {history[-1]['p50_ms']:,.0f} ms)"
+
+    if stop_reason == "requests":
+        return "requests", (
+            f"{need}{got}, and stopped at the request cap before the limit was reached. "
+            "Raise Max requests under Advanced settings."
+        )
+    if gain is not None and gain < _SCALING_GAIN_THRESHOLD:
+        return "response", (
+            f"{need}{got}. Doubling concurrency only raised the rate {gain:.1f}×{latency} — "
+            "the model can't answer fast enough to use the limit up, so it can't be verified by "
+            "traffic on this model."
+        )
+    if last_c >= max_concurrency:
+        return "send", (
+            f"{need}{got} and was still speeding up when it hit the Max concurrency ceiling. "
+            "Raise Max concurrency under Advanced settings and run again."
+        )
+    if stop_reason == "time":
+        return "time", (
+            f"{need}{got}, and ran out of its time budget while still ramping up. "
+            "Raise Max duration under Advanced settings."
+        )
+    return "unknown", f"{need}{got}, and was never throttled."
 
 # Per-request timeline entries kept in memory per send_requests invocation —
 # the runner downsamples further before writing it out for the UI chart.
@@ -37,9 +106,25 @@ def _status_class(status_code: int | None) -> str:
         return "throttled"
     if status_code in (401, 403):
         return "denied"
+    if status_code == 404:
+        return "not_found"
     if status_code >= 500:
         return "server_error"
     return "error"
+
+
+def _error_message(exc: Exception) -> str:
+    """A short, groupable description of why a request failed. The OpenAI
+    SDK reports every transport failure as a bare "Connection error." — the
+    real reason (DNS, refused, TLS, timeout) is on its __cause__."""
+    if isinstance(exc, APIStatusError):
+        body = (getattr(exc.response, "text", "") or "").strip().replace("\n", " ")
+        reason = getattr(exc.response, "reason_phrase", "") or ""
+        return f"HTTP {exc.status_code} {reason}".strip() + (f": {body[:80]}" if body else "")
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and str(exc).strip().lower().startswith("connection error"):
+        return f"{type(cause).__name__}: {str(cause)[:100]}"
+    return f"{type(exc).__name__}: {str(exc)[:100]}"
 
 
 def _summary_line(r: dict, planned: int | None) -> str:
@@ -50,6 +135,8 @@ def _summary_line(r: dict, planned: int | None) -> str:
         parts.append(f"{r['rate_limited_count']} throttled (429)")
     if r["unauthorized_count"]:
         parts.append(f"{r['unauthorized_count']} denied (401/403)")
+    if r.get("not_found_count"):
+        parts.append(f"{r['not_found_count']} not found (404)")
     if r["server_error_count"]:
         parts.append(f"{r['server_error_count']} server errors")
     if r["other_error_count"]:
@@ -57,7 +144,22 @@ def _summary_line(r: dict, planned: int | None) -> str:
     parts.append(f"{r['total_tokens_sent']} tokens")
     if "tokens_before_first_429" in r:
         parts.append(f"first 429 after {r['tokens_before_first_429']} tokens")
+    samples = r.get("error_samples") or []
+    if samples and not r["success_count"]:
+        # Nothing worked — say why, right in the narration.
+        parts.append(f"most common error: {samples[0]['count']}× {samples[0]['message']}")
     return " · ".join(parts)
+
+
+def _float_or_none(value: object, shared_state: dict, ref: object) -> float | None:
+    """A number from an explicit param, else from shared_state["ns"]["key"]."""
+    if value not in (None, ""):
+        return float(value)
+    if ref:
+        ns, _, key = str(ref).partition(".")
+        found = (shared_state.get(ns) or {}).get(key)
+        return float(found) if found is not None else None
+    return None
 
 
 def _redact(token: str) -> str:
@@ -97,27 +199,67 @@ class SendRequestsTask(Task):
         concurrency = int(self.params.get("concurrency", 5))
         prompt = str(self.params.get("prompt", "Hello"))
         result_key = str(self.params.get("result_key", "inference_results"))
+
+        # `skip_unless: "ns.key"` — only send if that shared_state value is
+        # truthy (e.g. "direct_probe.reachable"): a precondition that failed
+        # earlier is reported there, not as a wall of failed requests here.
+        skip_unless = self.params.get("skip_unless")
+        if skip_unless:
+            ns, _, key = str(skip_unless).partition(".")
+            if not (ctx.shared_state.get(ns) or {}).get(key):
+                ctx.shared_state["task_summary"] = f"Skipped — {skip_unless} isn't set (see the earlier step)"
+                return TaskResult(task_name=self.name, status="PASS", duration_ms=0.0)
         retries = int(self.params.get("retries", _DEFAULT_RETRIES))
         # Stop sending once this many requests have been throttled (0 = never)
         # — lets a rate-limit scenario use a generous request ceiling (enough
         # to exhaust whatever limit it's pointed at) without hammering the
         # gateway for the rest of it once the answer is already in.
         stop_after_429s = int(self.params.get("stop_after_429s", 0))
-        # Rate-limit bursts: keep sending until MaaS throttles, rather than a
-        # user-chosen request count. `limit_from_shared_state` ("ns.key", e.g.
-        # "subscription_limits.token_limit") lets the burst give up early —
-        # honestly, as "inconclusive" — when the limit is clearly too large to
-        # use up within the request ceiling, instead of grinding through it.
+        # Rate-limit bursts: keep sending until MaaS throttles, as fast as
+        # needed to use the limit up within one window (a fixed window resets
+        # otherwise, and the limit is never reached). The limit and window come
+        # from `limit`/`window` params or `*_from_shared_state` ("ns.key", e.g.
+        # "subscription_limits.token_limit"). Bounds: max_concurrency,
+        # max_duration_s (default: the window, capped), max_requests.
         until_throttled = str(self.params.get("until_throttled", "")).lower() in ("true", "1", "yes")
         limit_tokens: float | None = None
+        window_s: float | None = None
+        window_text = ""
+        max_concurrency = concurrency
+        max_duration_s = _DEFAULT_MAX_DURATION_S
         if until_throttled:
-            count = int(self.params.get("max_requests", _UNTIL_THROTTLED_MAX_REQUESTS))
+            count = int(self.params.get("max_requests") or _DEFAULT_MAX_REQUESTS)
             stop_after_429s = stop_after_429s or _UNTIL_THROTTLED_STOP_AFTER_429S
-            ref = self.params.get("limit_from_shared_state")
-            if ref:
-                ns, _, key = str(ref).partition(".")
-                value = (ctx.shared_state.get(ns) or {}).get(key)
-                limit_tokens = float(value) if value is not None else None
+            max_concurrency = max(concurrency, int(self.params.get("max_concurrency") or _DEFAULT_MAX_CONCURRENCY))
+            limit_tokens = _float_or_none(
+                self.params.get("limit"), ctx.shared_state, self.params.get("limit_from_shared_state")
+            )
+            window_param = self.params.get("window")
+            if window_param not in (None, ""):
+                window_s = parse_duration_s(window_param)
+                window_text = str(window_param)
+            else:
+                window_s = _float_or_none(None, ctx.shared_state, self.params.get("window_from_shared_state"))
+                window_text = f"{window_s:g}s" if window_s else ""
+            explicit_duration = self.params.get("max_duration_s")
+            if explicit_duration not in (None, ""):
+                max_duration_s = float(explicit_duration)
+            elif window_s:
+                max_duration_s = min(window_s, _DEFAULT_MAX_DURATION_S)
+        # Step load (`stages`: concurrency levels, e.g. "5,10,25,50", each held
+        # for `stage_duration_s`): sends continuously, stepping concurrency up,
+        # and reports throughput/latency/errors per step — where it starts to
+        # struggle, not just one averaged number.
+        stages_param = self.params.get("stages")
+        stage_levels: list[int] = []
+        if stages_param not in (None, ""):
+            raw = stages_param if isinstance(stages_param, list) else str(stages_param).split(",")
+            stage_levels = [int(str(x).strip()) for x in raw if str(x).strip()]
+        stage_duration_s = float(self.params.get("stage_duration_s") or 30)
+        if stage_levels:
+            count = int(self.params.get("max_requests") or 10**9)
+            max_concurrency = max(stage_levels)
+            concurrency = stage_levels[0]
         # Whether the run page should draw this burst's traffic chart — only
         # where the shape over time answers the scenario's question.
         chart = str(self.params.get("chart", "")).lower() in ("true", "1", "yes")
@@ -127,16 +269,16 @@ class SendRequestsTask(Task):
         url_from_shared_state = self.params.get("url_from_shared_state")
         if url_from_shared_state:
             # A model deploy_simulated_model just created, called directly on
-            # its in-cluster address — bypassing the MaaS gateway entirely
+            # its own Route (expose_model_route) — bypassing the MaaS gateway
             # (scenarios/gateway_overhead.yaml).
             models = ctx.shared_state.get(url_from_shared_state, [])
-            if not models or not models[0].get("internal_url"):
+            if not models or not models[0].get("direct_url"):
                 raise RuntimeError(
-                    f"url_from_shared_state={url_from_shared_state!r}: no deployed model with an "
-                    "in-cluster address — run deploy_simulated_model first"
+                    f"url_from_shared_state={url_from_shared_state!r}: no deployed model with a "
+                    "direct URL — run deploy_simulated_model and expose_model_route first"
                 )
-            internal = str(models[0]["internal_url"]).rstrip("/")
-            self.params["url"] = internal if internal.endswith("/v1") else f"{internal}/v1"
+            direct = str(models[0]["direct_url"]).rstrip("/")
+            self.params["url"] = direct if direct.endswith("/v1") else f"{direct}/v1"
             self.params["model"] = models[0]["name"]
 
         # Every HTTP response the SDK receives, retries included — the SDK
@@ -271,7 +413,9 @@ class SendRequestsTask(Task):
         rate_limited_count = 0
         unauthorized_count = 0
         server_error_count = 0
+        not_found_count = 0
         other_error_count = 0
+        error_counts: dict[str, int] = {}
         total_tokens_sent = 0
         prompt_tokens_sent = 0
         completion_tokens_sent = 0
@@ -292,10 +436,28 @@ class SendRequestsTask(Task):
         # completed request — the run page's traffic chart.
         timeline: list[list] = []
         skipped = 0
-        # Set when a limit is clearly too large to use up within the request
-        # ceiling — the rest of the burst is skipped.
-        unreachable_note: str | None = None
-        traffic_entry: dict = {"chart": chart}
+        # until_throttled bookkeeping: current concurrency level, why the
+        # burst ended, and the token rate measured at each ramp step.
+        current_concurrency = concurrency
+        stage_idx = 0
+        stage_acc: list[dict] = [
+            {"latencies": [], "ok": 0, "throttled": 0, "errors": 0, "tokens": 0} for _ in stage_levels
+        ]
+        stop_reason: str | None = None
+        ramp_history: list[dict] = []
+        first_429_at: float | None = None
+        concurrency_at_first_429: int | None = None
+        max_tokens_per_request = 0
+        required_tps = (limit_tokens / window_s) if (limit_tokens and window_s) else None
+        traffic_entry: dict = {
+            "chart": chart,
+            # Bursts sharing a chart_group are drawn on one timeline (e.g.
+            # before and after waiting out a rate-limit window), positioned
+            # by their wall-clock start t0.
+            "chart_group": self.params.get("chart_group"),
+            "label": self.params.get("label"),
+            "t0": time.time(),
+        }
         if limit_tokens is not None:
             # The limit read off the subscription under test — the chart's
             # reference line (otherwise the scenario's own token_limit config).
@@ -310,39 +472,22 @@ class SendRequestsTask(Task):
         run_start = time.monotonic()
         last_emit = 0.0
 
-        sem = asyncio.Semaphore(concurrency)
+        # Pooled modes cap in-flight requests by opening worker slots instead.
+        sem = asyncio.Semaphore(max_concurrency if (until_throttled or stage_levels) else concurrency)
 
         async def do_request(client_idx: int) -> None:
             nonlocal success, fail, last_emit, rate_limited_count, unauthorized_count
-            nonlocal server_error_count, other_error_count
+            nonlocal server_error_count, other_error_count, not_found_count
             nonlocal total_tokens_sent, prompt_tokens_sent, completion_tokens_sent
             nonlocal first_rate_limited_at_tokens, requests_before_first_429
-            nonlocal seconds_to_first_429, successes_after_first_429, skipped, unreachable_note
+            nonlocal seconds_to_first_429, successes_after_first_429, skipped
+            nonlocal first_429_at, concurrency_at_first_429, max_tokens_per_request
             async with sem:
-                if (stop_after_429s and rate_limited_count >= stop_after_429s) or unreachable_note:
+                if (stop_after_429s and rate_limited_count >= stop_after_429s) or stop_reason:
                     skipped += 1
                     return
-                if (
-                    limit_tokens
-                    and first_rate_limited_at_tokens is None
-                    and success >= _ESTIMATE_AFTER_SUCCESSES
-                    and total_tokens_sent > 0
-                ):
-                    per_request = total_tokens_sent / success
-                    needed = limit_tokens / per_request
-                    if needed > count:
-                        unreachable_note = (
-                            f"limit of {limit_tokens:g} tokens needs ~{needed:,.0f} requests at "
-                            f"~{per_request:.0f} tokens each — more than this run sends ({count})"
-                        )
-                        ctx.shared_state["_verdict_text"] = (
-                            f"Inconclusive: this subscription's limit is too large to use up by "
-                            f"traffic — {unreachable_note}. Try a subscription with a smaller "
-                            f"limit, or create one just for testing."
-                        )
-                        skipped += 1
-                        return
                 t0 = time.monotonic()
+                my_stage = stage_idx
                 status_class = "ok"
                 effective_model = (key_models[client_idx] if key_models else None) or model
                 try:
@@ -351,12 +496,16 @@ class SendRequestsTask(Task):
                         messages=[{"role": "user", "content": prompt}],
                     )
                     success += 1
-                    if first_rate_limited_at_tokens is not None:
+                    # Leakage = admitted AFTER MaaS had already throttled. A
+                    # request that was in flight when the first 429 came back
+                    # was admitted before it, so doesn't count.
+                    if first_429_at is not None and t0 > first_429_at:
                         successes_after_first_429 += 1
                     usage = getattr(response, "usage", None)
                     tokens = getattr(usage, "total_tokens", None)
                     if isinstance(tokens, (int, float)):
                         total_tokens_sent += int(tokens)
+                        max_tokens_per_request = max(max_tokens_per_request, int(tokens))
                     prompt_tokens = getattr(usage, "prompt_tokens", None)
                     if isinstance(prompt_tokens, (int, float)):
                         prompt_tokens_sent += int(prompt_tokens)
@@ -372,12 +521,21 @@ class SendRequestsTask(Task):
                             first_rate_limited_at_tokens = total_tokens_sent
                             requests_before_first_429 = success
                             seconds_to_first_429 = time.monotonic() - run_start
+                            first_429_at = time.monotonic()
+                            concurrency_at_first_429 = current_concurrency
                     elif exc.status_code in (401, 403):
                         unauthorized_count += 1
+                    elif exc.status_code == 404:
+                        not_found_count += 1
                     elif exc.status_code >= 500:
                         server_error_count += 1
                     else:
                         other_error_count += 1
+                    # Error reasons are for genuine failures; throttling has its
+                    # own counters (and is often the expected outcome).
+                    if exc.status_code != 429:
+                        message = _error_message(exc)
+                        error_counts[message] = error_counts.get(message, 0) + 1
                     print(
                         f"[send_requests] request failed: status={exc.status_code} {exc}",
                         flush=True,
@@ -386,10 +544,22 @@ class SendRequestsTask(Task):
                     fail += 1
                     other_error_count += 1
                     status_class = "error"
-                    print(f"[send_requests] request failed: {exc}", flush=True)
+                    message = _error_message(exc)
+                    error_counts[message] = error_counts.get(message, 0) + 1
+                    print(f"[send_requests] request failed: {message}", flush=True)
 
                 latency_ms = (time.monotonic() - t0) * 1000
                 latencies.append(latency_ms)
+                if stage_levels:
+                    acc = stage_acc[my_stage]
+                    acc["latencies"].append(latency_ms)
+                    if status_class == "ok":
+                        acc["ok"] += 1
+                        acc["tokens"] += int(getattr(getattr(response, "usage", None), "total_tokens", 0) or 0)
+                    elif status_class == "throttled":
+                        acc["throttled"] += 1
+                    else:
+                        acc["errors"] += 1
                 total = success + fail
                 elapsed = time.monotonic() - run_start
                 if len(timeline) < _TIMELINE_CAP:
@@ -405,7 +575,13 @@ class SendRequestsTask(Task):
                     "rate_limited_count": rate_limited_count,
                     "unauthorized_count": unauthorized_count,
                     "server_error_count": server_error_count,
+                    "not_found_count": not_found_count,
                     "other_error_count": other_error_count,
+                    # The three most common failure reasons, for the run page.
+                    "error_samples": [
+                        {"message": m, "count": c}
+                        for m, c in sorted(error_counts.items(), key=lambda kv: -kv[1])[:3]
+                    ],
                     "error_rate_pct": (fail / total * 100) if total > 0 else 0.0,
                     # Errors excluding 429s — throttling by a subscription's
                     # own limit is often the *expected* outcome, not a fault.
@@ -429,6 +605,15 @@ class SendRequestsTask(Task):
                     result_data["tokens_before_first_429"] = first_rate_limited_at_tokens
                     result_data["requests_before_first_429"] = requests_before_first_429
                     result_data["seconds_to_first_429"] = round(seconds_to_first_429 or 0.0, 3)
+                    # With N requests in flight, up to N requests' tokens can
+                    # land past the limit before MaaS starts refusing — the
+                    # honest upper bound for "throttled at the limit".
+                    result_data["concurrency_at_first_429"] = concurrency_at_first_429
+                    result_data["allowed_overshoot"] = (
+                        (concurrency_at_first_429 or 1) * max(max_tokens_per_request, 1)
+                    )
+                if until_throttled:
+                    result_data["peak_concurrency"] = current_concurrency
                 ctx.shared_state[result_key] = result_data
                 if until_throttled and limit_tokens:
                     # Progress toward the limit is what this burst is about.
@@ -439,6 +624,10 @@ class SendRequestsTask(Task):
                     }
                 elif until_throttled:
                     ctx.shared_state["task_progress"] = {"current": total, "total": None, "unit": "requests"}
+                elif stage_levels:
+                    ctx.shared_state["task_progress"] = {
+                        "current": stage_idx + 1, "total": len(stage_levels), "unit": "steps",
+                    }
                 else:
                     ctx.shared_state["task_progress"] = {"current": total, "total": count}
                 ctx.shared_state["task_summary"] = _summary_line(result_data, None if until_throttled else count)
@@ -447,35 +636,153 @@ class SendRequestsTask(Task):
                     last_emit = now
                     await ctx.emit_assertion_state()
 
-        if key_pool_entries:
-            assignments = _distribute(count, len(key_pool_entries))
-            # Round-robin across keys (key 1, key 2, …, key 1, …) rather than
-            # each key's whole share back to back — with low concurrency the
-            # queue order IS the send order, and interleaving is what makes
-            # "do these keys share one budget?" observable at all.
-            request_tasks = []
-            for round_idx in range(max(assignments, default=0)):
-                for key_idx, n_reqs in enumerate(assignments):
-                    if round_idx < n_reqs:
-                        request_tasks.append(do_request(key_idx))
-        else:
-            request_tasks = [do_request(0) for _ in range(count)]
+        if until_throttled or stage_levels:
+            n_clients = len(clients)
+            requests_started = 0
 
-        await asyncio.gather(*request_tasks)
+            async def worker(slot: int) -> None:
+                # Slots above the current concurrency level idle until the
+                # ramp opens them; every worker stops once a stop reason is set.
+                nonlocal requests_started, stop_reason
+                while stop_reason is None:
+                    if stop_after_429s and rate_limited_count >= stop_after_429s:
+                        stop_reason = "throttled"
+                        return
+                    if slot >= current_concurrency:
+                        await asyncio.sleep(0.05)
+                        continue
+                    if requests_started >= count:
+                        stop_reason = "requests"
+                        return
+                    key_idx = requests_started % n_clients
+                    requests_started += 1
+                    await do_request(key_idx)
+
+            async def ramp_monitor() -> None:
+                # Every interval: measure the token rate, record it, and double
+                # concurrency while it's below what using the limit up within
+                # one window needs. Also enforces the time budget.
+                nonlocal current_concurrency, stop_reason
+                last_t, last_tokens = time.monotonic(), 0
+                while stop_reason is None:
+                    await asyncio.sleep(_RAMP_INTERVAL_S)
+                    now = time.monotonic()
+                    tps = (total_tokens_sent - last_tokens) / max(now - last_t, 1e-6)
+                    recent = latencies[-max(current_concurrency * 4, 20):]
+                    ramp_history.append({
+                        "t": round(now - run_start, 1),
+                        "concurrency": current_concurrency,
+                        "tokens_per_s": round(tps, 1),
+                        "p50_ms": round(_percentiles(recent)["p50_latency_ms"], 1),
+                    })
+                    last_t, last_tokens = now, total_tokens_sent
+                    if now - run_start >= max_duration_s:
+                        stop_reason = "time"
+                        return
+                    if (
+                        required_tps
+                        and first_429_at is None
+                        and tps < required_tps * _RAMP_HEADROOM
+                        and current_concurrency < max_concurrency
+                    ):
+                        current_concurrency = min(max_concurrency, current_concurrency * 2)
+                        print(
+                            f"[send_requests] {tps:,.0f} tokens/s < {required_tps:,.0f} needed — "
+                            f"concurrency → {current_concurrency}",
+                            flush=True,
+                        )
+
+            async def stage_controller() -> None:
+                # Step load: hold each concurrency level for stage_duration_s.
+                nonlocal current_concurrency, stage_idx, stop_reason
+                for i, level in enumerate(stage_levels):
+                    stage_idx, current_concurrency = i, level
+                    ctx.shared_state["task_summary"] = (
+                        f"Step {i + 1}/{len(stage_levels)}: {level} requests in flight "
+                        f"for {stage_duration_s:g}s"
+                    )
+                    await asyncio.sleep(stage_duration_s)
+                stop_reason = "stages done"
+
+            monitor = asyncio.create_task(ramp_monitor() if until_throttled else stage_controller())
+            await asyncio.gather(*(worker(i) for i in range(max_concurrency)))
+            monitor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor
+        else:
+            if key_pool_entries:
+                assignments = _distribute(count, len(key_pool_entries))
+                # Round-robin across keys (key 1, key 2, …, key 1, …) rather than
+                # each key's whole share back to back — with low concurrency the
+                # queue order IS the send order, and interleaving is what makes
+                # "do these keys share one budget?" observable at all.
+                request_tasks = []
+                for round_idx in range(max(assignments, default=0)):
+                    for key_idx, n_reqs in enumerate(assignments):
+                        if round_idx < n_reqs:
+                            request_tasks.append(do_request(key_idx))
+            else:
+                request_tasks = [do_request(0) for _ in range(count)]
+            await asyncio.gather(*request_tasks)
+
+        result = ctx.shared_state.get(result_key)
+        if stage_levels and result is not None:
+            stages_out = []
+            for level, acc in zip(stage_levels, stage_acc, strict=True):
+                n = len(acc["latencies"])
+                pct = _percentiles(acc["latencies"])
+                stages_out.append({
+                    "concurrency": level,
+                    "requests": n,
+                    "requests_per_s": round(acc["ok"] / stage_duration_s, 2),
+                    "tokens_per_s": round(acc["tokens"] / stage_duration_s, 1),
+                    "p50_latency_ms": round(pct["p50_latency_ms"], 1),
+                    "p95_latency_ms": round(pct["p95_latency_ms"], 1),
+                    "p99_latency_ms": round(pct["p99_latency_ms"], 1),
+                    "error_rate_pct": round(acc["errors"] / n * 100, 2) if n else 0.0,
+                    "throttled_pct": round(acc["throttled"] / n * 100, 2) if n else 0.0,
+                })
+            result["stages"] = stages_out
+            # Pass/fail is judged at the heaviest step — the load being tested.
+            final = stages_out[-1]
+            result["final_stage_p99_latency_ms"] = final["p99_latency_ms"]
+            result["final_stage_error_rate_pct"] = final["error_rate_pct"]
+            best = max(stages_out, key=lambda st: st["requests_per_s"])
+            ctx.shared_state["task_summary"] = (
+                f"{len(stages_out)} steps up to {final['concurrency']} in flight · peak "
+                f"{best['requests_per_s']:g} req/s at {best['concurrency']} · p95 at the top step "
+                f"{final['p95_latency_ms']:,.0f} ms · errors {final['error_rate_pct']:g}%"
+            )
         if count <= 0:
             ctx.shared_state["task_summary"] = "No requests configured (count: 0) — skipped"
-        elif unreachable_note:
-            ctx.shared_state[result_key]["limit_unreachable"] = 1
-            ctx.shared_state["task_summary"] = (
-                _summary_line(ctx.shared_state[result_key], ctx.shared_state[result_key]["total_requests"])
-                + f" · stopped: {unreachable_note}"
+        elif until_throttled and result is not None:
+            result["ramp"] = ramp_history
+            result["peak_concurrency"] = max(
+                [h["concurrency"] for h in ramp_history] + [current_concurrency]
             )
-        elif skipped and until_throttled:
-            ctx.shared_state["task_summary"] = (
-                _summary_line(ctx.shared_state[result_key], ctx.shared_state[result_key]["total_requests"])
-                + f" · sent until throttled (stopped after {stop_after_429s} throttled requests)"
-            )
-        elif skipped:
+            if required_tps:
+                result["required_tokens_per_s"] = round(required_tps, 1)
+            if first_429_at is None:
+                bound, why = _diagnose_unthrottled(
+                    ramp_history, required_tps, max_concurrency, stop_reason or "unknown",
+                    limit_tokens, window_text or "the window",
+                )
+                result["limit_reached"] = 0
+                result["not_throttled_bound"] = bound
+                ctx.shared_state.setdefault("_findings", []).append(
+                    {"title": "Couldn't reach the limit", "text": why, "outcome": "inconclusive"}
+                )
+                ctx.shared_state["_verdict_text"] = f"Inconclusive — couldn't reach the limit. {why}"
+                ctx.shared_state["task_summary"] = (
+                    _summary_line(result, None) + f" · never throttled ({bound}-bound)"
+                )
+            else:
+                result["limit_reached"] = 1
+                ctx.shared_state["task_summary"] = (
+                    _summary_line(result, None)
+                    + f" · sent until throttled at concurrency {concurrency_at_first_429}"
+                )
+        elif skipped and not stage_levels:
             ctx.shared_state["task_summary"] = (
                 _summary_line(ctx.shared_state[result_key], count)
                 + f" · stopped early after {stop_after_429s} throttled requests"

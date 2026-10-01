@@ -6,13 +6,15 @@ summary: >-
   shows how many tokens got through first — and that nothing got through after.
 description: >-
   Reads the token limit your subscription declares for the chosen model,
-  creates an API key pinned to the subscription, and sends requests one at a
-  time until MaaS starts answering 429 (Too Many Requests). Checks that
-  throttling started at the configured limit — not early, and not more than
-  one request's worth past it — that no request got through afterwards, and
-  that Limitador (the gateway's rate-limit service) itself recorded the
-  denials. If the limit is too large to use up by test traffic (e.g. 100,000
-  tokens), the run stops early and says so instead of grinding through it.
+  creates an API key pinned to the subscription, and sends requests until
+  MaaS starts answering 429 (Too Many Requests) — as fast as it takes to use
+  the limit up within one window, ramping concurrency up when one request at
+  a time is too slow. Checks that throttling started at the configured limit
+  (not early, and not more than the requests already in flight past it), that
+  nothing got through afterwards, and that Limitador (the gateway's
+  rate-limit service) itself recorded the denials. If the limit still can't
+  be reached, the run says why — the model answering too slowly, or a time,
+  concurrency or request budget running out — with the numbers.
 category: "Rate limits"
 kind: verify
 order: 1
@@ -27,12 +29,22 @@ inputs:
     label: "Subscription"
   target_model_name:
     label: "Model"
-  spillover_tokens:
+  max_concurrency:
     advanced: true
     help: >-
-      How far past the limit the first 429 may land. MaaS only knows a request's
-      token cost after answering it, so the request that crosses the limit still
-      completes — this allows for that one request's tokens.
+      The most requests this run will have in flight at once. It starts at 1 and
+      doubles every 2 s while it's sending too slowly to use the limit up within
+      one window (a window resets otherwise, and the limit is never reached).
+      Higher reaches bigger limits but puts more load on the model.
+  max_duration_s:
+    advanced: true
+    help: >-
+      Longest the run keeps sending, in seconds. Blank = one window of the
+      subscription's limit (at most 10 minutes), which is all the time there
+      is to use it up.
+  max_requests:
+    advanced: true
+    help: "Safety cap on the total number of requests sent."
   limitador_namespace:
     advanced: true
     from_model: http_route
@@ -52,7 +64,9 @@ config:
   subscription: ""
   target_model_name: ""
   target_model_namespace: ""
-  spillover_tokens: 100
+  max_concurrency: 128
+  max_duration_s: ""
+  max_requests: 20000
   limitador_namespace: ""
   metrics_max_wait_s: 65
   prompt: "Hello, world!"
@@ -95,6 +109,10 @@ tasks:
       retries: 0
       until_throttled: true
       limit_from_shared_state: "subscription_limits.token_limit"
+      window_from_shared_state: "subscription_limits.window_s"
+      max_concurrency: "${config.max_concurrency}"
+      max_duration_s: "${config.max_duration_s}"
+      max_requests: "${config.max_requests}"
       chart: true
     assertions:
       throttled_at_all:
@@ -105,12 +123,14 @@ tasks:
         expect: "> 0"
       tokens_before_first_429:
         label: "Tokens through before the first 429"
-        description: "Should land between the configured limit and one request's worth past it."
+        description: >-
+          Should land between the configured limit and the limit plus whatever was
+          already in flight when it was crossed (requests in flight × tokens per request).
         unit: "tokens"
         promql: "${harness.inference_results.tokens_before_first_429}"
         between:
           - "${harness.subscription_limits.token_limit}"
-          - "${harness.subscription_limits.token_limit} + ${config.spillover_tokens}"
+          - "${harness.subscription_limits.token_limit} + ${harness.inference_results.allowed_overshoot}"
       limit_stays_closed:
         label: "Requests that succeeded after being throttled"
         description: "Once over the limit, nothing should get through until the window resets."

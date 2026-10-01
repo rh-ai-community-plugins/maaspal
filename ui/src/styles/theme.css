@@ -776,3 +776,55 @@
   pointer-events: none;
   white-space: nowrap;
 }
+
+/* ---------- Panel header (title + action) ---------- */
+.maaspal-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.maaspal-panel__header .maaspal-panel__title {
+  margin: 0;
+}
+
+/* ---------- Logs panel ---------- */
+.maaspal-logs-panel__preview {
+  display: block;
+  font-size: 0.78rem;
+  color: #555;
+  background: #f6f6f6;
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Traffic: error reasons ---------- */
+.maaspal-error-samples {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid #d03b3b;
+  background: #fdf3f3;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.maaspal-traffic-line__error {
+  flex-basis: 100%;
+  color: #c62828;
+  font-size: 0.78rem;
+}
+
+.maaspal-traffic-line--bare {
+  border: none;
+  padding: 0.15rem 0;
+  margin: 0;
+  background: none;
+}

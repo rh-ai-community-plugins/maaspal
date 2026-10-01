@@ -5,22 +5,24 @@ summary: >-
   Deploys a small test model, then sends the same requests straight to it and
   through MaaS, and shows the latency difference.
 description: >-
-  Deploys a throwaway simulated model and makes it available through MaaS
-  (an auth policy and a subscription of its own), then sends the same burst
-  twice: directly to the model's in-cluster address, bypassing MaaS, and
-  through the MaaS gateway with an API key. The difference in median latency
+  Deploys a throwaway simulated model and makes it available two ways: through
+  MaaS (an auth policy and a subscription of its own) and through a plain
+  OpenShift Route straight to the model. Both paths enter through the
+  cluster's ingress like a real client would, so the only difference is the
+  MaaS gateway. It checks the direct route answers, then sends the same burst
+  both ways. The difference in median latency
   is what the gateway (authentication, rate limiting, routing) adds. Using
   its own model means there's nothing to look up or type in, and your real
   models' traffic isn't affected. Everything is removed afterwards.
 category: "Performance"
 kind: explore
-mutates: [api_keys, subscriptions, auth_policies, models]
+mutates: [api_keys, subscriptions, auth_policies, models, routes]
 needs_rbac: [model-write]
 est_duration: "~3 min"
 plan_template: >-
-  Deploy a test model in ${config.model_namespace}, make it available through MaaS,
-  then send ${config.request_count} requests directly and ${config.request_count}
-  through MaaS, and compare median latency.
+  Deploy a test model in ${config.model_namespace}, expose it through MaaS and through
+  its own Route, then send ${config.request_count} requests each way and compare
+  median latency.
 inputs:
   request_count:
     label: "Requests per path"
@@ -83,10 +85,17 @@ tasks:
     params:
       key_name: "maaspal-overhead-key"
       subscription: "maaspal-overhead-test"
+  - name: expose_model_route
+    params:
+      models_from_shared_state: "deployed_models"
+  - name: probe_direct_endpoint
+    params:
+      models_from_shared_state: "deployed_models"
   - name: send_requests
     params:
       url_from_shared_state: "deployed_models"
-      # The simulator serves HTTPS with a cluster-issued certificate.
+      skip_unless: "direct_probe.reachable"
+      # Passthrough Route: the model's own self-signed certificate.
       insecure_tls: true
       count: "${config.request_count}"
       concurrency: "${config.concurrency}"
@@ -94,7 +103,7 @@ tasks:
       result_key: "direct_results"
     assertions:
       direct_error_rate_pct:
-        label: "Error rate calling the model directly"
+        label: "Error rate calling the model directly (its own Route)"
         unit: "%"
         promql: "${harness.direct_results.error_rate_pct}"
         expect: "< 5"

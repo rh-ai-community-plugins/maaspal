@@ -86,8 +86,12 @@ tasks:
       # window is exactly the effect being measured.
       retries: 0
       until_throttled: true
+      limit: "${config.token_limit}"
+      window: "${config.token_window}"
       stop_after_429s: 2
       chart: true
+      chart_group: "recovery"
+      label: "Before the wait"
     assertions:
       throttled_at_all:
         label: "Budget used up (throttled)"
@@ -110,6 +114,9 @@ tasks:
       key_pool: true
       retries: 0
       result_key: "inference_results_after_window"
+      chart: true
+      chart_group: "recovery"
+      label: "After the wait"
     assertions:
       recovered_success_count:
         label: "Requests that succeeded after the wait"

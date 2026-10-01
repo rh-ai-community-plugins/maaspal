@@ -1,3 +1,4 @@
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -856,23 +857,94 @@ async def test_until_throttled_progress_tracks_tokens_toward_the_limit() -> None
     assert ctx.shared_state["task_progress"] == {"current": 50, "total": 50, "unit": "tokens"}
 
 
-async def test_until_throttled_gives_up_honestly_on_a_limit_too_large_to_use_up() -> None:
+class _WindowedLimiter:
+    """A fake model behind a fixed-window token limit: answers after
+    `latency_s`, 429s once `limit` tokens were used in the current window.
+    `server_slots` caps how many requests it serves at once (a slow model)."""
+
+    def __init__(self, limit: int, window_s: float, latency_s: float, tokens: int = 20, server_slots: int = 10_000):
+        self.limit, self.window_s, self.latency_s, self.tokens = limit, window_s, latency_s, tokens
+        self.used = 0
+        self.window_start: float | None = None
+        self.slots = asyncio.Semaphore(server_slots)
+
+    async def create(self, **_):
+        now = time.monotonic()
+        if self.window_start is None or now - self.window_start >= self.window_s:
+            self.window_start, self.used = now, 0
+        if self.used >= self.limit:
+            raise _api_status_error(429)
+        async with self.slots:
+            await asyncio.sleep(self.latency_s)
+        self.used += self.tokens
+        return _usage_response(self.tokens)
+
+
+async def _run_limiter(
+    limiter: _WindowedLimiter, monkeypatch: pytest.MonkeyPatch, interval_s: float = 0.05, **params
+) -> dict:
+    monkeypatch.setattr("harness.tasks.inference._RAMP_INTERVAL_S", interval_s)
     with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
         m = MagicMock()
-        m.chat.completions.create = AsyncMock(side_effect=lambda **_: _usage_response(20))
+        m.chat.completions.create = limiter.create
         mock_cls.return_value = m
-        ctx = _make_ctx({"subscription_limits": {"token_limit": 100000}})
-        task = SendRequestsTask(
+        ctx = _make_ctx()
+        await SendRequestsTask(
             "send_requests",
-            {"url": "http://m.test", "token": "sk-t", "concurrency": "1", "until_throttled": "true",
-             "max_requests": "500", "limit_from_shared_state": "subscription_limits.token_limit"},
-        )
-        await task.run(ctx)
-    ir = ctx.shared_state["inference_results"]
-    assert ir["total_requests"] == 3  # stopped right after the estimate
-    assert ir["limit_unreachable"] == 1
-    assert ctx.shared_state["_verdict_text"].startswith("Inconclusive")
-    assert "~5,000 requests" in ctx.shared_state["task_summary"]
+            {"url": "http://m.test", "token": "sk-t", "concurrency": "1", "until_throttled": "true", **params},
+        ).run(ctx)
+    return ctx.shared_state
+
+
+async def test_until_throttled_ramps_concurrency_to_reach_the_limit_within_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At concurrency 1 this model serves ~200 tokens/s — too slow to use up
+    400 tokens within a 1 s window, so the limit would never trigger. The
+    ramp has to open more concurrency until it does."""
+    limiter = _WindowedLimiter(limit=400, window_s=1.0, latency_s=0.1)
+    state = await _run_limiter(limiter, monkeypatch, limit="400", window="1s", max_duration_s="5")
+    ir = state["inference_results"]
+    assert ir["limit_reached"] == 1
+    assert ir["concurrency_at_first_429"] > 1
+    assert ir["tokens_before_first_429"] >= 400
+    # Overshoot bound scales with how many requests were in flight.
+    assert ir["allowed_overshoot"] == ir["concurrency_at_first_429"] * 20
+    assert ir["tokens_before_first_429"] <= 400 + ir["allowed_overshoot"]
+    assert ir["successes_after_first_429"] == 0  # in-flight completions aren't leakage
+
+
+async def test_until_throttled_explains_a_model_too_slow_to_hit_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One server slot: more concurrency just queues — throughput can't grow.
+    limiter = _WindowedLimiter(limit=100_000, window_s=1.0, latency_s=0.02, server_slots=1)
+    state = await _run_limiter(
+        limiter, monkeypatch, interval_s=0.2, limit="100000", window="1s", max_duration_s="2.4", max_concurrency="16"
+    )
+    ir = state["inference_results"]
+    assert ir["limit_reached"] == 0
+    assert ir["not_throttled_bound"] == "response"
+    [finding] = state["_findings"]
+    assert finding["title"] == "Couldn't reach the limit"
+    assert "can't answer fast enough" in finding["text"]
+    assert state["_verdict_text"].startswith("Inconclusive")
+
+
+def test_diagnosis_names_the_bottleneck() -> None:
+    from harness.tasks.inference import _diagnose_unthrottled
+
+    def h(c: int, tps: float, p50: float = 50.0) -> dict:
+        return {"t": 0, "concurrency": c, "tokens_per_s": tps, "p50_ms": p50}
+
+    still_scaling = [h(1, 100), h(2, 200), h(4, 400)]
+    plateaued = [h(1, 100), h(2, 180), h(4, 190, 400)]
+    assert _diagnose_unthrottled(still_scaling, 1000, 4, "time", 60000, "1m")[0] == "send"
+    assert _diagnose_unthrottled(plateaued, 1000, 128, "time", 60000, "1m")[0] == "response"
+    assert _diagnose_unthrottled(still_scaling, 1000, 128, "time", 60000, "1m")[0] == "time"
+    assert _diagnose_unthrottled(still_scaling, 1000, 128, "requests", 60000, "1m")[0] == "requests"
+    bound, text = _diagnose_unthrottled(still_scaling, 1000, 4, "time", 60000, "1m")
+    assert "needs ~1,000 tokens/s" in text and "Max concurrency" in text
 
 
 async def test_chart_flag_and_insecure_tls_reach_the_client() -> None:
@@ -880,12 +952,83 @@ async def test_chart_flag_and_insecure_tls_reach_the_client() -> None:
          patch("harness.tasks.inference.DefaultAsyncHttpxClient") as http_cls:
         mock_cls.return_value = _mock_client()
         ctx = _make_ctx({"deployed_models": [{"name": "sim-1", "namespace": "llm",
-                                              "internal_url": "https://sim-1.llm.svc.cluster.local:8000"}]})
+                                              "direct_url": "https://sim-1-direct-llm.apps.example.test/v1"}]})
         await SendRequestsTask(
             "send_requests",
             {"count": "1", "url_from_shared_state": "deployed_models", "insecure_tls": "true", "chart": "true", "token": "x"},
         ).run(ctx)
     assert http_cls.call_args.kwargs["verify"] is False
-    _assert_client_built_with(mock_cls, api_key="x", base_url="https://sim-1.llm.svc.cluster.local:8000/v1")
+    _assert_client_built_with(mock_cls, api_key="x", base_url="https://sim-1-direct-llm.apps.example.test/v1")
     assert mock_cls.return_value.chat.completions.create.call_args.kwargs["model"] == "sim-1"
     assert ctx.shared_state["_traffic"]["inference_results"]["chart"] is True
+
+
+async def test_error_samples_name_the_most_common_failure() -> None:
+    state = await _run_sequence([_api_status_error(404)] * 3 + [_api_status_error(503), _api_status_error(429)])
+    ir = state["inference_results"]
+    assert ir["not_found_count"] == 3
+    assert ir["other_error_count"] == 0
+    assert ir["error_samples"][0]["count"] == 3
+    assert ir["error_samples"][0]["message"].startswith("HTTP 404")
+    # Throttling isn't an error reason — it has its own counters.
+    assert all("429" not in e["message"] for e in ir["error_samples"])
+    assert "most common error: 3× HTTP 404" in state["task_summary"]
+    assert [p[2] for p in state["_traffic"]["inference_results"]["timeline"]][:3] == ["not_found"] * 3
+
+
+async def test_connection_errors_report_the_hidden_cause() -> None:
+    from openai import APIConnectionError
+
+    request = httpx.Request("POST", "https://x/v1/chat/completions")
+    try:
+        try:
+            raise httpx.ConnectError("Name or service not known")
+        except httpx.ConnectError as cause:
+            raise APIConnectionError(request=request) from cause
+    except APIConnectionError as exc:
+        conn_error = exc
+
+    state = await _run_sequence([conn_error])
+    [sample] = state["inference_results"]["error_samples"]
+    assert sample["message"] == "ConnectError: Name or service not known"
+
+
+async def test_skip_unless_skips_when_precondition_missing() -> None:
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        ctx = _make_ctx({"direct_probe": {"reachable": 0}})
+        result = await SendRequestsTask(
+            "send_requests", {"count": "5", "url": "http://m.test", "token": "x", "skip_unless": "direct_probe.reachable"}
+        ).run(ctx)
+    assert result.status == "PASS"
+    mock_cls.assert_not_called()
+    assert ctx.shared_state["task_summary"].startswith("Skipped")
+
+
+async def test_step_load_reports_each_concurrency_step() -> None:
+    """A slow model (2 slots, 50 ms each ≈ 40 req/s ceiling): throughput
+    rises from 1 to 2 in flight, then flattens while latency climbs at 4."""
+    limiter = _WindowedLimiter(limit=10**9, window_s=60.0, latency_s=0.05, server_slots=2)
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = limiter.create
+        mock_cls.return_value = m
+        ctx = _make_ctx()
+        await SendRequestsTask(
+            "send_requests",
+            {"url": "http://m.test", "token": "sk-t", "stages": "1,2,4", "stage_duration_s": "0.5"},
+        ).run(ctx)
+
+    ir = ctx.shared_state["inference_results"]
+    stages = ir["stages"]
+    assert [st["concurrency"] for st in stages] == [1, 2, 4]
+    assert stages[1]["requests_per_s"] > stages[0]["requests_per_s"] * 1.5
+    assert stages[2]["p50_latency_ms"] > stages[1]["p50_latency_ms"] * 1.5
+    assert ir["final_stage_p99_latency_ms"] == stages[-1]["p99_latency_ms"]
+    assert "3 steps up to 4 in flight" in ctx.shared_state["task_summary"]
+
+
+async def test_bursts_carry_their_chart_group_label_and_start_time() -> None:
+    state = await _run_sequence([_usage_response()], chart_group="recovery", label="Before the wait")
+    entry = state["_traffic"]["inference_results"]
+    assert (entry["chart_group"], entry["label"]) == ("recovery", "Before the wait")
+    assert entry["t0"] > 0

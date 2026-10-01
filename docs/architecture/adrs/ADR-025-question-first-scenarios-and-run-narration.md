@@ -104,3 +104,17 @@ Categories are now organised by question: Quick check, Rate limits, Access contr
 - **Launch form.** "How it works" became "More details" inside "What this run will do", and every non-obvious input has an ⓘ explanation.
 - **Overlap removed.** The smoke test no longer revokes or searches. `api_key_lifecycle` owns that, plus "revoking one key leaves the others working".
 - **Gateway overhead uses a throwaway model**, so it needs no endpoint details. The model's in-cluster address is taken from `LLMInferenceService.status.addresses`, which has not yet been verified on a live cluster.
+
+## Update: round 3
+
+- **Rate-limit checks push until they hit the limit.**
+  - `until_throttled` ramps concurrency while the measured token rate is below `limit ÷ window`, since a fixed window resets otherwise.
+  - The bounds are user settings: max concurrency (128), max duration (one window) and max requests (20,000).
+  - When the limit is never reached, the run explains why with numbers: the model is too slow (response-bound), the concurrency ceiling was hit while still scaling (send-bound), or a time or request budget ran out.
+  - The allowed overshoot past the limit scales with concurrency at the first 429.
+- **Load test is a step load** (5 → 10 → 25 → 50 in flight, 30 s each), reported per step.
+- **Window recovery, and per user or shared,** draw both bursts on one timeline (`chart_group`).
+- **Gateway overhead's direct leg is a passthrough Route to the model**, after a live check showed `status.addresses` only lists gateway URLs. Failures now explain themselves (`error_samples`, a 404 bucket).
+- **Run page:**
+  - "What happened" groups large resource lists by kind and status, and can be collapsed.
+  - Logs are a panel with a clear Show/Hide button, a line count and a last-line preview.

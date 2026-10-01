@@ -309,6 +309,8 @@ def _traffic_snapshot(shared_state: dict, default_limit: object = None) -> list[
                 "summary": shared_state.get(result_key) or {},
                 "timeline": _downsample_timeline(info.get("timeline") or []),
                 "chart": bool(info.get("chart")),
+                "chart_group": info.get("chart_group"),
+                "t0": info.get("t0"),
             }
         )
     return out
@@ -324,7 +326,10 @@ def _tables_snapshot(shared_state: dict) -> list[dict]:
 
 
 def _format_number(value: float) -> str:
-    return f"{int(value):,}" if float(value).is_integer() else f"{value:,.2f}"
+    # Whole numbers from 100 up — "163 ms", not a falsely precise "163.30 ms".
+    if float(value).is_integer() or abs(value) >= 100:
+        return f"{round(value):,}"
+    return f"{value:,.2f}"
 
 
 def _render_verdict(

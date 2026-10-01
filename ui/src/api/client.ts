@@ -152,7 +152,7 @@ export interface TaskProgressEntry {
 }
 
 // Timeline point: [seconds since burst start, cumulative tokens, outcome, latency ms]
-export type TrafficOutcome = 'ok' | 'throttled' | 'denied' | 'server_error' | 'error';
+export type TrafficOutcome = 'ok' | 'throttled' | 'denied' | 'not_found' | 'server_error' | 'error';
 export type TrafficPoint = [number, number, TrafficOutcome, number];
 
 export interface TrafficSummary {
@@ -175,6 +175,30 @@ export interface TrafficSummary {
   requests_before_first_429?: number;
   seconds_to_first_429?: number;
   successes_after_first_429?: number;
+  not_found_count?: number;
+  // The most common failure reasons, e.g. "HTTP 404 Not Found".
+  error_samples?: { message: string; count: number }[];
+  // Rate-limit bursts sent "until throttled".
+  allowed_overshoot?: number;
+  concurrency_at_first_429?: number;
+  peak_concurrency?: number;
+  required_tokens_per_s?: number;
+  limit_reached?: 0 | 1;
+  not_throttled_bound?: string;
+  // Step load: one entry per concurrency step.
+  stages?: LoadStage[];
+}
+
+export interface LoadStage {
+  concurrency: number;
+  requests: number;
+  requests_per_s: number;
+  tokens_per_s: number;
+  p50_latency_ms: number;
+  p95_latency_ms: number;
+  p99_latency_ms: number;
+  error_rate_pct: number;
+  throttled_pct: number;
 }
 
 export interface TrafficBurst {
@@ -186,6 +210,10 @@ export interface TrafficBurst {
   // Whether this burst's shape over time answers the scenario's question —
   // otherwise it's shown as a one-line summary, no chart.
   chart?: boolean;
+  // Bursts sharing a group are drawn on one timeline, placed by start time.
+  chart_group?: string | null;
+  // Wall-clock start, seconds since the epoch.
+  t0?: number;
   planned?: number;
   summary: TrafficSummary;
   timeline: TrafficPoint[];

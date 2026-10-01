@@ -39,3 +39,13 @@ Runs had no way to be stopped once started — a user watching a long or misconf
 
 **Neutral:**
 - `deploy/rbac.yaml` gained `delete` on the `pods` resource (previously `get`/`list`/`watch` only) — the only RBAC change this feature required.
+
+## Update: suspend the Job, don't delete the pod
+
+Deleting the run's pod turned out to be unsafe. The Job had the default `backoffLimit` (6), so the Job controller replaced the deleted pod with a fresh one under the same run id. That new pod re-ran the whole scenario, re-created its cluster resources, and overwrote the run's progress files: on the run page, the cancelled run flipped back to a run starting from scratch. This was confirmed live.
+
+`stop_run` now **suspends the Job** (`spec.suspend: true`). Kubernetes deletes the pod gracefully, with the same `terminationGracePeriodSeconds`, so the SIGTERM handler and cleanup run exactly as before, and a suspended Job never creates a replacement. Every Job also gets `backoffLimit: 0`, so a crash can't silently re-run a scenario either.
+
+- The run's Job is found through the pod's `ownerReference`, so this also works for Jobs created before they carried the run-id label.
+- It needs `patch` on `jobs` (`deploy/rbac.yaml`). Without it, `stop_run` falls back to deleting the pod and logs a warning.
+- Suspended Jobs never complete, so their TTL never fires. The API deletes a stopped run's Job once it has recorded the run as CANCELLED.

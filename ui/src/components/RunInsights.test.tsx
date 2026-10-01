@@ -4,6 +4,7 @@ import {
   FindingsPanel,
   MetricsChartsPanel,
   RunSteps,
+  TrafficGroupPanel,
   TrafficPanel,
   VerdictBanner,
 } from './RunInsights';
@@ -57,7 +58,8 @@ test('traffic panel shows where throttling started against the configured limit'
   render(<TrafficPanel burst={burst} />);
   expect(screen.getByText('112 tokens')).toBeInTheDocument();
   expect(screen.getByText('4 requests · 2.4s in')).toBeInTheDocument();
-  expect(screen.getAllByText('Configured limit')).toHaveLength(2); // stat + chart legend
+  expect(screen.getByText('Configured limit')).toBeInTheDocument(); // stat
+  expect(screen.getByText('Configured limit (100)')).toBeInTheDocument(); // chart legend
   expect(screen.getByText('4 OK · 5 throttled')).toBeInTheDocument();
   // Chart legend names the non-OK outcome present, never colour alone.
   expect(screen.getByText('Throttled (429)')).toBeInTheDocument();
@@ -160,4 +162,103 @@ test('detail table renders the rows a task published', () => {
   );
   expect(screen.getByText('Model health')).toBeInTheDocument();
   expect(screen.getByText('llm/b')).toBeInTheDocument();
+});
+
+
+test('many objects of one kind collapse into a count per status, with Show all', () => {
+  const keys = Array.from({ length: 1000 }, (_, i) => ({
+    kind: 'API key',
+    name: `key-${i}`,
+    task: 'provision_api_key',
+    status: (i < 998 ? 'removed' : 'cleanup failed') as 'removed' | 'cleanup failed',
+  }));
+  render(
+    <RunSteps
+      tasks={[{ name: 'provision_api_key', status: 'DONE', summary: 'Created 1000 API keys' }]}
+      resources={keys}
+      cleanupStatus="failed"
+    />,
+  );
+  expect(screen.getByText('API key × 1,000')).toBeInTheDocument();
+  expect(screen.getByText('998 removed ✓')).toBeInTheDocument();
+  expect(screen.getByText('2 cleanup failed ✗')).toBeInTheDocument();
+  expect(screen.queryByText('key-0')).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
+  expect(screen.getByText('key-0')).toBeInTheDocument();
+  expect(screen.getByText('…and 800 more')).toBeInTheDocument();
+});
+
+test('the steps panel can be collapsed to a one-line summary', () => {
+  render(
+    <RunSteps
+      tasks={[{ name: 'provision_api_key', status: 'DONE', summary: 'Created 1 API key' }]}
+      resources={[{ kind: 'API key', name: 'k', task: 'provision_api_key', status: 'removed' }]}
+      cleanupStatus="done"
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse' }));
+  expect(screen.queryByText('Created 1 API key')).not.toBeInTheDocument();
+  expect(screen.getByText(/1 of 1 steps done/)).toBeInTheDocument();
+});
+
+test('bursts in one chart group share a timeline with the wait between them shaded', () => {
+  const base = { task: 'send_requests', chart: true, chart_group: 'recovery', limit: 50 };
+  render(
+    <TrafficGroupPanel
+      bursts={[
+        {
+          ...base, result_key: 'a', label: 'Before the wait', t0: 1000,
+          summary: { total_requests: 4, success_count: 2, rate_limited_count: 2, total_tokens_sent: 60, tokens_before_first_429: 60 },
+          timeline: [[0.2, 30, 'ok', 100], [0.4, 60, 'ok', 100], [0.5, 60, 'throttled', 5], [0.6, 60, 'throttled', 5]],
+        },
+        {
+          ...base, result_key: 'b', label: 'After the wait', t0: 1066,
+          summary: { total_requests: 1, success_count: 1, total_tokens_sent: 30 },
+          timeline: [[0.2, 30, 'ok', 100]],
+        },
+      ]}
+    />,
+  );
+  expect(screen.getAllByRole('img')).toHaveLength(1);
+  expect(screen.getByRole('img', { name: /in 2 bursts/ })).toBeInTheDocument();
+  expect(screen.getByText(/waiting 65s/)).toBeInTheDocument();
+  expect(screen.getByText(/throttled after 60 tokens/)).toBeInTheDocument();
+});
+
+test('a burst that failed says why', () => {
+  render(
+    <TrafficPanel
+      burst={{
+        task: 'send_requests', result_key: 'd', chart: false,
+        summary: {
+          total_requests: 50, success_count: 0, not_found_count: 50, total_tokens_sent: 0,
+          error_samples: [{ message: 'HTTP 404 Not Found', count: 50 }],
+        },
+        timeline: [],
+      }}
+    />,
+  );
+  expect(screen.getByText(/50 not found \(404\)/)).toBeInTheDocument();
+  expect(screen.getByText('HTTP 404 Not Found')).toBeInTheDocument();
+});
+
+test('step load shows a row per step and charts throughput and p95 by step', () => {
+  const stage = (c: number, rps: number, p95: number) => ({
+    concurrency: c, requests: rps * 30, requests_per_s: rps, tokens_per_s: rps * 25,
+    p50_latency_ms: p95 / 2, p95_latency_ms: p95, p99_latency_ms: p95 * 1.2, error_rate_pct: 0, throttled_pct: 0,
+  });
+  render(
+    <TrafficPanel
+      burst={{
+        task: 'send_requests', result_key: 'l',
+        summary: { total_requests: 900, success_count: 900, stages: [stage(5, 10, 200), stage(10, 18, 300), stage(25, 19, 900)] },
+        timeline: [],
+      }}
+    />,
+  );
+  expect(screen.getByText('Load by step')).toBeInTheDocument();
+  expect(screen.getAllByRole('row')).toHaveLength(4);
+  expect(screen.getByRole('img', { name: 'Throughput by concurrency step' })).toBeInTheDocument();
+  expect(screen.getByRole('img', { name: 'p95 latency by concurrency step' })).toBeInTheDocument();
 });

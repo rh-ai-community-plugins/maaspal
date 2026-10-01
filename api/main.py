@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from api.db import get_db_path, init_db
+from api.k8s import delete_stopped_job
 from api.routes.assertions import router as assertions_router
 from api.routes.config import router as config_router
 from api.routes.logs import router as logs_router
@@ -72,6 +73,8 @@ async def _sync_completed_runs() -> None:
             )
             await db.commit()
         print(f"[api] run {run_id} → {status} (cleanup: {cleanup_status})", flush=True)
+        if status == "CANCELLED":
+            await asyncio.to_thread(delete_stopped_job, run_id)
 
 
 async def _poll_job_statuses() -> None:

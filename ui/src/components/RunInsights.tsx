@@ -1,4 +1,7 @@
+import { useState } from 'react';
+import { Button } from '@patternfly/react-core';
 import type {
+  LoadStage,
   MetricsChart,
   RunFinding,
   RunResource,
@@ -62,6 +65,7 @@ function outcomeBreakdown(s: TrafficSummary): string {
   const parts = [`${n(s.success_count)} OK`];
   if (s.rate_limited_count) parts.push(`${n(s.rate_limited_count)} throttled`);
   if (s.unauthorized_count) parts.push(`${n(s.unauthorized_count)} denied`);
+  if (s.not_found_count) parts.push(`${n(s.not_found_count)} not found (404)`);
   if (s.server_error_count) parts.push(`${n(s.server_error_count)} 5xx`);
   if (s.other_error_count) parts.push(`${n(s.other_error_count)} other`);
   return parts.join(' · ');
@@ -69,8 +73,25 @@ function outcomeBreakdown(s: TrafficSummary): string {
 
 /** The numbers a user needs to judge a burst themselves — the same values the
  * assertions check, plus context (tokens split, latency spread, retries). */
+/** Why requests failed — the most common error messages, so a burst that
+ * failed for a reason the counts can't name explains itself. */
+function ErrorSamples({ s }: { s: TrafficSummary }) {
+  const samples = s.error_samples ?? [];
+  if (samples.length === 0) return null;
+  return (
+    <ul className="maaspal-error-samples" aria-label="Most common errors">
+      {samples.map((e) => (
+        <li key={e.message}>
+          <strong>{n(e.count)}×</strong> <code>{e.message}</code>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
   const s = burst.summary;
+  if (s.stages?.length) return <StagesPanel burst={burst} />;
   if (!burst.chart) return <TrafficLine burst={burst} />;
   const retries =
     s.http_attempts !== undefined && s.total_requests !== undefined && s.http_attempts > s.total_requests
@@ -120,24 +141,169 @@ export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
         {retries > 0 && (
           <Stat label="Hidden retries" value={n(retries)} sub="extra HTTP attempts by the SDK" />
         )}
+        {s.peak_concurrency !== undefined && s.peak_concurrency > 1 && (
+          <Stat
+            label="Peak concurrency"
+            value={n(s.peak_concurrency)}
+            sub={
+              s.required_tokens_per_s
+                ? `ramped up to reach ${n(s.required_tokens_per_s)} tokens/s`
+                : 'requests in flight at once'
+            }
+          />
+        )}
       </div>
+      <ErrorSamples s={s} />
       <TrafficChart timeline={burst.timeline} limit={burst.limit ?? null} />
+    </section>
+  );
+}
+
+/** Several bursts drawn on one timeline (a chart_group) — e.g. before and
+ * after waiting out a rate-limit window, or user A then user B. */
+export function TrafficGroupPanel({ bursts }: { bursts: TrafficBurst[] }) {
+  const sorted = [...bursts].sort((a, b) => (a.t0 ?? 0) - (b.t0 ?? 0));
+  const start = sorted[0]?.t0 ?? 0;
+  const segments = sorted.map((b) => ({
+    label: b.label ?? formatTaskName(b.task),
+    offset: Math.max(0, (b.t0 ?? start) - start),
+    timeline: b.timeline,
+  }));
+  const limit = sorted.find((b) => b.limit != null)?.limit ?? null;
+  return (
+    <section className="maaspal-panel" aria-label="Traffic">
+      <p className="maaspal-panel__title">Traffic</p>
+      {sorted.map((b) => (
+        <TrafficLine key={b.result_key} burst={b} bare />
+      ))}
+      <div style={{ marginTop: '0.6rem' }}>
+        <TrafficChart segments={segments} limit={limit} />
+      </div>
+    </section>
+  );
+}
+
+function StepChart({
+  title,
+  unit,
+  stages,
+  value,
+}: {
+  title: string;
+  unit: string;
+  stages: LoadStage[];
+  value: (st: LoadStage) => number;
+}) {
+  const W = 300;
+  const H = 140;
+  const M = { top: 20, right: 12, bottom: 28, left: 46 };
+  const values = stages.map(value);
+  const yMax = Math.max(...values, 1) * 1.15;
+  const sx = (i: number) => M.left + (stages.length === 1 ? 0.5 : i / (stages.length - 1)) * (W - M.left - M.right);
+  const sy = (v: number) => H - M.bottom - (v / yMax) * (H - M.top - M.bottom);
+  const d = values.map((v, i) => `${i === 0 ? 'M' : 'L'}${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(' ');
+  return (
+    <figure style={{ margin: 0 }}>
+      <figcaption style={{ fontSize: '0.8rem', fontWeight: 600, color: '#333' }}>{title}</figcaption>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label={`${title} by concurrency step`}>
+        <line x1={M.left} x2={W - M.right} y1={sy(0)} y2={sy(0)} stroke="#ccc" />
+        <text x={M.left - 6} y={sy(yMax / 1.15)} dy="0.32em" textAnchor="end" fontSize={11} fill="#777">
+          {n(yMax / 1.15)}
+        </text>
+        <text x={M.left - 6} y={10} textAnchor="end" fontSize={11} fill="#777">
+          {unit}
+        </text>
+        <path d={d} fill="none" stroke="#1565c0" strokeWidth={2} />
+        {stages.map((st, i) => (
+          <g key={st.concurrency}>
+            <circle cx={sx(i)} cy={sy(values[i])} r={4} fill="#1565c0" stroke="#fff" strokeWidth={2}>
+              <title>
+                {st.concurrency} in flight: {n(values[i], values[i] < 10 ? 1 : 0)} {unit}
+              </title>
+            </circle>
+            <text x={sx(i)} y={sy(values[i]) - 8} textAnchor="middle" fontSize={11} fill="#333">
+              {n(values[i], values[i] < 10 ? 1 : 0)}
+            </text>
+            <text x={sx(i)} y={H - M.bottom + 16} textAnchor="middle" fontSize={11} fill="#777">
+              {st.concurrency}
+            </text>
+          </g>
+        ))}
+      </svg>
+      <p className="maaspal-stat__sub" style={{ margin: 0, textAlign: 'center' }}>
+        requests in flight
+      </p>
+    </figure>
+  );
+}
+
+/** Step load: one row per concurrency step, plus throughput and p95 by step
+ * — where MaaS starts to struggle, not one averaged number. */
+function StagesPanel({ burst }: { burst: TrafficBurst }) {
+  const stages = burst.summary.stages ?? [];
+  return (
+    <section className="maaspal-panel" aria-label="Load steps">
+      <p className="maaspal-panel__title">Load by step</p>
+      <div className="maaspal-table-scroll">
+        <table className="maaspal-detail-table">
+          <thead>
+            <tr>
+              <th>In flight</th>
+              <th>Requests</th>
+              <th>Req/s</th>
+              <th>Tokens/s</th>
+              <th>p50</th>
+              <th>p95</th>
+              <th>p99</th>
+              <th>Errors</th>
+              <th>Throttled</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stages.map((st) => (
+              <tr key={st.concurrency}>
+                <td>{st.concurrency}</td>
+                <td>{n(st.requests)}</td>
+                <td>{n(st.requests_per_s, 1)}</td>
+                <td>{n(st.tokens_per_s)}</td>
+                <td>{n(st.p50_latency_ms)} ms</td>
+                <td>{n(st.p95_latency_ms)} ms</td>
+                <td>{n(st.p99_latency_ms)} ms</td>
+                <td>{st.error_rate_pct}%</td>
+                <td>{st.throttled_pct}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <ErrorSamples s={burst.summary} />
+      <div className="maaspal-chart-grid" style={{ marginTop: '0.75rem' }}>
+        <StepChart title="Throughput" unit="req/s" stages={stages} value={(st) => st.requests_per_s} />
+        <StepChart title="p95 latency" unit="ms" stages={stages} value={(st) => st.p95_latency_ms} />
+      </div>
     </section>
   );
 }
 
 /** One line for a burst whose shape over time doesn't answer the scenario's
  * question (e.g. "3 requests · 3 denied") — the numbers, without a chart. */
-function TrafficLine({ burst }: { burst: TrafficBurst }) {
+function TrafficLine({ burst, bare = false }: { burst: TrafficBurst; bare?: boolean }) {
   const s = burst.summary;
   const heading = burst.label ? `${formatTaskName(burst.task)} — ${burst.label}` : formatTaskName(burst.task);
+  const firstError = !s.success_count ? s.error_samples?.[0] : undefined;
   return (
-    <div className="maaspal-traffic-line" aria-label={`Traffic: ${heading}`}>
+    <div className={bare ? 'maaspal-traffic-line maaspal-traffic-line--bare' : 'maaspal-traffic-line'} aria-label={`Traffic: ${heading}`}>
       <span className="maaspal-traffic-line__name">{heading}</span>
       <span>
         {n(s.total_requests)} requests · {outcomeBreakdown(s)} · {n(s.total_tokens_sent)} tokens · p50{' '}
         {n(s.p50_latency_ms)} ms
+        {s.tokens_before_first_429 !== undefined && ` · throttled after ${n(s.tokens_before_first_429)} tokens`}
       </span>
+      {firstError && (
+        <span className="maaspal-traffic-line__error">
+          most common error: {n(firstError.count)}× <code>{firstError.message}</code>
+        </span>
+      )}
     </div>
   );
 }
@@ -191,6 +357,67 @@ function cleanupSummary(resources: RunResource[], cleanupStatus?: string): { tex
 /** What happened, step by step: each task's one-line narration plus
  * whatever that step created, with each object's own cleanup status, and a
  * final Cleanup row. The chips above show live progress; this is the story. */
+// Up to this many objects of one kind are listed one by one; more collapse
+// into a count-per-status row (a run can create thousands of API keys).
+const LIST_INDIVIDUALLY = 5;
+const LIST_MAX_RENDERED = 200;
+
+/** One step's created objects: listed individually when few, otherwise one
+ * summary row per kind with counts by status and a "Show all" toggle. */
+function StepResources({ resources }: { resources: RunResource[] }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const byKind = new Map<string, RunResource[]>();
+  for (const r of resources) byKind.set(r.kind, [...(byKind.get(r.kind) ?? []), r]);
+  return (
+    <ul className="maaspal-steps__resources">
+      {[...byKind.entries()].map(([kind, items]) => {
+        if (items.length <= LIST_INDIVIDUALLY) {
+          return items.map((r) => <ResourceItem key={`${r.kind}-${r.name}`} r={r} />);
+        }
+        const counts = new Map<string, number>();
+        for (const r of items) counts.set(r.status ?? 'active', (counts.get(r.status ?? 'active') ?? 0) + 1);
+        const isOpen = !!expanded[kind];
+        return (
+          <li key={kind} className="maaspal-steps__resource">
+            <span className="maaspal-resource-list__kind">
+              {kind} × {items.length.toLocaleString()}
+            </span>
+            {[...counts.entries()].map(([status, count]) => {
+              const st = RESOURCE_STATUS[status] ?? RESOURCE_STATUS.active;
+              return (
+                <span key={status} className="maaspal-steps__status" style={{ color: st.color }}>
+                  {count.toLocaleString()} {st.label}
+                </span>
+              );
+            })}
+            <button
+              type="button"
+              className="maaspal-assertion-card__details-toggle"
+              style={{ marginLeft: '0.6rem' }}
+              aria-expanded={isOpen}
+              onClick={() => setExpanded((prev) => ({ ...prev, [kind]: !isOpen }))}
+            >
+              {isOpen ? 'Hide' : 'Show all'}
+            </button>
+            {isOpen && (
+              <ul className="maaspal-steps__resources">
+                {items.slice(0, LIST_MAX_RENDERED).map((r) => (
+                  <ResourceItem key={`${r.kind}-${r.name}`} r={r} />
+                ))}
+                {items.length > LIST_MAX_RENDERED && (
+                  <li className="maaspal-steps__meta">
+                    …and {(items.length - LIST_MAX_RENDERED).toLocaleString()} more
+                  </li>
+                )}
+              </ul>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 export function RunSteps({
   tasks,
   resources,
@@ -200,6 +427,7 @@ export function RunSteps({
   resources: RunResource[];
   cleanupStatus?: string;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
   if (!tasks.some((t) => t.summary) && resources.length === 0) return null;
   const byTask = new Map<string, RunResource[]>();
   for (const r of resources) {
@@ -210,7 +438,18 @@ export function RunSteps({
   const cleanup = cleanupSummary(resources, cleanupStatus);
   return (
     <section className="maaspal-panel" aria-label="What happened">
-      <p className="maaspal-panel__title">What happened</p>
+      <div className="maaspal-panel__header">
+        <p className="maaspal-panel__title">What happened</p>
+        <Button variant="link" isInline onClick={() => setCollapsed((c) => !c)} aria-expanded={!collapsed}>
+          {collapsed ? 'Show steps' : 'Collapse'}
+        </Button>
+      </div>
+      {collapsed ? (
+        <p className="maaspal-steps__text" style={{ margin: 0 }}>
+          {tasks.filter((t) => t.status === 'DONE').length} of {tasks.length} steps done
+          {resources.length > 0 && ` · ${cleanup.text}`}
+        </p>
+      ) : (
       <ol className="maaspal-steps">
         {tasks.map((t) => {
           const own = byTask.get(t.name) ?? [];
@@ -227,13 +466,7 @@ export function RunSteps({
                 ) : (
                   t.status === 'PENDING' && <span className="maaspal-steps__text maaspal-steps__text--muted">waiting</span>
                 )}
-                {own.length > 0 && (
-                  <ul className="maaspal-steps__resources">
-                    {own.map((r) => (
-                      <ResourceItem key={`${r.kind}-${r.name}`} r={r} />
-                    ))}
-                  </ul>
-                )}
+                {own.length > 0 && <StepResources resources={own} />}
               </div>
             </li>
           );
@@ -248,17 +481,12 @@ export function RunSteps({
               <span className="maaspal-steps__text" style={{ color: cleanup.color }}>
                 {cleanup.text}
               </span>
-              {unattributed.length > 0 && (
-                <ul className="maaspal-steps__resources">
-                  {unattributed.map((r) => (
-                    <ResourceItem key={`${r.kind}-${r.name}`} r={r} />
-                  ))}
-                </ul>
-              )}
+              {unattributed.length > 0 && <StepResources resources={unattributed} />}
             </div>
           </li>
         )}
       </ol>
+      )}
     </section>
   );
 }

@@ -35,7 +35,7 @@ const TASK_STATUS_COLOR: Record<TaskProgressEntry['status'], string> = {
 
 function formatValue(v: number | null): string {
   if (v === null) return '—';
-  if (Number.isInteger(v)) return v.toLocaleString();
+  if (Number.isInteger(v) || Math.abs(v) >= 100) return Math.round(v).toLocaleString();
   return v.toFixed(2);
 }
 

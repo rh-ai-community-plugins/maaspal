@@ -81,8 +81,12 @@ tasks:
       prompt: "${config.prompt}"
       key_index: 0
       result_key: "inference_results_user_a"
+      chart_group: "users"
+      label: "User A"
       retries: 0
       until_throttled: true
+      limit: "${config.token_limit}"
+      window: "24h"
       chart: true
   - name: send_requests_as_second_user
     params:
@@ -91,8 +95,12 @@ tasks:
       prompt: "${config.prompt}"
       key_index: 1
       result_key: "inference_results_user_b"
+      chart_group: "users"
+      label: "User B"
       retries: 0
       until_throttled: true
+      limit: "${config.token_limit}"
+      window: "24h"
       chart: true
   - name: classify_rate_limit_pooling
     params:

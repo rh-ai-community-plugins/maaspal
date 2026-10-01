@@ -35,7 +35,7 @@ _KNOWN_CATEGORIES = {
 # custom scenario may omit them all (the API falls back to sane defaults).
 _REQUIRED_METADATA = {"title", "summary", "kind"}
 _KNOWN_KINDS = {"verify", "explore"}
-_KNOWN_MUTATES = {"api_keys", "subscriptions", "auth_policies", "models", "service_accounts"}
+_KNOWN_MUTATES = {"api_keys", "subscriptions", "auth_policies", "models", "service_accounts", "routes"}
 
 
 def test_exactly_fourteen_production_scenarios() -> None:

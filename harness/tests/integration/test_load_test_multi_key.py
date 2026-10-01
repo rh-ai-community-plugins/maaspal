@@ -7,7 +7,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _five_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MAASPAL_CONFIG_OVERRIDES", '{"key_count": 5, "request_count": 5}')
+    monkeypatch.setenv("MAASPAL_CONFIG_OVERRIDES", '{"key_count": 5, "concurrency_steps": "5", "step_duration_s": 10}')
 
 
 pytestmark = pytest.mark.skipif(

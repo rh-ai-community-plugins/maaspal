@@ -50,6 +50,7 @@ const MUTATES_LABEL: Record<string, string> = {
   auth_policies: 'auth policies',
   models: 'models',
   service_accounts: 'ServiceAccount identities',
+  routes: 'routes',
 };
 
 function groupByCategory(scenarios: Scenario[]): Map<string, Scenario[]> {

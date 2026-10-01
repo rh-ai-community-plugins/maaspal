@@ -30,12 +30,6 @@ inputs:
     help: >-
       The temporary subscription's token limit. Kept small so test traffic
       uses it up in seconds (~10–30 tokens per request on the simulator).
-  spillover_tokens:
-    advanced: true
-    help: >-
-      How far past the limit the first 429 may land. MaaS only knows a request's
-      token cost after answering it, so the request that crosses the limit still
-      completes — this allows for that one request's tokens.
   new_subscription_name:
     advanced: true
     help: "Name of the temporary MaaSSubscription this run creates and deletes afterwards."
@@ -50,7 +44,6 @@ config:
   target_model_namespace: ""
   key_count: 3
   token_limit: 100
-  spillover_tokens: 100
   new_subscription_name: "maaspal-shared-budget-test"
   subscription_namespace: "models-as-a-service"
   prompt: "Hello, world!"
@@ -92,6 +85,8 @@ tasks:
       key_pool: true
       retries: 0
       until_throttled: true
+      limit: "${config.token_limit}"
+      window: "24h"
       # Enough throttled requests to try every key at least twice afterwards.
       stop_after_429s: 6
       chart: true
@@ -103,10 +98,10 @@ tasks:
         expect: "> 0"
       tokens_before_first_429:
         label: "Combined tokens through before the first 429"
-        description: "One shared budget: the limit (plus one request's spillover), not one limit per key."
+        description: "One shared budget: the limit (plus whatever was in flight), not one limit per key."
         unit: "tokens"
         promql: "${harness.inference_results.tokens_before_first_429}"
-        between: ["${config.token_limit}", "${config.token_limit} + ${config.spillover_tokens}"]
+        between: ["${config.token_limit}", "${config.token_limit} + ${harness.inference_results.allowed_overshoot}"]
       other_keys_blocked:
         label: "Requests that succeeded on any key after the first 429"
         description: "Non-zero would mean some key still had a budget of its own."
