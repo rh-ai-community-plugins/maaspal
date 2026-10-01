@@ -31,6 +31,16 @@ _SENSITIVE_CONFIG_KEY_RE = re.compile(r"(?:^|_)(token|secret|password)(?:$|_)", 
 # resolved config/task-param field in this codebase actually carries raw key
 # material anyway — created key values live only in shared_state at runtime,
 # never in scenario config, so they never reach this snapshot in the first place.
+#
+# "token" can't get the same blanket-substring-exclusion treatment, though —
+# unlike "key", real bearer credentials in this codebase ARE named with "token"
+# as their own complete word (target_token, sa_token), so the regex still needs
+# to catch those. token_limit/token_window (the rate-limit scenarios' MaaS
+# subscription config — an LLM token budget and a time window, not a
+# credential) are a narrower false positive of the same shape: "token" happens
+# to be a complete underscore-delimited word there too. Exact-name carve-out
+# instead of a pattern change, so it can't accidentally un-redact anything else.
+_SENSITIVE_CONFIG_KEY_EXCEPTIONS = {"token_limit", "token_window"}
 
 # Cluster-level settings worth showing alongside a scenario's own config even
 # though they come from the global ConfigMap rather than the scenario YAML.
@@ -78,13 +88,18 @@ def _scenario_settings_snapshot(scenario: dict, resolved_config: dict) -> dict:
 def _redact_sensitive_config(value):
     """Recursively mask likely-sensitive values before a run's snapshot is
     written where a user can view it (GET /api/runs/{id}/config) — a dict key
-    matching token|secret|password|key at *any* nesting depth is masked, since a
-    resolved ${config.target_token}-style value can end up inside a task's
-    params or an assertion, not just the top-level config: block.
+    matching token|secret|password at *any* nesting depth is masked (see
+    _SENSITIVE_CONFIG_KEY_EXCEPTIONS for named carve-outs), since a resolved
+    ${config.target_token}-style value can end up inside a task's params or an
+    assertion, not just the top-level config: block.
     """
     if isinstance(value, dict):
         return {
-            k: ("***REDACTED***" if _SENSITIVE_CONFIG_KEY_RE.search(k) else _redact_sensitive_config(v))
+            k: (
+                "***REDACTED***"
+                if k not in _SENSITIVE_CONFIG_KEY_EXCEPTIONS and _SENSITIVE_CONFIG_KEY_RE.search(k)
+                else _redact_sensitive_config(v)
+            )
             for k, v in value.items()
         }
     if isinstance(value, list):

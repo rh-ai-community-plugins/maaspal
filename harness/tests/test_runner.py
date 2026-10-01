@@ -1005,6 +1005,38 @@ def test_config_snapshot_redacts_sensitive_values_inside_task_params(
     assert snapshot["tasks"][0]["params"]["token"] == "***REDACTED***"
 
 
+def test_config_snapshot_does_not_redact_token_limit_or_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """token_limit/token_window (the rate-limit scenarios' MaaS subscription
+    config — an LLM token budget and a time window, not a credential) are a
+    named exception: "token" is a complete word in them too, but they aren't
+    secrets and a user needs to see them to understand what a run actually
+    tested. Real token credentials (target_token here) must still redact."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+
+    path = _write(tmp_path, """
+        name: test_token_limit_not_redacted
+        config:
+          token_limit: 50
+          token_window: "24h"
+          target_token: "supersecret"
+        tasks:
+          - name: stub_pass
+            params: {}
+        assertions: {}
+    """)
+    result = asyncio.run(ScenarioRunner(path, "config-snap-003").run())
+    assert result.status == "PASS"
+
+    snapshot = json.loads((tmp_path / "config-snap-003-config.json").read_text())
+    assert snapshot["config"]["token_limit"] == 50
+    assert snapshot["config"]["token_window"] == "24h"
+    assert snapshot["config"]["target_token"] == "***REDACTED***"
+
+
 def test_config_snapshot_excludes_incidental_environment_noise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
