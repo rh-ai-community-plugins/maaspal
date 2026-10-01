@@ -1,0 +1,111 @@
+name: denied_without_auth_policy
+previous_names: [subscription_without_authpolicy]
+title: "No auth policy → access denied?"
+summary: >-
+  Quota alone shouldn't grant access: a caller with a subscription but no
+  matching auth policy must be turned away at the gateway.
+description: >-
+  MaaS access has two layers — a MaaSSubscription grants quota, a
+  MaaSAuthPolicy grants gateway access (ADR-018). This deploys a throwaway
+  model that no auth policy covers, mints a throwaway identity, gives that
+  identity generous quota on the model via a subscription, and confirms
+  every request is denied as unauthorized — not rate limited. A dedicated
+  model is needed because gateway access is decided per caller against each
+  model's policies; a shared model with a blanket policy would let anyone in.
+category: "Access control"
+kind: explore
+mutates: [api_keys, subscriptions, models, service_accounts]
+needs_rbac: [user-provisioning, model-write]
+est_duration: "~3 min"
+plan_template: >-
+  Deploy a throwaway model in ${config.model_namespace}, mint 1 ServiceAccount
+  identity, give it ${config.token_limit} tokens of quota via a temporary
+  subscription (and no auth policy), then send ${config.request_count} requests
+  and expect all of them to be denied as unauthorized.
+inputs:
+  request_count: {label: "Requests"}
+  model_namespace:
+    label: "Namespace for the throwaway model"
+    help: "Must carry the maas.opendatahub.io/gateway-access label (e.g. llm)."
+  token_limit:
+    advanced: true
+    help: "Deliberately generous — rate limiting must not be why requests fail here."
+  new_subscription_name: {advanced: true}
+  subscription_namespace: {advanced: true}
+  model_name_prefix: {advanced: true}
+  model_ready_timeout: {advanced: true}
+  concurrency: {advanced: true}
+  key_count: {advanced: true}
+  prompt: {advanced: true}
+config:
+  new_subscription_name: "maaspal-fail-closed-test"
+  subscription_namespace: "models-as-a-service"
+  model_name_prefix: "maaspal-fail-closed-model"
+  # Confirmed-live reconciliation namespace (the cluster's simulator model
+  # lives here) — NOT "maaspal" (deploy_simulated_model's own default).
+  model_namespace: "llm"
+  model_ready_timeout: 120
+  token_limit: 1000000
+  request_count: 20
+  concurrency: 5
+  key_count: 1
+  prompt: "Hello, world!"
+verdict:
+  pass: "The gateway failed closed: a caller with quota but no auth policy was denied every time."
+  fail: "Requests were not denied the way they should be — a caller without an auth policy may be getting through."
+tasks:
+  - name: deploy_simulated_model
+    params:
+      count: 1
+      name_prefix: "${config.model_name_prefix}"
+      namespace: "${config.model_namespace}"
+      ready_max_wait_s: "${config.model_ready_timeout}"
+  - name: create_user
+    params:
+      count: "${config.key_count}"
+      name_prefix: "maaspal-fail-closed-user"
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_from_shared_state: "deployed_models"
+      token_limit: "${config.token_limit}"
+      # Quota bound to the minted identity only (an explicit empty
+      # owner_groups sticks, ADR-023), keeping the blast radius to this check.
+      owner_groups: []
+      owner_users_from_shared_state: "users"
+  - name: provision_keys_for_users
+    params:
+      key_name_prefix: "maaspal-fail-closed-key"
+      subscription: "${config.new_subscription_name}"
+    assertions:
+      subscription_echo_match_count:
+        label: "Key bound to the quota-only subscription"
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== ${config.key_count}"
+  - name: send_requests
+    params:
+      model_from_shared_state: "deployed_models"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_pool: true
+    # Together these isolate the failure mode under test: almost everything
+    # fails, none of it via rate limiting, and via an auth denial specifically.
+    assertions:
+      error_rate_pct:
+        label: "Requests rejected"
+        unit: "%"
+        promql: "${harness.inference_results.error_rate_pct}"
+        expect: "> 90"
+      unauthorized_count:
+        label: "Denied as unauthorized (401/403)"
+        unit: "requests"
+        promql: "${harness.inference_results.unauthorized_count}"
+        expect: "> 0"
+      rate_limited_count:
+        label: "Throttled instead (429) — should be none"
+        unit: "requests"
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "== 0"
+cleanup: automatic

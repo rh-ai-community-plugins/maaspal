@@ -1,0 +1,100 @@
+name: keys_share_user_budget
+title: "Do all my keys share one budget?"
+summary: >-
+  Several API keys belonging to the same user, on the same subscription,
+  should draw from one token budget — not get the limit once per key.
+description: >-
+  MaaS counts token usage per user (the generated TokenRateLimitPolicy's
+  counter is auth.identity.userid), so creating more keys shouldn't buy more
+  quota. This creates several keys on one of your subscriptions and sends
+  requests round-robin across them, one at a time, until throttled. If the
+  keys share one budget, throttling starts at the configured limit and every
+  key is blocked from then on; if each key had its own budget, requests on
+  the other keys would keep succeeding after the first 429.
+category: "Rate limits"
+kind: verify
+mutates: [api_keys]
+requires: [subscription, target_model_name, target_model_namespace]
+est_duration: "~1 min"
+plan_template: >-
+  Create ${config.key_count} API keys on ${subscription}, then send up to
+  ${config.request_count} requests round-robin across them to ${model} and expect
+  one combined budget of ${config.token_limit} tokens per ${config.token_window}.
+inputs:
+  subscription: {label: "Subscription"}
+  key_count: {label: "API keys"}
+  token_limit:
+    label: "Token limit"
+    from_subscription: limit
+    help: "Filled in from the subscription's configured limit for this model."
+  token_window:
+    label: "Window"
+    from_subscription: window
+  request_count:
+    label: "Max requests"
+    help: "Upper bound — stops early once throttled. Must be enough to use up the limit."
+  spillover_tokens: {advanced: true}
+  stop_after_429s: {advanced: true}
+  prompt: {advanced: true}
+config:
+  subscription: ""
+  target_model_name: ""
+  target_model_namespace: ""
+  key_count: 3
+  token_limit: 100
+  token_window: "1m"
+  request_count: 60
+  spillover_tokens: 100
+  # Enough throttled requests to have tried every key at least twice after
+  # the budget ran out.
+  stop_after_429s: 6
+  prompt: "Hello, world!"
+verdict:
+  pass: >-
+    All ${config.key_count} keys shared one budget: throttled after
+    ${harness.inference_results.tokens_before_first_429} tokens combined
+    (limit ${config.token_limit} per ${config.token_window}), and no key got through afterwards.
+  fail: >-
+    The keys didn't behave like one shared budget — first 429 after
+    ${harness.inference_results.tokens_before_first_429} tokens combined,
+    ${harness.inference_results.successes_after_first_429} request(s) succeeded afterwards.
+tasks:
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-shared-budget-key"
+      count: "${config.key_count}"
+      subscription: "${config.subscription}"
+    assertions:
+      subscription_echo_match_count:
+        label: "Keys bound to your subscription"
+        unit: "keys"
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== ${config.key_count}"
+  - name: send_requests
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      count: "${config.request_count}"
+      concurrency: 1
+      prompt: "${config.prompt}"
+      key_pool: true
+      retries: 0
+      stop_after_429s: "${config.stop_after_429s}"
+    assertions:
+      throttled_at_all:
+        label: "MaaS throttled the burst"
+        unit: "429s"
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "> 0"
+      tokens_before_first_429:
+        label: "Combined tokens through before the first 429"
+        description: "One shared budget: the configured limit (plus one request's spillover), not N× it."
+        unit: "tokens"
+        promql: "${harness.inference_results.tokens_before_first_429}"
+        between: ["${config.token_limit}", "${config.token_limit} + ${config.spillover_tokens}"]
+      other_keys_blocked:
+        label: "Requests that succeeded on any key after the first 429"
+        description: "Non-zero means some key still had budget of its own."
+        unit: "requests"
+        promql: "${harness.inference_results.successes_after_first_429}"
+        expect: "== 0"
+cleanup: automatic

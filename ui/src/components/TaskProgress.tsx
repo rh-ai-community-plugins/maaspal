@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { TaskProgressEntry } from '../api/client';
+import { formatTaskName } from '../scenarioTitles';
 
 interface Props {
   tasks: TaskProgressEntry[];
@@ -45,16 +46,16 @@ const ASSERTION_BADGE_COLOR: Record<string, string> = {
   PENDING: '#9e9e9e',
 };
 
-export function formatTaskName(name: string): string {
-  return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-}
 
 export function TaskProgress({ tasks }: Props) {
   useTick(tasks.some((t) => t.status === 'RUNNING' && !!t.started_at));
 
   if (tasks.length === 0) return null;
 
+  const narrated = tasks.filter((t) => t.summary);
+
   return (
+    <>
     <div className="maaspal-task-pipeline">
       {tasks.map((task, i) => {
         const color = STATUS_COLOR[task.status];
@@ -81,6 +82,7 @@ export function TaskProgress({ tasks }: Props) {
             <div
               className={`maaspal-task-chip maaspal-task-chip--${task.status.toLowerCase()}`}
               style={{ '--task-color': color } as React.CSSProperties}
+              title={task.summary}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                 {isRunning ? (
@@ -118,5 +120,26 @@ export function TaskProgress({ tasks }: Props) {
         );
       })}
     </div>
+    {narrated.length > 0 && (
+      <div className="maaspal-run-narrative" aria-label="What happened">
+        <p className="maaspal-section-heading" style={{ marginBottom: '0.35rem' }}>
+          What happened
+        </p>
+        <ol className="maaspal-run-narrative__list">
+          {tasks.map((task) =>
+            task.summary ? (
+              <li key={task.name} className={`maaspal-run-narrative__item maaspal-run-narrative__item--${task.status.toLowerCase()}`}>
+                <span className="maaspal-run-narrative__icon" style={{ color: STATUS_COLOR[task.status] }}>
+                  {task.status === 'RUNNING' ? '◎' : STATUS_ICON[task.status]}
+                </span>
+                <span className="maaspal-run-narrative__task">{formatTaskName(task.name)}</span>
+                <span className="maaspal-run-narrative__text">{task.summary}</span>
+              </li>
+            ) : null,
+          )}
+        </ol>
+      </div>
+    )}
+    </>
   );
 }

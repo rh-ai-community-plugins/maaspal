@@ -42,6 +42,13 @@ def _mock_client(*, fail: bool = False) -> MagicMock:
     return m
 
 
+def _assert_client_built_with(mock_cls: MagicMock, *, api_key: str, base_url: str) -> None:
+    """The last AsyncOpenAI(...) call targeted this key/URL — ignores the
+    retry/http_client plumbing kwargs send_requests also passes."""
+    kwargs = mock_cls.call_args.kwargs
+    assert (kwargs["api_key"], kwargs["base_url"]) == (api_key, base_url)
+
+
 async def test_send_requests_updates_inference_results() -> None:
     with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
         mock_cls.return_value = _mock_client()
@@ -223,6 +230,120 @@ async def test_first_rate_limited_at_tokens_absent_when_never_rate_limited() -> 
     assert "first_rate_limited_at_tokens" not in ctx.shared_state["inference_results"]
 
 
+def _usage_response(tokens: int = 30) -> MagicMock:
+    r = MagicMock()
+    r.usage.total_tokens = tokens
+    return r
+
+
+async def _run_sequence(outcomes: list, **params) -> dict:
+    """Run send_requests sequentially against a fixed list of outcomes
+    (a response or an exception per request) and return shared_state."""
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = AsyncMock(side_effect=outcomes)
+        mock_cls.return_value = m
+        task = SendRequestsTask(
+            "send_requests",
+            {
+                "count": str(len(outcomes)),
+                "concurrency": "1",
+                "url": "http://m.test",
+                "token": "sk-t",
+                **params,
+            },
+        )
+        ctx = _make_ctx()
+        await task.run(ctx)
+    ctx.shared_state["_mock_cls"] = mock_cls
+    return ctx.shared_state
+
+
+async def test_retries_param_passed_as_max_retries() -> None:
+    state = await _run_sequence([_usage_response()], retries="0")
+    assert state["_mock_cls"].call_args.kwargs["max_retries"] == 0
+
+
+async def test_retries_default_matches_sdk_default() -> None:
+    state = await _run_sequence([_usage_response()])
+    assert state["_mock_cls"].call_args.kwargs["max_retries"] == 2
+
+
+async def test_first_429_context_counters() -> None:
+    """tokens/requests before the first 429, plus leakage after it."""
+    state = await _run_sequence(
+        [
+            _usage_response(30),
+            _usage_response(30),
+            _api_status_error(429),
+            _usage_response(30),  # succeeded after being throttled — leakage
+            _api_status_error(429),
+        ]
+    )
+    ir = state["inference_results"]
+    assert ir["tokens_before_first_429"] == 60
+    assert ir["requests_before_first_429"] == 2
+    assert ir["seconds_to_first_429"] >= 0
+    assert ir["successes_after_first_429"] == 1
+    assert ir["rate_limited_count"] == 2
+
+
+async def test_successes_after_first_429_zero_when_never_throttled() -> None:
+    ir = (await _run_sequence([_usage_response(), _usage_response()]))["inference_results"]
+    assert ir["successes_after_first_429"] == 0
+    assert "tokens_before_first_429" not in ir
+
+
+async def test_error_breakdown_by_cause() -> None:
+    ir = (
+        await _run_sequence(
+            [
+                _usage_response(),
+                _api_status_error(429),
+                _api_status_error(401),
+                _api_status_error(503),
+                _api_status_error(400),
+                Exception("connection reset"),
+            ]
+        )
+    )["inference_results"]
+    assert ir["rate_limited_count"] == 1
+    assert ir["unauthorized_count"] == 1
+    assert ir["server_error_count"] == 1
+    assert ir["other_error_count"] == 2
+    assert ir["fail_count"] == 5
+    # 4 of 6 failed for a reason other than throttling.
+    assert ir["non_throttle_error_rate_pct"] == pytest.approx(4 / 6 * 100)
+
+
+async def test_timeline_records_each_request_outcome() -> None:
+    state = await _run_sequence(
+        [_usage_response(10), _api_status_error(429), _api_status_error(403)]
+    )
+    traffic = state["_traffic"]["inference_results"]
+    assert traffic["task"] == "send_requests"
+    assert traffic["planned"] == 3
+    statuses = [entry[2] for entry in traffic["timeline"]]
+    assert statuses == ["ok", "throttled", "denied"]
+    cumulative_tokens = [entry[1] for entry in traffic["timeline"]]
+    assert cumulative_tokens == [10, 10, 10]
+
+
+async def test_task_summary_narrates_outcome() -> None:
+    state = await _run_sequence([_usage_response(30), _api_status_error(429)])
+    summary = state["task_summary"]
+    assert "2/2 requests" in summary
+    assert "1 OK" in summary
+    assert "1 throttled (429)" in summary
+    assert "first 429 after 30 tokens" in summary
+
+
+async def test_zero_count_skips_cleanly() -> None:
+    state = await _run_sequence([])
+    assert "inference_results" not in state
+    assert "skipped" in state["task_summary"]
+
+
 async def test_send_requests_debounce() -> None:
     """Debounce: emit_assertion_state fires at most once per 100 ms burst."""
     emit_times: list[float] = []
@@ -360,7 +481,7 @@ async def test_key_index_selects_single_key_from_pool() -> None:
         )
         await task.run(ctx)
 
-    mock_cls.assert_called_with(api_key="sk-key-2", base_url="http://m.test")
+    _assert_client_built_with(mock_cls, api_key="sk-key-2", base_url="http://m.test")
 
 
 async def test_key_index_overrides_static_token_param() -> None:
@@ -374,7 +495,7 @@ async def test_key_index_overrides_static_token_param() -> None:
         )
         await task.run(ctx)
 
-    mock_cls.assert_called_with(api_key="sk-from-pool", base_url="http://m.test")
+    _assert_client_built_with(mock_cls, api_key="sk-from-pool", base_url="http://m.test")
 
 
 async def test_model_from_shared_state_sets_model_param() -> None:
@@ -397,7 +518,7 @@ async def test_model_from_shared_state_sets_model_param() -> None:
         await task.run(ctx)
 
     assert client.chat.completions.create.call_args.kwargs["model"] == "maaspal-fail-closed-model-abcd1234-1"
-    mock_cls.assert_called_with(
+    _assert_client_built_with(mock_cls, 
         api_key="test-token",
         base_url="http://maas.test/llm/maaspal-fail-closed-model-abcd1234-1/v1",
     )
@@ -423,7 +544,7 @@ async def test_key_pool_target_model_uses_dedicated_model_route() -> None:
         )
         await task.run(ctx)
 
-    mock_cls.assert_called_with(
+    _assert_client_built_with(mock_cls, 
         api_key="sk-key-1",
         base_url="http://maas.test/maaspal/maaspal-sim-abcd-1/v1",
     )
@@ -570,7 +691,7 @@ async def test_url_resolution_explicit_params_priority() -> None:
         ctx = _make_ctx({"url": "http://shared.test", "token": "sk-shared"})
         await task.run(ctx)
 
-    mock_cls.assert_called_with(api_key="sk-explicit", base_url="http://explicit.test")
+    _assert_client_built_with(mock_cls, api_key="sk-explicit", base_url="http://explicit.test")
 
 
 async def test_url_resolution_shared_state_fallback() -> None:
@@ -582,7 +703,7 @@ async def test_url_resolution_shared_state_fallback() -> None:
         ctx = _make_ctx({"url": "http://shared.test", "token": "sk-shared"})
         await task.run(ctx)
 
-    mock_cls.assert_called_with(api_key="sk-shared", base_url="http://shared.test")
+    _assert_client_built_with(mock_cls, api_key="sk-shared", base_url="http://shared.test")
 
 
 async def test_url_resolution_sa_token_fallback(httpx_mock) -> None:
@@ -599,7 +720,7 @@ async def test_url_resolution_sa_token_fallback(httpx_mock) -> None:
         ctx = _make_ctx()  # no url or token in shared_state
         await task.run(ctx)
 
-    mock_cls.assert_called_with(
+    _assert_client_built_with(mock_cls, 
         api_key="test-token", base_url="http://model.test/v1"
     )
 
@@ -640,7 +761,7 @@ async def test_url_resolution_matches_by_owned_by(httpx_mock) -> None:
         ctx = _make_ctx()
         await task.run(ctx)
 
-    mock_cls.assert_called_with(
+    _assert_client_built_with(mock_cls, 
         api_key="test-token", base_url="http://right-model.test/v1"
     )
 
@@ -670,3 +791,40 @@ def test_percentiles_computed() -> None:
     assert result["p50_latency_ms"] == 51
     assert result["p95_latency_ms"] == 96
     assert result["p99_latency_ms"] == 100
+
+
+async def test_stop_after_429s_skips_remaining_requests() -> None:
+    state = await _run_sequence(
+        [_usage_response(30), _api_status_error(429), _api_status_error(429), _usage_response(30)],
+        stop_after_429s="2",
+    )
+    ir = state["inference_results"]
+    assert ir["total_requests"] == 3  # the 4th was never sent
+    assert "stopped early after 2 throttled requests" in state["task_summary"]
+
+
+async def test_key_pool_requests_interleave_round_robin() -> None:
+    sent_with: list[str] = []
+    clients = {}
+
+    def _client_for(**kwargs):
+        key = kwargs["api_key"]
+
+        async def _create(**_):
+            sent_with.append(key)
+            return MagicMock()
+
+        c = MagicMock()
+        c.chat.completions.create = _create
+        clients[key] = c
+        return c
+
+    with patch("harness.tasks.inference.AsyncOpenAI", side_effect=_client_for):
+        task = SendRequestsTask(
+            "send_requests",
+            {"count": "5", "concurrency": "1", "url": "http://m.test", "key_pool": True},
+        )
+        ctx = _make_ctx({"api_keys": [{"id": "a", "key": "sk-a"}, {"id": "b", "key": "sk-b"}]})
+        await task.run(ctx)
+
+    assert sent_with == ["sk-a", "sk-b", "sk-a", "sk-b", "sk-a"]

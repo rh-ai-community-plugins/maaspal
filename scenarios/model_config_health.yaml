@@ -1,0 +1,86 @@
+name: model_config_health
+previous_names: [model_health_check]
+title: "Are my models wired up correctly?"
+summary: >-
+  Read-only check of every piece a model needs to be usable through MaaS —
+  for one model, or all of them at once.
+description: >-
+  No writes, no keys, no traffic. For each internally hosted model, checks:
+  its MaaSModelRef is Ready; at least one subscription and one matching auth
+  policy cover it (MaaS needs both — quota and access); its namespace carries
+  the gateway-access label; the TokenRateLimitPolicy MaaS generated for it is
+  Accepted and Enforced; and its HTTPRoute belongs to it. Also checks the MaaS
+  gateway itself is Programmed. Resources are found by label, not by guessed
+  names. External models are skipped.
+category: "Diagnostics"
+kind: verify
+mutates: []
+est_duration: "~10 s"
+plan_template: >-
+  Read the configuration of ${model} and the ${config.gateway_name} gateway —
+  nothing is created or changed.
+inputs:
+  target_model_name:
+    label: "Model"
+    placeholder: "All models"
+    help: "Leave blank to check every internally hosted model."
+  gateway_name: {advanced: true}
+  gateway_namespace: {advanced: true}
+config:
+  target_model_name: ""       # blank = check every internally hosted model
+  target_model_namespace: ""
+  # Confirmed live — the Gateway MaaS's own HTTPRoutes reference; another,
+  # unrelated Gateway (data-science-gateway) lives in the same namespace.
+  gateway_name: "maas-default-gateway"
+  gateway_namespace: "openshift-ingress"
+verdict:
+  pass: "All ${harness.model_health.models_checked} model(s) checked are fully wired up, and the gateway is Programmed."
+  fail: >-
+    ${harness.model_health.healthy_count} of ${harness.model_health.models_checked} model(s)
+    are fully wired up — the table below shows what's missing for the rest.
+tasks:
+  - name: check_model_health
+    params:
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      gateway_name: "${config.gateway_name}"
+      gateway_namespace: "${config.gateway_namespace}"
+    # Counts of models MISSING each piece, so the card reads "0 models
+    # missing X" and the value itself is the useful number. Governance
+    # counts stay PENDING (not guessed) if the MaaS catalog is unreadable.
+    assertions:
+      gateway_programmed:
+        label: "MaaS gateway Programmed"
+        promql: "${harness.gateway_status.programmed}"
+        expect: "== 1"
+      models_not_ready:
+        label: "Models not Ready"
+        unit: "models"
+        promql: "${harness.model_health.models_checked} - ${harness.model_health.ready_count}"
+        expect: "== 0"
+      models_without_subscription:
+        label: "Models with no subscription (no quota)"
+        unit: "models"
+        promql: "${harness.model_health.models_checked} - ${harness.model_health.has_subscription_count}"
+        expect: "== 0"
+      models_without_auth_policy:
+        label: "Models with no auth policy (no access)"
+        unit: "models"
+        promql: "${harness.model_health.models_checked} - ${harness.model_health.has_auth_policy_count}"
+        expect: "== 0"
+      models_missing_gateway_label:
+        label: "Models whose namespace lacks the gateway-access label"
+        unit: "models"
+        promql: "${harness.model_health.models_checked} - ${harness.model_health.gateway_access_label_count}"
+        expect: "== 0"
+      models_rate_limit_not_enforced:
+        label: "Models whose rate-limit policy isn't Accepted + Enforced"
+        unit: "models"
+        promql: "${harness.model_health.models_checked} - ${harness.model_health.rate_limit_enforced_count}"
+        expect: "== 0"
+      models_route_owner_mismatch:
+        label: "Models whose HTTPRoute doesn't belong to them"
+        unit: "models"
+        promql: "${harness.model_health.models_checked} - ${harness.model_health.route_owner_ok_count}"
+        expect: "== 0"
+cleanup: automatic

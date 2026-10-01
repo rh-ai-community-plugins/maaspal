@@ -5,7 +5,10 @@ import httpx
 from kubernetes import client as k8s_client
 
 from harness.result import TaskResult
-from harness.tasks.auth import _redact, _revoke_keys
+
+# Module import, not names: auth imports the registry, which imports this
+# module back — see harness/tasks/subscription_check.py.
+from harness.tasks import auth as _auth
 from harness.tasks.base import Task, TaskContext
 from harness.tasks.registry import REGISTRY
 
@@ -68,7 +71,7 @@ class CreateUserTask(Task):
             username = f"system:serviceaccount:{namespace}:{sa_name}"
             print(
                 f"[create_user] minted token for {username} "
-                f"(token={_redact(token)}, expires_in={expiration_seconds}s)",
+                f"(token={_auth._redact(token)}, expires_in={expiration_seconds}s)",
                 flush=True,
             )
 
@@ -82,6 +85,11 @@ class CreateUserTask(Task):
             )
 
             ctx.shared_state["task_progress"] = {"current": i + 1, "total": count}
+            ctx.shared_state["task_summary"] = (
+                f"Minted {i + 1} throwaway identit{'y' if i == 0 else 'ies'} "
+                f"(ServiceAccounts in {namespace}): "
+                + ", ".join(u["name"] for u in users)
+            )
             await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -154,7 +162,7 @@ class ProvisionKeysForUsersTask(Task):
                 body = {"name": name_i, "subscription": subscription}
                 print(
                     f"[provision_keys_for_users] POST {url} body={body!r} "
-                    f"as user={user['username']} (token={_redact(user['token'])})",
+                    f"as user={user['username']} (token={_auth._redact(user['token'])})",
                     flush=True,
                 )
                 resp = await client.post(
@@ -196,6 +204,10 @@ class ProvisionKeysForUsersTask(Task):
                     checks["expires_at_present_count"] += 1
 
                 ctx.shared_state["task_progress"] = {"current": i + 1, "total": len(users)}
+                ctx.shared_state["task_summary"] = (
+                    f"Created {i + 1} API key(s), one per user, each authenticated as "
+                    f"that user · pinned to subscription {subscription}"
+                )
                 await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -208,7 +220,7 @@ class ProvisionKeysForUsersTask(Task):
         # Deletes via ctx.sa_token (the harness's own admin identity), not
         # each key's owning user's token — unverified assumption that the
         # harness SA can revoke a key it didn't create; see ADR-023.
-        await _revoke_keys(ctx)
+        await _auth._revoke_keys(ctx)
 
 
 REGISTRY["create_user"] = CreateUserTask

@@ -1,0 +1,155 @@
+name: rate_limit_per_user_or_shared
+previous_names: [rate_limit_shared_across_users]
+title: "Are limits per user or shared?"
+summary: >-
+  Two different users on the same subscription: does each get their own
+  token budget, or do they draw from one pool? Tell us which you expect.
+description: >-
+  Mints two throwaway identities, puts both on one temporary subscription,
+  gives each its own API key, then has user A use up the whole token budget
+  before user B sends anything. Under per-user limits, user B starts with a
+  fresh budget and is throttled at the same point user A was; under a shared
+  pool, user B is throttled almost immediately. The run passes when what
+  happens matches the behaviour you said you expect. MaaS's generated
+  TokenRateLimitPolicy counts per user (auth.identity.userid), so "per_user"
+  is the documented behaviour.
+category: "Rate limits"
+kind: explore
+mutates: [api_keys, subscriptions, service_accounts]
+needs_rbac: [user-provisioning]
+requires: [target_model_name, target_model_namespace]
+est_duration: "~1 min"
+plan_template: >-
+  Mint 2 users, put both on a temporary ${config.token_limit}-token subscription
+  for ${model}, let user A use it up, then send as user B and expect limits to be
+  ${config.expected_behavior}.
+inputs:
+  expected_behavior:
+    label: "I expect limits to be"
+    choices: [per_user, shared]
+  token_limit:
+    label: "Token limit"
+    help: "Small, so user A's burst alone clearly uses it all up."
+  request_count:
+    label: "Max requests per user"
+    help: "Upper bound — each burst stops early once throttled."
+  token_window:
+    advanced: true
+    help: "Much longer than the run, so the budget can't refill between the two bursts."
+  spillover_tokens: {advanced: true}
+  new_subscription_name: {advanced: true}
+  subscription_namespace: {advanced: true}
+  concurrency: {advanced: true}
+  prompt: {advanced: true}
+config:
+  expected_behavior: per_user
+  target_model_name: ""
+  target_model_namespace: ""
+  token_limit: 50
+  token_window: "24h"
+  request_count: 30
+  # Sequential: keeps "did this user exhaust the budget" a clean,
+  # one-request-at-a-time question.
+  concurrency: 1
+  spillover_tokens: 100
+  new_subscription_name: "maaspal-shared-pool-test"
+  subscription_namespace: "models-as-a-service"
+  prompt: "Hello, world!"
+verdict:
+  pass: >-
+    Matches your expectation (${config.expected_behavior}): user A was throttled after
+    ${harness.inference_results_user_a.tokens_before_first_429} tokens, user B after
+    ${harness.inference_results_user_b.tokens_before_first_429}.
+  fail: >-
+    Doesn't match your expectation (${config.expected_behavior}): user A was throttled after
+    ${harness.inference_results_user_a.tokens_before_first_429} tokens, user B after
+    ${harness.inference_results_user_b.tokens_before_first_429} — limit ${config.token_limit}.
+tasks:
+  - name: create_user
+    params:
+      count: 2
+      name_prefix: "maaspal-pool-user"
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.token_limit}"
+      token_window: "${config.token_window}"
+      # Only the two minted users — no other caller can share this quota.
+      owner_groups: []
+      owner_users_from_shared_state: "users"
+  - name: provision_keys_for_users
+    params:
+      key_name_prefix: "maaspal-pool-key"
+      subscription: "${config.new_subscription_name}"
+    assertions:
+      subscription_echo_match_count:
+        label: "Both users' keys on the shared subscription"
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== 2"
+  - name: send_requests
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_index: 0
+      result_key: "inference_results_user_a"
+      retries: 0
+      stop_after_429s: 3
+    # Precondition: user A really uses up the whole budget. Without it, user B
+    # getting through can't distinguish "per user" from "shared, but A didn't use it all".
+    assertions:
+      user_a_throttled:
+        label: "User A was throttled"
+        unit: "429s"
+        promql: "${harness.inference_results_user_a.rate_limited_count}"
+        expect: "> 0"
+      user_a_tokens_before_first_429:
+        label: "User A: tokens before first 429"
+        unit: "tokens"
+        promql: "${harness.inference_results_user_a.tokens_before_first_429}"
+        between: ["${config.token_limit}", "${config.token_limit} + ${config.spillover_tokens}"]
+  - name: send_requests_as_second_user
+    when: {expected_behavior: per_user}
+    params: &user_b_params
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_index: 1
+      result_key: "inference_results_user_b"
+      retries: 0
+      stop_after_429s: 3
+    assertions:
+      user_b_throttled:
+        label: "User B was throttled"
+        description: "Guards the check below: it only has a value once user B gets a 429."
+        unit: "429s"
+        promql: "${harness.inference_results_user_b.rate_limited_count}"
+        expect: "> 0"
+      user_b_tokens_before_first_429:
+        label: "User B: tokens before first 429 (own fresh budget)"
+        description: "Per-user limits: user B gets a full budget of their own, just like user A did."
+        unit: "tokens"
+        promql: "${harness.inference_results_user_b.tokens_before_first_429}"
+        between: ["${config.token_limit}", "${config.token_limit} + ${config.spillover_tokens}"]
+  - name: send_requests_as_second_user
+    when: {expected_behavior: shared}
+    params: *user_b_params
+    assertions:
+      user_b_throttled:
+        label: "User B was throttled"
+        description: "Guards the check below: it only has a value once user B gets a 429."
+        unit: "429s"
+        promql: "${harness.inference_results_user_b.rate_limited_count}"
+        expect: "> 0"
+      user_b_tokens_before_first_429:
+        label: "User B: tokens before first 429 (pool already used up)"
+        description: "Shared pool: user A already spent it, so user B is throttled before reaching the limit."
+        unit: "tokens"
+        promql: "${harness.inference_results_user_b.tokens_before_first_429}"
+        expect: "< ${config.token_limit}"
+cleanup: automatic

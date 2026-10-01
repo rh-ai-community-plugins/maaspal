@@ -136,3 +136,50 @@ def test_no_interpolation_in_non_string_values(tmp_path: Path) -> None:
     """)
     s = load_scenario(path)
     assert s["tasks"][0]["params"]["n"] == 42
+
+
+def test_when_filters_tasks_by_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _write(tmp_path, """
+        name: test
+        config:
+          mode: existing
+        tasks:
+          - name: stub_pass
+            params: {label: always}
+          - name: stub_pass
+            when: {mode: temporary}
+            params: {label: temporary-only}
+          - name: stub_pass
+            when: {mode: existing}
+            params: {label: existing-only}
+    """)
+    assert [t["params"]["label"] for t in load_scenario(path)["tasks"]] == ["always", "existing-only"]
+
+    monkeypatch.setenv("MAASPAL_CONFIG_OVERRIDES", '{"mode": "temporary"}')
+    assert [t["params"]["label"] for t in load_scenario(path)["tasks"]] == ["always", "temporary-only"]
+
+
+def test_when_must_be_a_mapping(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        name: test
+        config: {}
+        tasks:
+          - name: stub_pass
+            when: "mode == temporary"
+    """)
+    with pytest.raises(ValueError, match="mapping"):
+        load_scenario(path)
+
+
+def test_verdict_templates_resolve_config(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        name: test
+        config:
+          token_limit: 50
+        tasks: []
+        verdict:
+          pass: "limit ${config.token_limit}, saw ${harness.inference_results.total_requests}"
+    """)
+    assert load_scenario(path)["verdict"]["pass"] == (
+        "limit 50, saw ${harness.inference_results.total_requests}"
+    )

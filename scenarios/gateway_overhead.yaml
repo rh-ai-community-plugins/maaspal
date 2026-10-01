@@ -1,0 +1,100 @@
+name: gateway_overhead
+previous_names: [direct_inference]
+title: "How much latency does the MaaS gateway add?"
+summary: >-
+  Sends the same burst straight to a model endpoint and again through MaaS,
+  and shows the latency difference.
+description: >-
+  Sends a burst directly to a model serving endpoint (bypassing MaaS, with a
+  token you supply), then — unless turned off — the same burst through the
+  MaaS gateway with a MaaS API key, and compares median latency. Turn the
+  MaaS leg off to simply load-test any OpenAI-compatible endpoint directly.
+category: "Performance"
+kind: verify
+mutates: [api_keys]
+requires: [target_url, target_model]
+est_duration: "~1 min"
+plan_template: >-
+  Send ${config.request_count} requests directly to ${config.target_url}
+  (model ${config.target_model}), then — if enabled — the same through MaaS to
+  ${model}, and compare median latency.
+inputs:
+  target_url:
+    label: "Direct endpoint URL"
+    help: "OpenAI-compatible base URL ending in /v1, e.g. the model's internal service URL."
+  target_token:
+    label: "Direct endpoint token"
+    help: "Bearer token for the direct endpoint, if it needs one. Redacted in the run's saved settings."
+  target_model:
+    label: "Model id at the direct endpoint"
+  compare_with_maas:
+    label: "Also send through MaaS"
+    choices: ["yes", "no"]
+  target_model_name:
+    label: "Same model in MaaS"
+    show_if: {compare_with_maas: "yes"}
+  max_overhead_ms:
+    label: "Max added p50 latency (ms)"
+    show_if: {compare_with_maas: "yes"}
+  request_count: {label: "Requests per leg"}
+  concurrency: {advanced: true}
+  prompt: {advanced: true}
+config:
+  target_url: ""
+  target_token: ""
+  target_model: ""
+  compare_with_maas: "yes"
+  target_model_name: ""
+  target_model_namespace: ""
+  max_overhead_ms: 500
+  request_count: 50
+  concurrency: 5
+  prompt: "Hello, world!"
+verdict:
+  pass: >-
+    Direct p50 ${harness.direct_results.p50_latency_ms} ms vs through MaaS
+    ${harness.via_maas_results.p50_latency_ms} ms.
+  fail: >-
+    Direct p50 ${harness.direct_results.p50_latency_ms} ms vs through MaaS
+    ${harness.via_maas_results.p50_latency_ms} ms — outside the targets below.
+tasks:
+  - name: send_requests
+    params:
+      url: "${config.target_url}"
+      token: "${config.target_token}"
+      model: "${config.target_model}"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      result_key: "direct_results"
+    assertions:
+      direct_error_rate_pct:
+        label: "Direct endpoint error rate"
+        unit: "%"
+        promql: "${harness.direct_results.error_rate_pct}"
+        expect: "< 5"
+  - name: provision_api_key
+    when: {compare_with_maas: "yes"}
+    params:
+      key_name: "maaspal-overhead-key"
+  - name: send_requests_via_maas
+    when: {compare_with_maas: "yes"}
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_pool: true
+      result_key: "via_maas_results"
+    assertions:
+      via_maas_error_rate_pct:
+        label: "Through-MaaS error rate"
+        unit: "%"
+        promql: "${harness.via_maas_results.error_rate_pct}"
+        expect: "< 5"
+      gateway_overhead_p50_ms:
+        label: "Latency added by MaaS (p50)"
+        unit: "ms"
+        promql: "${harness.via_maas_results.p50_latency_ms} - ${harness.direct_results.p50_latency_ms}"
+        expect: "< ${config.max_overhead_ms}"
+cleanup: automatic

@@ -1,17 +1,37 @@
 name: api_key_lifecycle
+title: "Do API keys behave correctly?"
+summary: >-
+  Keys come back exactly as requested, can be found, work for inference,
+  and stop working — and disappear from search — the moment they're revoked.
 description: >-
-  API key lifecycle validation — entirely through the MaaS REST API
-  (/maas-api/v1/api-keys*), no Kubernetes CR read or write at all. Confirms
-  the create response honestly echoes what was requested, that /search
-  actually finds the keys this run created, and that revoking a key denies
-  the very next request rather than after some caching delay.
-category: "API Key Lifecycle"
+  Entirely through the MaaS REST API (/maas-api/v1/api-keys*), no Kubernetes
+  CR reads or writes. Creates several keys and confirms the create response
+  echoes the requested name and carries an expiry, that search finds them,
+  that they work for inference, and that after revoking them the very next
+  request is denied and they no longer show up as active in search.
+category: "API keys"
+kind: verify
+mutates: [api_keys]
+est_duration: "~30 s"
+plan_template: >-
+  Create ${config.key_count} API keys on ${subscription}, search for them, send
+  ${config.request_count} requests, revoke all of them, then confirm requests
+  are denied and search no longer lists them.
+inputs:
+  key_count: {label: "Keys to create"}
+  request_count: {label: "Requests before and after revoking"}
+  key_name: {advanced: true}
+  concurrency: {advanced: true}
+  prompt: {advanced: true}
 config:
   key_name: "maaspal-lifecycle-key"
   key_count: 3
   request_count: 10
   concurrency: 3
   prompt: "Hello, world!"
+verdict:
+  pass: "API keys behaved correctly through their whole lifecycle, and revocation was immediate."
+  fail: "Part of the API key lifecycle didn't behave as expected — see the failing step below."
 tasks:
   - name: provision_api_key
     params:
@@ -19,9 +39,13 @@ tasks:
       count: "${config.key_count}"
     assertions:
       name_echo_match_count:
+        label: "Keys returned with the requested name"
+        unit: "keys"
         promql: "${harness.key_provision_checks.name_echo_match_count}"
         expect: "== ${config.key_count}"
       expires_at_present_count:
+        label: "Keys with an expiry date"
+        unit: "keys"
         promql: "${harness.key_provision_checks.expires_at_present_count}"
         expect: "== ${config.key_count}"
   - name: verify_api_key_search
@@ -29,6 +53,8 @@ tasks:
       name_prefix: "${config.key_name}"
     assertions:
       found_count:
+        label: "Keys found by search"
+        unit: "keys"
         promql: "${harness.search_check.found_count}"
         expect: "== ${config.key_count}"
   - name: send_requests
@@ -37,30 +63,37 @@ tasks:
       concurrency: "${config.concurrency}"
       prompt: "${config.prompt}"
       key_pool: true
-    # promql pass-through form (ADR-015) — see single_key_load.yaml. Confirms
-    # the keys actually work before revocation, so the next step's failures
-    # can be attributed to revocation rather than the keys never having
-    # worked at all.
+    # Proves the keys worked before revocation, so failures afterwards can
+    # be attributed to revocation, not to keys that never worked.
     assertions:
-      error_rate_pct:
+      error_rate_before_revoke:
+        label: "Error rate before revoking"
+        unit: "%"
         promql: "${harness.inference_results.error_rate_pct}"
         expect: "< 5"
   - name: revoke_api_keys
     params: {}
   - name: verify_revoked_key_denied
-    # Registry alias of send_requests (ADR-019) — a second YAML task entry
-    # literally named "send_requests" would collide in the UI's task
-    # pipeline/progress tracking, both keyed by task name.
     params:
       count: "${config.request_count}"
       concurrency: "${config.concurrency}"
       prompt: "${config.prompt}"
       key_pool: true
+      result_key: "inference_results_after_revoke"
+      retries: 0
     assertions:
-      error_rate_pct:
-        promql: "${harness.inference_results.error_rate_pct}"
-        expect: "> 90"
-      unauthorized_count:
-        promql: "${harness.inference_results.unauthorized_count}"
-        expect: "> 0"
+      denied_after_revoke:
+        label: "Requests denied after revoking (401/403)"
+        unit: "requests"
+        promql: "${harness.inference_results_after_revoke.unauthorized_count}"
+        expect: "== ${config.request_count}"
+  - name: verify_revoked_key_not_searchable
+    params:
+      name_prefix: "${config.key_name}"
+    assertions:
+      active_after_revoke:
+        label: "Revoked keys still listed as active"
+        unit: "keys"
+        promql: "${harness.search_check.found_count}"
+        expect: "== 0"
 cleanup: automatic

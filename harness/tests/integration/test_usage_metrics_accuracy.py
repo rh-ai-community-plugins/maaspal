@@ -1,4 +1,4 @@
-"""Integration test for the metrics_fill scenario."""
+"""Integration test for the usage_metrics_accuracy scenario."""
 import os
 import uuid
 
@@ -14,11 +14,11 @@ async def test_metrics_fill_passes() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/metrics_fill.yaml", run_id)
+    runner = ScenarioRunner("scenarios/usage_metrics_accuracy.yaml", run_id)
     result = await runner.run()
 
     assert result.status == "PASS", (
-        f"metrics_fill returned {result.status}. "
+        f"usage_metrics_accuracy returned {result.status}. "
         f"Task results: {result.tasks}. "
         f"Assertions: {result.assertions}"
     )
@@ -36,7 +36,7 @@ async def test_metrics_fill_maas_counts_match_sent() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/metrics_fill.yaml", run_id)
+    runner = ScenarioRunner("scenarios/usage_metrics_accuracy.yaml", run_id)
     result = await runner.run()
 
     assertions = {a.name: a for a in result.assertions}

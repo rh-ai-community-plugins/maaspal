@@ -1,3 +1,5 @@
+import ast
+import operator
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -12,6 +14,36 @@ _OPERATORS = {
     "==": lambda a, b: a == b,
 }
 _EXPR_RE = re.compile(r"^\s*(<=|>=|<|>|==)\s*(.+?)\s*$")
+
+_ARITH_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+}
+
+
+def _num(value: Any) -> float:
+    """A bound as a number — either a plain number, or simple arithmetic left
+    over from ${config.x} substitution (e.g. "50 + 100" from
+    "${config.token_limit} + 100"). Parsed with a tiny AST walker, never eval."""
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    def _walk(node: ast.AST) -> float:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -_walk(node.operand)
+        if isinstance(node, ast.BinOp) and type(node.op) in _ARITH_OPS:
+            return _ARITH_OPS[type(node.op)](_walk(node.left), _walk(node.right))
+        raise ValueError(f"Unsupported assertion bound: {value!r}")
+
+    return _walk(ast.parse(str(value).strip(), mode="eval").body)
+
+
+def _fmt(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else f"{v:g}"
 
 
 @dataclass
@@ -30,6 +62,14 @@ class AssertionResult:
     status: AssertionStatus
     current_value: float | None = None
     expected_value: float | None = None
+    # Display-only metadata (optional YAML keys on dict-form assertions) —
+    # never affects pass/fail. `target` is a human-readable rendering of the
+    # check itself ("50 – 150", "< 5", "≈ 200 ±5%"), so the UI can show the
+    # real observed value against it instead of the raw expression.
+    label: str | None = None
+    description: str | None = None
+    unit: str | None = None
+    target: str | None = None
 
 
 @dataclass
@@ -108,8 +148,20 @@ def _evaluate_promql_assertion(name: str, spec: dict[str, Any], shared_state: di
     promql = spec.get("promql", "")
     observed = shared_state.get("metrics", {}).get(name)
     if observed is None:
-        return AssertionResult(name=name, expression=promql, status="PENDING")
+        return AssertionResult(
+            name=name, expression=promql, status="PENDING", target=_promql_target(spec)
+        )
     observed = float(observed)
+
+    if "between" in spec:
+        lo, hi = (_num(b) for b in spec["between"])
+        return AssertionResult(
+            name=name,
+            expression=f"{promql} between [{_fmt(lo)}, {_fmt(hi)}]",
+            status="PASSING" if lo <= observed <= hi else "FAILING",
+            current_value=observed,
+            target=f"{_fmt(lo)} – {_fmt(hi)}",
+        )
 
     if "compare_to" in spec:
         expected = _extract_namespaced(str(spec.get("compare_to", "")), shared_state)
@@ -128,18 +180,47 @@ def _evaluate_promql_assertion(name: str, spec: dict[str, Any], shared_state: di
 
     expect = spec.get("expect")
     if expect is None:
-        raise ValueError(f"promql assertion {name!r} needs either 'expect' or 'compare_to'")
+        raise ValueError(
+            f"promql assertion {name!r} needs one of 'expect', 'between' or 'compare_to'"
+        )
     m = _EXPR_RE.match(expect)
     if not m:
         raise ValueError(f"Cannot parse assertion expression: {expect!r}")
     op = _OPERATORS[m.group(1)]
-    passing = op(observed, float(m.group(2)))
+    passing = op(observed, _num(m.group(2)))
     return AssertionResult(
         name=name,
         expression=f"{promql} {expect}",
         status="PASSING" if passing else "FAILING",
         current_value=observed,
+        target=_promql_target(spec),
     )
+
+
+def _promql_target(spec: dict[str, Any]) -> str | None:
+    """Human-readable rendering of a promql-form assertion's check."""
+    if "between" in spec:
+        try:
+            lo, hi = (_num(b) for b in spec["between"])
+        except (ValueError, SyntaxError, TypeError):
+            return None
+        return f"{_fmt(lo)} – {_fmt(hi)}"
+    if "compare_to" in spec:
+        return f"≈ {spec['compare_to']} ±{spec.get('tolerance_pct', 0)}%"
+    m = _EXPR_RE.match(str(spec.get("expect", "")))
+    if not m:
+        return None
+    try:
+        return f"{m.group(1)} {_fmt(_num(m.group(2)))}"
+    except (ValueError, SyntaxError):
+        return f"{m.group(1)} {m.group(2)}"
+
+
+def _with_display_metadata(result: AssertionResult, spec: dict[str, Any]) -> AssertionResult:
+    result.label = spec.get("label")
+    result.description = spec.get("description")
+    result.unit = spec.get("unit")
+    return result
 
 
 def evaluate_assertion(
@@ -147,8 +228,13 @@ def evaluate_assertion(
 ) -> AssertionResult:
     if isinstance(expression, dict):
         if "promql" in expression:
-            return _evaluate_promql_assertion(name, expression, shared_state)
-        return _evaluate_match_assertion(name, expression, shared_state)
+            result = _evaluate_promql_assertion(name, expression, shared_state)
+        else:
+            result = _evaluate_match_assertion(name, expression, shared_state)
+            result.target = (
+                f"≈ {expression.get('to')} ±{expression.get('tolerance_pct', 0)}%"
+            )
+        return _with_display_metadata(result, expression)
 
     value = _extract_metric(name, shared_state)
     if value is None:
@@ -166,6 +252,7 @@ def evaluate_assertion(
         expression=expression,
         status="PASSING" if passing else "FAILING",
         current_value=value,
+        target=f"{op_str} {rhs_str}",
     )
 
 

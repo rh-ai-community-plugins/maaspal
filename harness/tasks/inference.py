@@ -1,13 +1,53 @@
 import asyncio
 import time
 
-from openai import APIStatusError, AsyncOpenAI
+import httpx
+from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 
 from harness.result import TaskResult
 from harness.tasks.base import Task, TaskContext
 from harness.tasks.registry import REGISTRY
 
 _DEBOUNCE_SECS = 0.1
+
+# Matches the OpenAI SDK's own default. A scenario that needs every 429 to be
+# visible as-is (rate-limit checks against a short real window, where a hidden
+# retry can land in a fresh window and quietly succeed) sets `retries: 0`.
+_DEFAULT_RETRIES = 2
+
+# Per-request timeline entries kept in memory per send_requests invocation —
+# the runner downsamples further before writing it out for the UI chart.
+_TIMELINE_CAP = 5000
+
+
+def _status_class(status_code: int | None) -> str:
+    """Bucket a request outcome for the timeline chart and summary card."""
+    if status_code is None:
+        return "error"
+    if status_code == 429:
+        return "throttled"
+    if status_code in (401, 403):
+        return "denied"
+    if status_code >= 500:
+        return "server_error"
+    return "error"
+
+
+def _summary_line(r: dict, planned: int) -> str:
+    """One-line human narration of a send_requests burst, shown under its chip."""
+    parts = [f"{r['total_requests']}/{planned} requests", f"{r['success_count']} OK"]
+    if r["rate_limited_count"]:
+        parts.append(f"{r['rate_limited_count']} throttled (429)")
+    if r["unauthorized_count"]:
+        parts.append(f"{r['unauthorized_count']} denied (401/403)")
+    if r["server_error_count"]:
+        parts.append(f"{r['server_error_count']} server errors")
+    if r["other_error_count"]:
+        parts.append(f"{r['other_error_count']} other errors")
+    parts.append(f"{r['total_tokens_sent']} tokens")
+    if "tokens_before_first_429" in r:
+        parts.append(f"first 429 after {r['tokens_before_first_429']} tokens")
+    return " · ".join(parts)
 
 
 def _redact(token: str) -> str:
@@ -47,6 +87,31 @@ class SendRequestsTask(Task):
         concurrency = int(self.params.get("concurrency", 5))
         prompt = str(self.params.get("prompt", "Hello"))
         result_key = str(self.params.get("result_key", "inference_results"))
+        retries = int(self.params.get("retries", _DEFAULT_RETRIES))
+        # Stop sending once this many requests have been throttled (0 = never)
+        # — lets a rate-limit scenario use a generous request ceiling (enough
+        # to exhaust whatever limit it's pointed at) without hammering the
+        # gateway for the rest of it once the answer is already in.
+        stop_after_429s = int(self.params.get("stop_after_429s", 0))
+
+        # Every HTTP response the SDK receives, retries included — the SDK
+        # otherwise hides its own automatic 429/5xx retries entirely, so a
+        # "request" here can be up to retries+1 gateway hits. Surfacing both
+        # numbers keeps harness-side counts comparable to gateway-side ones
+        # (e.g. Limitador's limited_calls).
+        http_attempts = 0
+
+        async def _count_attempt(_response: httpx.Response) -> None:
+            nonlocal http_attempts
+            http_attempts += 1
+
+        def _client(api_key: str, base_url: str) -> AsyncOpenAI:
+            return AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                max_retries=retries,
+                http_client=DefaultAsyncHttpxClient(event_hooks={"response": [_count_attempt]}),
+            )
 
         key_index = self.params.get("key_index")
         if key_index is not None:
@@ -136,7 +201,7 @@ class SendRequestsTask(Task):
                 else:
                     key_urls.append(url)
                     key_models.append(target)
-            clients = [AsyncOpenAI(api_key=k, base_url=u) for k, u in zip(key_strings, key_urls)]
+            clients = [_client(k, u) for k, u in zip(key_strings, key_urls)]
             print(
                 f"[send_requests] base_url={url} model={model} "
                 f"keys=[{', '.join(_redact(k) for k in key_strings)}] "
@@ -145,7 +210,7 @@ class SendRequestsTask(Task):
             )
         else:
             key_models = []
-            clients = [AsyncOpenAI(api_key=token, base_url=url)]
+            clients = [_client(token, url)]
             print(
                 f"[send_requests] base_url={url} model={model} "
                 f"token={_redact(token)} count={count} concurrency={concurrency}",
@@ -157,6 +222,8 @@ class SendRequestsTask(Task):
         fail = 0
         rate_limited_count = 0
         unauthorized_count = 0
+        server_error_count = 0
+        other_error_count = 0
         total_tokens_sent = 0
         prompt_tokens_sent = 0
         completion_tokens_sent = 0
@@ -167,6 +234,21 @@ class SendRequestsTask(Task):
         # at 49/50 tokens used that still completes, taking the total to 57)
         # instead of just "some requests eventually got denied".
         first_rate_limited_at_tokens: int | None = None
+        requests_before_first_429: int | None = None
+        seconds_to_first_429: float | None = None
+        # Successful requests that completed AFTER the first 429 — with a long
+        # window this should stay 0 ("once throttled, stays throttled"); a
+        # non-zero value means the limit leaked or the window reset mid-run.
+        successes_after_first_429 = 0
+        # [t_offset_s, cumulative_tokens, status_class, latency_ms] per
+        # completed request — the run page's traffic chart.
+        timeline: list[list] = []
+        skipped = 0
+        ctx.shared_state.setdefault("_traffic", {})[result_key] = {
+            "task": self.name,
+            "planned": count,
+            "timeline": timeline,
+        }
         run_start = time.monotonic()
         last_emit = 0.0
 
@@ -174,10 +256,16 @@ class SendRequestsTask(Task):
 
         async def do_request(client_idx: int) -> None:
             nonlocal success, fail, last_emit, rate_limited_count, unauthorized_count
+            nonlocal server_error_count, other_error_count
             nonlocal total_tokens_sent, prompt_tokens_sent, completion_tokens_sent
-            nonlocal first_rate_limited_at_tokens
+            nonlocal first_rate_limited_at_tokens, requests_before_first_429
+            nonlocal seconds_to_first_429, successes_after_first_429, skipped
             async with sem:
+                if stop_after_429s and rate_limited_count >= stop_after_429s:
+                    skipped += 1
+                    return
                 t0 = time.monotonic()
+                status_class = "ok"
                 effective_model = (key_models[client_idx] if key_models else None) or model
                 try:
                     response = await clients[client_idx].chat.completions.create(
@@ -185,6 +273,8 @@ class SendRequestsTask(Task):
                         messages=[{"role": "user", "content": prompt}],
                     )
                     success += 1
+                    if first_rate_limited_at_tokens is not None:
+                        successes_after_first_429 += 1
                     usage = getattr(response, "usage", None)
                     tokens = getattr(usage, "total_tokens", None)
                     if isinstance(tokens, (int, float)):
@@ -197,30 +287,54 @@ class SendRequestsTask(Task):
                         completion_tokens_sent += int(completion_tokens)
                 except APIStatusError as exc:
                     fail += 1
+                    status_class = _status_class(exc.status_code)
                     if exc.status_code == 429:
                         rate_limited_count += 1
                         if first_rate_limited_at_tokens is None:
                             first_rate_limited_at_tokens = total_tokens_sent
+                            requests_before_first_429 = success
+                            seconds_to_first_429 = time.monotonic() - run_start
                     elif exc.status_code in (401, 403):
                         unauthorized_count += 1
+                    elif exc.status_code >= 500:
+                        server_error_count += 1
+                    else:
+                        other_error_count += 1
                     print(
                         f"[send_requests] request failed: status={exc.status_code} {exc}",
                         flush=True,
                     )
                 except Exception as exc:
                     fail += 1
+                    other_error_count += 1
+                    status_class = "error"
                     print(f"[send_requests] request failed: {exc}", flush=True)
 
-                latencies.append((time.monotonic() - t0) * 1000)
+                latency_ms = (time.monotonic() - t0) * 1000
+                latencies.append(latency_ms)
                 total = success + fail
                 elapsed = time.monotonic() - run_start
+                if len(timeline) < _TIMELINE_CAP:
+                    timeline.append(
+                        [round(elapsed, 3), total_tokens_sent, status_class, round(latency_ms, 1)]
+                    )
+                non_throttle_fail = fail - rate_limited_count
                 result_data = {
                     "total_requests": total,
+                    "http_attempts": http_attempts,
                     "success_count": success,
                     "fail_count": fail,
                     "rate_limited_count": rate_limited_count,
                     "unauthorized_count": unauthorized_count,
+                    "server_error_count": server_error_count,
+                    "other_error_count": other_error_count,
                     "error_rate_pct": (fail / total * 100) if total > 0 else 0.0,
+                    # Errors excluding 429s — throttling by a subscription's
+                    # own limit is often the *expected* outcome, not a fault.
+                    "non_throttle_error_rate_pct": (
+                        (non_throttle_fail / total * 100) if total > 0 else 0.0
+                    ),
+                    "successes_after_first_429": successes_after_first_429,
                     "throughput_rps": success / elapsed if elapsed > 0 else 0.0,
                     "token_throughput_per_sec": total_tokens_sent / elapsed if elapsed > 0 else 0.0,
                     "total_tokens_sent": total_tokens_sent,
@@ -234,8 +348,12 @@ class SendRequestsTask(Task):
                 # rate limited" as "rate limited at 0 tokens".
                 if first_rate_limited_at_tokens is not None:
                     result_data["first_rate_limited_at_tokens"] = first_rate_limited_at_tokens
+                    result_data["tokens_before_first_429"] = first_rate_limited_at_tokens
+                    result_data["requests_before_first_429"] = requests_before_first_429
+                    result_data["seconds_to_first_429"] = round(seconds_to_first_429 or 0.0, 3)
                 ctx.shared_state[result_key] = result_data
                 ctx.shared_state["task_progress"] = {"current": total, "total": count}
+                ctx.shared_state["task_summary"] = _summary_line(result_data, count)
                 now = time.monotonic()
                 if now - last_emit >= _DEBOUNCE_SECS:
                     last_emit = now
@@ -243,14 +361,26 @@ class SendRequestsTask(Task):
 
         if key_pool_entries:
             assignments = _distribute(count, len(key_pool_entries))
+            # Round-robin across keys (key 1, key 2, …, key 1, …) rather than
+            # each key's whole share back to back — with low concurrency the
+            # queue order IS the send order, and interleaving is what makes
+            # "do these keys share one budget?" observable at all.
             request_tasks = []
-            for key_idx, n_reqs in enumerate(assignments):
-                for _ in range(n_reqs):
-                    request_tasks.append(do_request(key_idx))
+            for round_idx in range(max(assignments, default=0)):
+                for key_idx, n_reqs in enumerate(assignments):
+                    if round_idx < n_reqs:
+                        request_tasks.append(do_request(key_idx))
         else:
             request_tasks = [do_request(0) for _ in range(count)]
 
         await asyncio.gather(*request_tasks)
+        if count <= 0:
+            ctx.shared_state["task_summary"] = "No requests configured (count: 0) — skipped"
+        elif skipped:
+            ctx.shared_state["task_summary"] = (
+                _summary_line(ctx.shared_state[result_key], count)
+                + f" · stopped early after {stop_after_429s} throttled requests"
+            )
         await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -411,3 +541,9 @@ REGISTRY["verify_revoked_key_denied"] = SendRequestsTask
 # key_index) so the two bursts get distinct UI task-pipeline/progress chips
 # instead of colliding on the shared "send_requests" task name.
 REGISTRY["send_requests_as_second_user"] = SendRequestsTask
+# More aliases, same reason: a second "send some requests" step in one
+# scenario needs its own chip. scenarios/rate_limit_window_recovery.yaml
+# sends again after waiting out the window; scenarios/gateway_overhead.yaml
+# sends the same burst via MaaS after sending it direct.
+REGISTRY["send_requests_after_window"] = SendRequestsTask
+REGISTRY["send_requests_via_maas"] = SendRequestsTask

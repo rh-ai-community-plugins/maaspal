@@ -13,6 +13,7 @@ dist/
 # Frontend
 ui/node_modules/
 ui/dist/
+uv.lock
 
 # Local env / secrets
 .env

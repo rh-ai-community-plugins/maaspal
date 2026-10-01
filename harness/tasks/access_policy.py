@@ -105,6 +105,12 @@ class ApplyAuthPolicyTask(Task):
 
         ctx.shared_state["auth_policy_name"] = policy_name
         ctx.shared_state["auth_policy_namespace"] = namespace
+        subjects = [*subject_groups, *subject_users]
+        ctx.shared_state["task_summary"] = (
+            f"{'Created' if ctx.shared_state.get('_policy_created') else 'Temporarily patched'} "
+            f"auth policy {namespace}/{policy_name}: grants {', '.join(subjects) or '(nobody)'} "
+            f"gateway access to {models_summary}"
+        )
         await ctx.emit_assertion_state()
 
         return TaskResult(

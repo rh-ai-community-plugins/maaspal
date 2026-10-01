@@ -303,6 +303,12 @@ class ApplyRateLimitSubscriptionTask(Task):
 
         ctx.shared_state["new_subscription_name"] = sub_name
         ctx.shared_state["subscription_namespace"] = namespace
+        owners = [*(owner_groups or []), *owner_users]
+        ctx.shared_state["task_summary"] = (
+            f"{'Created' if existing is None else 'Temporarily patched'} subscription "
+            f"{namespace}/{sub_name}: {token_limit} tokens per {token_window} on "
+            f"{model_namespace}/{model_name} · owners: {', '.join(owners) or '(none)'}"
+        )
         await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -394,6 +400,10 @@ class ApplyPriorityTestSubscriptionsTask(Task):
             )
 
         ctx.shared_state["priority_test_subscriptions"] = records
+        ctx.shared_state["task_summary"] = "Created " + "; ".join(
+            f"{s['name']} (priority {s['priority']}, {s.get('token_limit', 10)} tokens)"
+            for s in specs
+        ) + f" on {model_namespace}/{model_name}"
         await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -524,6 +534,10 @@ class ProvisionSubscriptionsDistributedTask(Task):
                 "model_refs": model_refs,
             })
             ctx.shared_state["task_progress"] = {"current": i + 1, "total": subscription_count}
+            ctx.shared_state["task_summary"] = (
+                f"Created {i + 1} subscriptions spread across "
+                f"{len({(m['namespace'], m['name']) for r in records for m in r['model_refs']})} models"
+            )
             await ctx.emit_assertion_state()
 
         ctx.shared_state["distributed_subscriptions"] = records

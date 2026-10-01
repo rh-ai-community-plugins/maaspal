@@ -64,6 +64,15 @@ async def _revoke_keys(ctx: TaskContext) -> int:
     return revoked
 
 
+def _key_summary(created: int, key_name: str, subscriptions: list[str], pinned: bool) -> str:
+    """Narration line for key-provisioning tasks: how many, and which
+    subscription MaaS actually bound them to (pinned vs auto-selected)."""
+    unique = sorted(set(subscriptions))
+    how = "pinned to" if pinned else "auto-selected"
+    noun = "key" if created == 1 else "keys"
+    return f"Created {created} API {noun} ({key_name}…) · {how} subscription {', '.join(unique)}"
+
+
 class ProvisionApiKeyTask(Task):
     async def run(self, ctx: TaskContext) -> TaskResult:
         start = time.monotonic()
@@ -107,6 +116,7 @@ class ProvisionApiKeyTask(Task):
         )
 
         url = f"{ctx.maas_api_url}/maas-api/v1/api-keys"
+        bound_subscriptions: list[str] = []
         async with httpx.AsyncClient() as client:
             for i in range(count):
                 name_i = f"{key_name}-{i + 1}" if count > 1 else key_name
@@ -159,7 +169,11 @@ class ProvisionApiKeyTask(Task):
                 if data.get("expiresAt"):
                     checks["expires_at_present_count"] += 1
 
+                bound_subscriptions.append(str(data.get("subscription") or "?"))
                 ctx.shared_state["task_progress"] = {"current": i + 1, "total": count}
+                ctx.shared_state["task_summary"] = _key_summary(
+                    i + 1, key_name, bound_subscriptions, pinned=bool(subscription)
+                )
                 await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -185,6 +199,7 @@ class RevokeApiKeysTask(Task):
         start = time.monotonic()
         revoked = await _revoke_keys(ctx)
         ctx.shared_state["revoked_count"] = revoked
+        ctx.shared_state["task_summary"] = f"Revoked {revoked} API key(s) mid-run"
         await ctx.emit_assertion_state()
         return TaskResult(
             task_name=self.name,
@@ -243,6 +258,10 @@ class VerifyApiKeySearchTask(Task):
         print(
             f"[verify_api_key_search] found={found_count} expected={expected_count}",
             flush=True,
+        )
+        ctx.shared_state["task_summary"] = (
+            f"Search for active keys named '{name_prefix}…' found {found_count} "
+            f"(this run created {expected_count})"
         )
         await ctx.emit_assertion_state()
 
@@ -353,6 +372,10 @@ class ProvisionKeysDistributedTask(Task):
                         checks["expires_at_present_count"] += 1
 
                     ctx.shared_state["task_progress"] = {"current": global_key_index, "total": key_count}
+                    ctx.shared_state["task_summary"] = (
+                        f"Created {global_key_index} API keys across "
+                        f"{len({k.get('subscription') for k in ctx.shared_state['api_keys']})} subscriptions"
+                    )
                     await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -369,3 +392,7 @@ REGISTRY["provision_api_key"] = ProvisionApiKeyTask
 REGISTRY["revoke_api_keys"] = RevokeApiKeysTask
 REGISTRY["verify_api_key_search"] = VerifyApiKeySearchTask
 REGISTRY["provision_keys_distributed"] = ProvisionKeysDistributedTask
+# Alias (ADR-019 pattern): scenarios/api_key_lifecycle.yaml searches again
+# after revoking, to confirm revoked keys drop out of the active-key search —
+# a second search step needs its own chip/progress identity.
+REGISTRY["verify_revoked_key_not_searchable"] = VerifyApiKeySearchTask

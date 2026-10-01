@@ -24,3 +24,4 @@ from harness.tasks import model as _model  # noqa: E402, F401
 from harness.tasks import platform_health as _platform_health  # noqa: E402, F401
 from harness.tasks import stubs as _stubs  # noqa: E402, F401
 from harness.tasks import subscription as _subscription  # noqa: E402, F401
+from harness.tasks import subscription_check as _subscription_check  # noqa: E402, F401

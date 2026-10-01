@@ -28,6 +28,20 @@ def _resolve(value: Any, config: dict[str, Any]) -> Any:
     return value
 
 
+def _when_matches(when: Any, config: dict[str, Any]) -> bool:
+    """A task's optional `when: {config_key: value, ...}` — the task only runs
+    when every listed config key currently equals that value (compared as
+    strings, so YAML `yes`/"yes" and 1/"1" behave the same). Lets one scenario
+    offer a mode switch (e.g. existing vs temporary subscription) without
+    duplicating the whole file, decided once at load time from the same merged
+    config every ${config.x} reference sees."""
+    if not when:
+        return True
+    if not isinstance(when, dict):
+        raise ValueError(f"task `when:` must be a mapping of config key → value, got {when!r}")
+    return all(str(config.get(k, "")) == str(v) for k, v in when.items())
+
+
 def load_scenario(path: str) -> dict:
     """Load and resolve a scenario YAML.
 
@@ -51,17 +65,23 @@ def load_scenario(path: str) -> dict:
 
     resolved_tasks = []
     for task in raw.get("tasks", []) or []:
+        if not _when_matches(task.get("when"), merged_config):
+            continue
         resolved_params = _resolve(task.get("params") or {}, merged_config)
         resolved_task_assertions = _resolve(task.get("assertions") or {}, merged_config)
         resolved_tasks.append({**task, "params": resolved_params, "assertions": resolved_task_assertions})
 
     resolved_assertions = _resolve(raw.get("assertions") or {}, merged_config)
     resolved_metrics_queries = _resolve(raw.get("metrics_queries") or {}, merged_config)
+    # Display-only run verdict templates (see harness/runner.py:_render_verdict) —
+    # ${config.x} resolved here like everywhere else; ${harness.x} at run end.
+    resolved_verdict = _resolve(raw.get("verdict") or {}, merged_config)
 
     return {
         **raw,
         "tasks": resolved_tasks,
         "assertions": resolved_assertions,
         "metrics_queries": resolved_metrics_queries,
+        "verdict": resolved_verdict,
         "_resolved_config": merged_config,
     }

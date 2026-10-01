@@ -2,7 +2,9 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { Button, Grid, GridItem, Page, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
 import { AssertionPanel } from './AssertionPanel';
 import { LogStream } from './LogStream';
+import { DetailTable, ResourcesPanel, TrafficPanel, VerdictBanner } from './RunInsights';
 import { TaskProgress } from './TaskProgress';
+import { useScenarioTitle } from '../scenarioTitles';
 import {
   cleanupRun,
   getAssertions,
@@ -11,6 +13,7 @@ import {
   setAutoCleanup,
   stopRun,
   type AssertionState,
+  type ProgressResponse,
   type Run,
   type TaskProgressEntry,
 } from '../api/client';
@@ -22,10 +25,6 @@ const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING']);
 const RunSettingsModal = lazy(() =>
   import('./RunSettingsModal').then((m) => ({ default: m.RunSettingsModal }))
 );
-
-function formatScenarioName(name: string): string {
-  return name.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -67,6 +66,8 @@ export function RunDetail({ runId, onBack }: Props) {
   const [assertions, setAssertions] = useState<AssertionState[]>([]);
   const [taskProgress, setTaskProgress] = useState<TaskProgressEntry[]>([]);
   const [runStartedAt, setRunStartedAt] = useState<string | undefined>(undefined);
+  const [insights, setInsights] = useState<Omit<ProgressResponse, 'tasks' | 'run_started_at'>>({});
+  const titleFor = useScenarioTitle();
   const [stopping, setStopping] = useState(false);
   const [cleaningUp, setCleaningUp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -108,9 +109,10 @@ export function RunDetail({ runId, onBack }: Props) {
   }, [runId]);
 
   useEffect(() => {
-    function applyProgress(p: { tasks: TaskProgressEntry[]; run_started_at?: string }) {
+    function applyProgress(p: ProgressResponse) {
       setTaskProgress(p.tasks);
       if (p.run_started_at) setRunStartedAt(p.run_started_at);
+      setInsights({ traffic: p.traffic, resources: p.resources, tables: p.tables, verdict: p.verdict });
     }
     getProgress(runId).then(applyProgress).catch(() => {});
     const interval = setInterval(() => {
@@ -165,7 +167,7 @@ export function RunDetail({ runId, onBack }: Props) {
           {run ? (
             <div className="maaspal-run-detail-meta">
               <span className="maaspal-run-detail-meta__item">
-                <strong>{formatScenarioName(run.scenario)}</strong>
+                <strong>{titleFor(run.scenario)}</strong>
               </span>
               <span className="maaspal-run-detail-meta__item">
                 <StatusDot status={run.status} />
@@ -261,15 +263,26 @@ export function RunDetail({ runId, onBack }: Props) {
           )}
         </div>
 
+        {insights.verdict && <VerdictBanner verdict={insights.verdict} />}
+
         <TaskProgress tasks={taskProgress} />
 
         <Grid hasGutter>
-          <GridItem span={8}>
+          <GridItem span={12} lg={8}>
+            {(insights.traffic ?? []).map((burst) => (
+              <TrafficPanel key={burst.result_key} burst={burst} />
+            ))}
+            {(insights.tables ?? []).map((table) => (
+              <DetailTable key={table.title} table={table} />
+            ))}
             <p className="maaspal-section-heading">Live Logs</p>
             <LogStream runId={runId} />
           </GridItem>
-          <GridItem span={4}>
+          <GridItem span={12} lg={4}>
             <AssertionPanel assertions={assertions} taskProgress={taskProgress} />
+            <div style={{ marginTop: '1rem' }}>
+              <ResourcesPanel resources={insights.resources ?? []} cleanupStatus={run?.cleanup_status} />
+            </div>
           </GridItem>
         </Grid>
       </PageSection>

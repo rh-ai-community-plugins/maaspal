@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from harness.tasks.base import TaskContext
 from harness.tasks.platform_health import CheckModelHealthTask
 
@@ -33,6 +35,13 @@ _MATCHING_ROUTE = {
         ]
     }
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_model_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default: the MaaS Setup catalog is unreadable — tests that need it
+    patch _list_maas_models themselves."""
+    monkeypatch.setattr("harness.tasks.platform_health._list_maas_models", lambda: None)
 
 
 def _make_ctx() -> TaskContext:
@@ -202,3 +211,69 @@ async def test_gateway_name_overridable() -> None:
     gw_call = api.get_namespaced_custom_object.call_args
     assert gw_call.kwargs["name"] == "custom-gateway"
     assert gw_call.kwargs["namespace"] == "custom-ns"
+
+
+def _catalog_model(name: str, **overrides) -> dict:
+    return {
+        "name": name,
+        "namespace": "llm",
+        "hosting": "internal",
+        "ready": True,
+        "subscriptions": [{"name": "simulator-free"}],
+        "has_auth_policy": True,
+        "gateway_access_label": True,
+        **overrides,
+    }
+
+
+async def test_blank_model_checks_every_internal_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    catalog = [
+        _catalog_model("model-a"),
+        _catalog_model("model-b", has_auth_policy=False),
+        _catalog_model("ext", hosting="external"),
+    ]
+    monkeypatch.setattr("harness.tasks.platform_health._list_maas_models", lambda: catalog)
+
+    def _route_for(name: str) -> dict:
+        return {"metadata": {"ownerReferences": [{"kind": "LLMInferenceService", "name": name}]}}
+
+    with patch("harness.tasks.platform_health.k8s_client.CustomObjectsApi") as mock_cls:
+        api = MagicMock()
+        api.list_namespaced_custom_object.side_effect = [
+            {"items": [_HEALTHY_TRLP]}, {"items": [_route_for("model-a")]},
+            {"items": [_HEALTHY_TRLP]}, {"items": [_route_for("model-b")]},
+        ]
+        api.get_namespaced_custom_object.return_value = _PROGRAMMED_GATEWAY
+        mock_cls.return_value = api
+
+        ctx = _make_ctx()
+        await CheckModelHealthTask("check_model_health", {"model_name": "", "model_namespace": ""}).run(ctx)
+
+    health = ctx.shared_state["model_health"]
+    assert health["models_checked"] == 2  # external model skipped
+    assert health["has_auth_policy_count"] == 1
+    assert health["healthy_count"] == 1
+    table = ctx.shared_state["_tables"]["Model health"]
+    assert [row[0] for row in table["rows"]] == ["llm/model-a", "llm/model-b"]
+    assert table["rows"][1][3] == "✗"
+    assert "1 fully healthy, 1 with issues" in ctx.shared_state["task_summary"]
+    # Multi-model runs don't pretend one model's flags speak for all of them.
+    assert "rate_limit_policy_status" not in ctx.shared_state
+
+
+async def test_blank_model_without_catalog_fails_clearly() -> None:
+    with (
+        patch("harness.tasks.platform_health.k8s_client.CustomObjectsApi"),
+        pytest.raises(RuntimeError, match="No model selected"),
+    ):
+        await CheckModelHealthTask("check_model_health", {}).run(_make_ctx())
+
+
+async def test_single_model_without_catalog_omits_governance_counts() -> None:
+    with patch("harness.tasks.platform_health.k8s_client.CustomObjectsApi") as mock_cls:
+        mock_cls.return_value = _mock_api()
+        ctx = _make_ctx()
+        await CheckModelHealthTask("check_model_health", _PARAMS).run(ctx)
+    health = ctx.shared_state["model_health"]
+    assert "ready_count" not in health  # unknown, so assertions stay PENDING rather than guess
+    assert health["healthy_count"] == 1

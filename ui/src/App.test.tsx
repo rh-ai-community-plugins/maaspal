@@ -14,5 +14,6 @@ test('renders the app heading', async () => {
   render(<App />);
 
   // findByRole waits for async state updates from ScenarioList and RunHistory
-  expect(await screen.findByRole('heading', { name: /maas:pal/i })).toBeInTheDocument();
+  // The masthead brand is the logo image, not a text heading.
+  expect(await screen.findByRole('img', { name: /maas:pal/i })).toBeInTheDocument();
 });

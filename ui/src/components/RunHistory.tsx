@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, Label, Spinner } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { listRuns, stopRun, type Run } from '../api/client';
+import { useScenarioTitle } from '../scenarioTitles';
 
 const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING']);
 
@@ -40,6 +41,7 @@ export function RunHistory({ onViewRun }: Props) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const titleFor = useScenarioTitle();
 
   function stopPolling() {
     if (intervalRef.current !== null) {
@@ -110,7 +112,7 @@ export function RunHistory({ onViewRun }: Props) {
                       {r.id.slice(0, 8)}
                     </span>
                   </Td>
-                  <Td>{r.scenario.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}</Td>
+                  <Td>{titleFor(r.scenario)}</Td>
                   <Td><StatusBadge status={r.status} /></Td>
                   <Td style={{ fontSize: '0.85rem', color: '#555' }}>
                     {new Date(r.created_at).toLocaleString()}

@@ -38,3 +38,4 @@ Each ADR follows the [Michael Nygard format](https://cognitect.com/blog/2011/11/
 | [ADR-022](ADR-022-platform-health-checks.md) | Read-Only Platform Health Checks | Accepted |
 | [ADR-023](ADR-023-multi-user-rate-limit-sharing.md) | Multi-User Rate-Limit Sharing via ServiceAccount-Minted Identities | Accepted |
 | [ADR-024](ADR-024-dynamic-model-routing-and-rate-limit-precision.md) | Dynamic Model Routing and Rate-Limit Measurement Precision | Accepted |
+| [ADR-025](ADR-025-question-first-scenarios-and-run-narration.md) | Question-First Scenarios and Run Narration | Accepted |

@@ -1,0 +1,70 @@
+name: verify_subscription
+title: "Does my subscription work for every model it covers?"
+summary: >-
+  Pick one of your subscriptions: checks each model in it is actually
+  reachable with a key on that subscription, and that small limits are enforced.
+description: >-
+  Creates one API key pinned to the subscription you pick, then goes through
+  every model the subscription lists: sends a few requests to confirm the
+  model is reachable with that key, and — when the model's token limit is
+  small enough to use up quickly (and its window long enough) — keeps
+  sending until MaaS throttles, to confirm the enforced limit is the one the
+  subscription declares. One row per model in the results table. A model
+  that isn't reachable usually means no matching auth policy, or the model
+  isn't Ready — "Are my models wired up correctly?" shows which.
+category: "Quick check"
+kind: verify
+mutates: [api_keys]
+requires: [subscription]
+est_duration: "~1 min"
+plan_template: >-
+  Create 1 API key on ${subscription}, send ${config.requests_per_model} requests
+  to each of its models, and probe limits up to ${config.probe_limit_max_tokens}
+  tokens.
+inputs:
+  subscription:
+    label: "Subscription"
+  requests_per_model:
+    label: "Requests per model"
+  probe_limit_max_tokens:
+    label: "Probe limits up to (tokens)"
+    help: "Models with a larger configured limit are only checked for reachability, not driven to throttling."
+  probe_max_requests: {advanced: true}
+  spillover_tokens: {advanced: true}
+  prompt: {advanced: true}
+config:
+  subscription: ""
+  requests_per_model: 3
+  probe_limit_max_tokens: 1000
+  probe_max_requests: 60
+  spillover_tokens: 100
+  prompt: "Hello, world!"
+verdict:
+  pass: >-
+    ${harness.subscription_check.reachable_count} of ${harness.subscription_check.model_count}
+    models reachable, and all ${harness.subscription_check.probed_count} probed limits enforced as configured.
+  fail: >-
+    ${harness.subscription_check.reachable_count} of ${harness.subscription_check.model_count}
+    models reachable; ${harness.subscription_check.enforced_count} of
+    ${harness.subscription_check.probed_count} probed limits enforced as configured.
+tasks:
+  - name: verify_subscription_models
+    params:
+      subscription: "${config.subscription}"
+      requests_per_model: "${config.requests_per_model}"
+      probe_limit_max_tokens: "${config.probe_limit_max_tokens}"
+      probe_max_requests: "${config.probe_max_requests}"
+      spillover_tokens: "${config.spillover_tokens}"
+      prompt: "${config.prompt}"
+    assertions:
+      unreachable_models:
+        label: "Models you can't reach with this subscription"
+        unit: "models"
+        promql: "${harness.subscription_check.model_count} - ${harness.subscription_check.reachable_count}"
+        expect: "== 0"
+      limits_not_enforced:
+        label: "Probed models whose limit wasn't enforced as configured"
+        unit: "models"
+        promql: "${harness.subscription_check.probed_count} - ${harness.subscription_check.enforced_count}"
+        expect: "== 0"
+cleanup: automatic

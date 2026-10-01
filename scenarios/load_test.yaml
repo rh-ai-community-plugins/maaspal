@@ -1,0 +1,74 @@
+name: load_test
+previous_names: [single_key_load, multi_key_load]
+title: "How does MaaS hold up under load?"
+summary: >-
+  Fires concurrent requests through MaaS and reports latency, throughput and
+  errors — telling throttling by your subscription apart from real failures.
+description: >-
+  Creates one or more API keys and sends a concurrent burst through the MaaS
+  gateway, spreading requests evenly across the keys. Throttling (429) by
+  your subscription's own limit is reported separately from genuine errors,
+  so a heavy burst against a small limit doesn't look like a broken platform.
+category: "Performance"
+kind: verify
+mutates: [api_keys]
+est_duration: "~1 min"
+plan_template: >-
+  Create ${config.key_count} API key(s) on ${subscription}, then send
+  ${config.request_count} requests, ${config.concurrency} at a time, to ${model}.
+inputs:
+  target_model_name: {label: "Model"}
+  request_count: {label: "Requests"}
+  concurrency: {label: "Concurrent requests"}
+  key_count:
+    label: "API keys"
+    help: "Requests are spread evenly across the keys."
+  max_error_rate_pct:
+    label: "Max error rate (%, excluding throttling)"
+  max_p99_latency_ms:
+    label: "Max p99 latency (ms)"
+  prompt: {advanced: true}
+config:
+  request_count: 100
+  concurrency: 5
+  key_count: 1
+  max_error_rate_pct: 5
+  max_p99_latency_ms: 10000
+  prompt: "Hello, world!"
+  subscription: ""           # optional — leave blank for auto-selection
+  target_model_name: ""      # optional — blank uses DEFAULT_MODEL
+  target_model_namespace: ""
+verdict:
+  pass: >-
+    MaaS handled the load: p99 ${harness.inference_results.p99_latency_ms} ms,
+    ${harness.inference_results.throughput_rps} req/s,
+    ${harness.inference_results.rate_limited_count} throttled by your subscription.
+  fail: >-
+    MaaS didn't meet the targets under load — p99 ${harness.inference_results.p99_latency_ms} ms,
+    non-throttle errors ${harness.inference_results.non_throttle_error_rate_pct}%.
+tasks:
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-load-key"
+      count: "${config.key_count}"
+      subscription: "${config.subscription}"
+  - name: send_requests
+    params:
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      key_pool: true
+    assertions:
+      non_throttle_error_rate_pct:
+        label: "Error rate (excluding throttling)"
+        description: "Failures other than 429s — 401/403s, 5xx, timeouts."
+        unit: "%"
+        promql: "${harness.inference_results.non_throttle_error_rate_pct}"
+        expect: "< ${config.max_error_rate_pct}"
+      p99_latency_ms:
+        label: "p99 latency"
+        unit: "ms"
+        promql: "${harness.inference_results.p99_latency_ms}"
+        expect: "< ${config.max_p99_latency_ms}"
+cleanup: automatic

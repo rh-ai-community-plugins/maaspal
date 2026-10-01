@@ -1074,7 +1074,8 @@ def test_config_snapshot_excludes_incidental_environment_noise(
 def test_auto_cleanup_flag_false_skips_cleanup_and_writes_skipped_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from harness import cleanup_state, runner as runner_module
+    from harness import cleanup_state
+    from harness import runner as runner_module
 
     monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
     run_id = "auto-cleanup-off-001"
@@ -1188,3 +1189,87 @@ def test_auto_cleanup_task_failure_writes_failed_status(
         assert status["status"] == "failed"
     finally:
         REGISTRY.pop("_ac_broken", None)
+
+
+def test_progress_json_carries_narration_traffic_resources_and_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Everything the run page needs to explain a run, in one file: per-task
+    narration, a traffic summary/timeline, what was created (names only —
+    never key material), and a final plain-language verdict."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path / "results")
+
+    class _NarratingTask(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            ctx.shared_state["api_keys"] = [
+                {"id": "k1", "name": "maaspal-key-1", "key": "sk-oai-SECRET", "subscription": "free"}
+            ]
+            ctx.shared_state["inference_results"] = {"total_requests": 2, "tokens_before_first_429": 57}
+            ctx.shared_state["_traffic"] = {
+                "inference_results": {
+                    "task": self.name,
+                    "planned": 2,
+                    "timeline": [[0.1, 30, "ok", 10.0], [0.2, 57, "throttled", 5.0]],
+                }
+            }
+            ctx.shared_state["task_summary"] = "did the thing"
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_narrating"] = _NarratingTask
+    try:
+        path = _write(tmp_path, """
+            name: test_narration
+            config:
+              token_limit: 50
+            tasks:
+              - name: _narrating
+                params: {}
+            verdict:
+              pass: "Throttled after ${harness.inference_results.tokens_before_first_429} tokens (limit ${config.token_limit})."
+              fail: "Not throttled as expected."
+        """)
+        result = asyncio.run(ScenarioRunner(path, "narr-001").run())
+    finally:
+        REGISTRY.pop("_narrating", None)
+
+    assert result.status == "PASS"
+    raw = (tmp_path / "results" / "narr-001-progress.json").read_text()
+    assert "sk-oai-SECRET" not in raw
+    payload = json.loads(raw)
+
+    assert payload["tasks"][0]["summary"] == "did the thing"
+    traffic = payload["traffic"][0]
+    assert traffic["result_key"] == "inference_results"
+    assert traffic["limit"] == 50  # the scenario's token_limit, for the chart's reference line
+    assert traffic["summary"]["tokens_before_first_429"] == 57
+    assert [p[2] for p in traffic["timeline"]] == ["ok", "throttled"]
+    assert payload["resources"] == [
+        {"kind": "API key", "name": "maaspal-key-1", "subscription": "free", "action": "created"}
+    ]
+    assert payload["verdict"]["status"] == "PASS"
+    assert payload["verdict"]["text"] == "Throttled after 57 tokens (limit 50)."
+
+
+def test_verdict_falls_back_to_check_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+    asyncio.run(ScenarioRunner("scenarios/stub.yaml", "verdict-fallback-001").run())
+    payload = json.loads((tmp_path / "verdict-fallback-001-progress.json").read_text())
+    assert payload["verdict"]["text"] == "Run completed — this scenario defines no checks."
+
+
+def test_downsample_timeline_keeps_status_transitions() -> None:
+    from harness.runner import _TIMELINE_MAX_POINTS, _downsample_timeline
+
+    timeline = [[i, i, "ok", 1.0] for i in range(3000)]
+    timeline[1501][2] = "throttled"  # a lone transition a uniform stride would skip
+    thinned = _downsample_timeline(timeline)
+    assert len(thinned) <= _TIMELINE_MAX_POINTS + 10
+    assert any(p[2] == "throttled" for p in thinned)
+    assert thinned[0] == timeline[0] and thinned[-1] == timeline[-1]

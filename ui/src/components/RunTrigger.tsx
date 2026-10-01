@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Modal, Switch } from '@patternfly/react-core';
+import { Alert, Button, ExpandableSection, Modal, Switch } from '@patternfly/react-core';
 import {
   createRun,
   getMaasModels,
@@ -8,47 +8,28 @@ import {
   type MaasSubscription,
   type Scenario,
 } from '../api/client';
+import {
+  _HARNESS_OWNER_GROUP,
+  _MODEL_NAME_KEY,
+  _MODEL_NAMESPACE_KEY,
+  _SUBSCRIPTION_KEY,
+  applyAutofill,
+  humanizeKey,
+  initValues,
+  isVisible,
+  missingRequired,
+  modelHasSubscription,
+  renderPlan,
+  subscriptionCoversModel,
+  type ConfigValues,
+} from '../launchForm';
+import { scenarioTitle } from '../scenarioTitles';
+import { ScenarioBadges } from './ScenarioList';
 
 interface Props {
   scenario: Scenario;
   onConfirm: (runId: string) => void;
   onCancel: () => void;
-}
-
-type ConfigValues = Record<string, string | number>;
-
-// Fields a MaaSModelRef-backed scenario (rate_limit_validation,
-// subscription_without_authpolicy) uses to target a specific model CR — these two
-// always travel together, so they get one combined picker instead of two
-// blank text boxes the user has to copy exact CR names/namespaces into by
-// hand (previously required an `oc get maasmodelrefs -A` first).
-const _MODEL_NAME_KEY = 'target_model_name';
-const _MODEL_NAMESPACE_KEY = 'target_model_namespace';
-
-// Scenarios that pin (rather than create) a MaaSSubscription — single_key_load,
-// multi_key_load — expose this as a plain `subscription` config key.
-const _SUBSCRIPTION_KEY = 'subscription';
-
-// Matches harness/tasks/subscription.py's _DEFAULT_OWNER_GROUPS — the one
-// group the harness's own SA identity reliably resolves to. Used only to
-// annotate options, never to hide them, since owner.users could still make a
-// subscription selectable in ways this UI can't detect.
-const _HARNESS_OWNER_GROUP = 'system:authenticated';
-
-function initValues(config: Scenario['config']): ConfigValues {
-  const out: ConfigValues = {};
-  for (const [k, v] of Object.entries(config)) {
-    out[k] = v as string | number;
-  }
-  return out;
-}
-
-function subscriptionCoversModel(sub: MaasSubscription, namespace: string, name: string): boolean {
-  return sub.model_refs.some((r) => r.namespace === namespace && r.name === name);
-}
-
-function modelHasSubscription(model: MaasModel, subName: string): boolean {
-  return model.subscriptions.some((s) => s.name === subName);
 }
 
 const selectStyle = {
@@ -65,6 +46,10 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
   const [loading, setLoading] = useState(false);
   const [values, setValues] = useState<ConfigValues>(() => initValues(scenario.config));
   const [autoCleanup, setAutoCleanup] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
+  const inputs = scenario.inputs ?? {};
+  const requires = new Set(scenario.requires ?? []);
 
   const needsModelPicker =
     _MODEL_NAME_KEY in scenario.config && _MODEL_NAMESPACE_KEY in scenario.config;
@@ -118,7 +103,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
       if (sub && !subscriptionCoversModel(sub, namespace, name)) {
         next[_SUBSCRIPTION_KEY] = '';
       }
-      return next;
+      return applyAutofill(next, inputs, subscriptions, models);
     });
   }
 
@@ -132,7 +117,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
         next[_MODEL_NAME_KEY] = '';
         next[_MODEL_NAMESPACE_KEY] = '';
       }
-      return next;
+      return applyAutofill(next, inputs, subscriptions, models);
     });
   }
 
@@ -147,6 +132,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
   }
 
   const hasConfig = Object.keys(scenario.config).length > 0;
+  const missing = missingRequired(scenario, values);
 
   const selectedSubscriptionName = String(values[_SUBSCRIPTION_KEY] ?? '');
   const selectedSubscription = selectedSubscriptionName
@@ -186,12 +172,202 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     }
   }
 
+  const showingModelPicker = needsModelPicker && !!models && models.length > 0;
+  const showingSubscriptionPicker = needsSubscriptionPicker && !!subscriptions && subscriptions.length > 0;
+
+  function labelFor(key: string, fallback?: string): string {
+    const base = inputs[key]?.label ?? fallback ?? humanizeKey(key);
+    return requires.has(key) ? `${base} *` : base;
+  }
+
+  function help(key: string) {
+    const text = inputs[key]?.help;
+    const auto = inputs[key]?.from_subscription
+      ? 'Auto-filled when you pick a subscription.'
+      : inputs[key]?.from_model
+        ? 'Auto-filled when you pick a model.'
+        : null;
+    if (!text && !auto) return null;
+    return <p style={noteStyle}>{text ?? auto}</p>;
+  }
+
+  function renderField(key: string, defaultVal: Scenario['config'][string]) {
+    // target_model_namespace is set together with target_model_name by the
+    // picker below — no separate field for it. Only hidden once the picker
+    // is actually rendering; if models never load (RBAC/network issue) or
+    // the list comes back empty, this stays a normal manual field alongside
+    // target_model_name's fallback.
+    if (key === _MODEL_NAMESPACE_KEY && showingModelPicker) return null;
+
+    if (key === _MODEL_NAME_KEY && showingModelPicker) {
+      const currentKey =
+        selectedModelName && selectedModelNamespace ? `${selectedModelNamespace}/${selectedModelName}` : '';
+      const blankLabel =
+        inputs[_MODEL_NAME_KEY]?.placeholder ??
+        (requires.has(_MODEL_NAME_KEY) ? 'Select a model exposed through MaaS…' : 'Cluster default model');
+      return (
+        <div key={key} className="maaspal-config-form__field">
+          <label className="maaspal-config-form__label" htmlFor="cfg-target_model">
+            {labelFor(key, 'Model')}
+          </label>
+          <select
+            id="cfg-target_model"
+            value={currentKey}
+            onChange={(e) => {
+              const [namespace, name] = e.target.value.split('/');
+              if (name && namespace) handleModelSelect(name, namespace);
+              else
+                setValues((prev) => ({ ...prev, [_MODEL_NAME_KEY]: '', [_MODEL_NAMESPACE_KEY]: '' }));
+            }}
+            style={selectStyle}
+          >
+            <option value="">{blankLabel}</option>
+            {visibleModels.map((m) => (
+              <option key={`${m.namespace}/${m.name}`} value={`${m.namespace}/${m.name}`}>
+                {m.display_name} ({m.namespace}/{m.name}){m.ready ? '' : ' — not ready'}
+              </option>
+            ))}
+          </select>
+          {modelListNote && <p style={noteStyle}>{modelListNote}</p>}
+        </div>
+      );
+    }
+
+    // Fallback: plain text inputs — used for every other field, and for
+    // target_model_name/target_model_namespace too when the MaaS Setup
+    // models list isn't available (RBAC/network issue) or came back empty,
+    // so the scenario stays usable by hand.
+    if (key === _MODEL_NAME_KEY && needsModelPicker && modelsUnavailable) {
+      return (
+        <div key={key} className="maaspal-config-form__field">
+          <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+            {labelFor(key)}
+          </label>
+          <input
+            id={`cfg-${key}`}
+            type="text"
+            value={values[key] ?? ''}
+            onChange={(e) => handleChange(key, e.target.value, false)}
+            style={selectStyle}
+          />
+          <p style={noteStyle}>
+            Couldn&apos;t load models from MaaS Setup — enter the MaaSModelRef name manually (and its
+            namespace below).
+          </p>
+        </div>
+      );
+    }
+
+    if (key === _SUBSCRIPTION_KEY && showingSubscriptionPicker) {
+      return (
+        <div key={key} className="maaspal-config-form__field">
+          <label className="maaspal-config-form__label" htmlFor="cfg-subscription">
+            {labelFor(key, 'Subscription')}
+          </label>
+          <select
+            id="cfg-subscription"
+            value={selectedSubscriptionName}
+            onChange={(e) => handleSubscriptionSelect(e.target.value)}
+            style={selectStyle}
+          >
+            <option value="">
+              {inputs[_SUBSCRIPTION_KEY]?.placeholder ??
+                (requires.has(_SUBSCRIPTION_KEY)
+                  ? 'Select a subscription…'
+                  : 'Auto-select (highest eligible priority)')}
+            </option>
+            {visibleSubscriptions.map((s) => {
+              const notes: string[] = [];
+              if (!s.ready) notes.push('not ready');
+              if (!s.owner.groups.includes(_HARNESS_OWNER_GROUP)) notes.push('not eligible for this SA');
+              const suffix = notes.length ? ` — ${notes.join(', ')}` : '';
+              return (
+                <option key={`${s.namespace}/${s.name}`} value={s.name}>
+                  {s.display_name || s.name} ({s.namespace}/{s.name}) · priority {s.priority ?? '—'}
+                  {suffix}
+                </option>
+              );
+            })}
+          </select>
+          {subscriptionListNote && <p style={noteStyle}>{subscriptionListNote}</p>}
+          {help(key)}
+        </div>
+      );
+    }
+
+    if (key === _SUBSCRIPTION_KEY && needsSubscriptionPicker && subscriptionsUnavailable) {
+      return (
+        <div key={key} className="maaspal-config-form__field">
+          <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+            {labelFor(key)}
+          </label>
+          <input
+            id={`cfg-${key}`}
+            type="text"
+            value={values[key] ?? ''}
+            onChange={(e) => handleChange(key, e.target.value, false)}
+            style={selectStyle}
+          />
+          <p style={noteStyle}>
+            Couldn&apos;t load subscriptions from MaaS Setup — enter the MaaSSubscription name
+            manually, or leave blank for auto-selection.
+          </p>
+        </div>
+      );
+    }
+
+    const choices = inputs[key]?.choices;
+    if (choices) {
+      return (
+        <div key={key} className="maaspal-config-form__field">
+          <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+            {labelFor(key)}
+          </label>
+          <select
+            id={`cfg-${key}`}
+            value={String(values[key] ?? '')}
+            onChange={(e) => handleChange(key, e.target.value, false)}
+            style={selectStyle}
+          >
+            {choices.map((c) => (
+              <option key={c} value={c}>
+                {humanizeKey(c)}
+              </option>
+            ))}
+          </select>
+          {help(key)}
+        </div>
+      );
+    }
+
+    const isNumber = typeof defaultVal === 'number';
+    return (
+      <div key={key} className="maaspal-config-form__field">
+        <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+          {labelFor(key)}
+        </label>
+        <input
+          id={`cfg-${key}`}
+          type={isNumber ? 'number' : key.endsWith('_token') ? 'password' : 'text'}
+          value={values[key] ?? ''}
+          onChange={(e) => handleChange(key, e.target.value, isNumber)}
+          style={selectStyle}
+        />
+        {help(key)}
+      </div>
+    );
+  }
+
+  const visibleEntries = Object.entries(scenario.config).filter(([k]) => isVisible(inputs[k], values));
+  const mainEntries = visibleEntries.filter(([k]) => !inputs[k]?.advanced);
+  const advancedEntries = visibleEntries.filter(([k]) => inputs[k]?.advanced);
+
   return (
     <Modal
       isOpen
       onClose={onCancel}
       aria-label={`Run ${scenario.name}`}
-      title={`Run: ${scenario.name.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}`}
+      title={scenarioTitle(scenario)}
       variant="medium"
       actions={[
         <Button
@@ -199,7 +375,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
           variant="primary"
           onClick={() => void handleConfirm()}
           isLoading={loading}
-          isDisabled={loading}
+          isDisabled={loading || missing.length > 0}
         >
           Launch Run
         </Button>,
@@ -208,9 +384,21 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
         </Button>,
       ]}
     >
-      <p style={{ color: '#555', marginBottom: '1rem' }}>{scenario.description}</p>
+      <p style={{ color: '#555', margin: '0 0 0.5rem' }}>{scenario.summary || scenario.description}</p>
+      <div style={{ marginBottom: '0.5rem' }}>
+        <ScenarioBadges scenario={scenario} />
+      </div>
+      {scenario.summary && scenario.description && (
+        <ExpandableSection
+          toggleText="How it works"
+          isExpanded={showHowItWorks}
+          onToggle={(_e, expanded) => setShowHowItWorks(expanded)}
+        >
+          <p style={{ color: '#555', fontSize: '0.85rem', margin: 0 }}>{scenario.description}</p>
+        </ExpandableSection>
+      )}
 
-      <div className="maaspal-config-form__field" style={{ marginBottom: hasConfig ? '1.25rem' : 0 }}>
+      <div className="maaspal-config-form__field" style={{ margin: '1rem 0 1.25rem' }}>
         <Switch
           id="cfg-auto-cleanup"
           label="Auto cleanup"
@@ -220,7 +408,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
         <p style={noteStyle}>
           Automatically revoke API keys and restore/delete any subscriptions this run creates.
           Turn off to inspect what a run leaves behind — you can turn it back on mid-run, or clean
-          up manually afterward from the run's detail page.
+          up manually afterward from the run&apos;s detail page.
         </p>
       </div>
 
@@ -230,146 +418,43 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             Configuration
           </p>
           <div className="maaspal-config-form">
-            {Object.entries(scenario.config).map(([key, defaultVal]) => {
-              const showingModelPicker = needsModelPicker && !!models && models.length > 0;
-              const showingSubscriptionPicker =
-                needsSubscriptionPicker && !!subscriptions && subscriptions.length > 0;
-
-              // target_model_namespace is set together with target_model_name
-              // by the picker below — no separate field for it. Only hidden
-              // once the picker is actually rendering; if models never load
-              // (RBAC/network issue) or the list comes back empty, this stays
-              // a normal manual field alongside target_model_name's fallback.
-              if (key === _MODEL_NAMESPACE_KEY && showingModelPicker) return null;
-
-              if (key === _MODEL_NAME_KEY && showingModelPicker) {
-                const currentName = String(values[_MODEL_NAME_KEY] ?? '');
-                const currentNamespace = String(values[_MODEL_NAMESPACE_KEY] ?? '');
-                const currentKey =
-                  currentName && currentNamespace ? `${currentNamespace}/${currentName}` : '';
-                return (
-                  <div key={key} className="maaspal-config-form__field">
-                    <label className="maaspal-config-form__label" htmlFor="cfg-target_model">
-                      target model
-                    </label>
-                    <select
-                      id="cfg-target_model"
-                      value={currentKey}
-                      onChange={(e) => {
-                        const [namespace, name] = e.target.value.split('/');
-                        if (name && namespace) handleModelSelect(name, namespace);
-                      }}
-                      style={selectStyle}
-                    >
-                      <option value="">Select a model exposed through MaaS…</option>
-                      {visibleModels.map((m) => (
-                        <option key={`${m.namespace}/${m.name}`} value={`${m.namespace}/${m.name}`}>
-                          {m.display_name} ({m.namespace}/{m.name}){m.ready ? '' : ' — not ready'}
-                        </option>
-                      ))}
-                    </select>
-                    {modelListNote && <p style={noteStyle}>{modelListNote}</p>}
-                  </div>
-                );
-              }
-
-              // Fallback: plain text inputs — used for every other field, and
-              // for target_model_name/target_model_namespace too when the
-              // MaaS Setup models list isn't available (RBAC/network issue)
-              // or came back empty, so the scenario stays usable by hand.
-              if (key === _MODEL_NAME_KEY && needsModelPicker && modelsUnavailable) {
-                return (
-                  <div key={key} className="maaspal-config-form__field">
-                    <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
-                      {key}
-                    </label>
-                    <input
-                      id={`cfg-${key}`}
-                      type="text"
-                      value={values[key] ?? ''}
-                      onChange={(e) => handleChange(key, e.target.value, false)}
-                      style={selectStyle}
-                    />
-                    <p style={noteStyle}>
-                      Couldn&apos;t load models from MaaS Setup — enter the MaaSModelRef name
-                      manually (and its namespace below).
-                    </p>
-                  </div>
-                );
-              }
-
-              if (key === _SUBSCRIPTION_KEY && showingSubscriptionPicker) {
-                return (
-                  <div key={key} className="maaspal-config-form__field">
-                    <label className="maaspal-config-form__label" htmlFor="cfg-subscription">
-                      subscription
-                    </label>
-                    <select
-                      id="cfg-subscription"
-                      value={selectedSubscriptionName}
-                      onChange={(e) => handleSubscriptionSelect(e.target.value)}
-                      style={selectStyle}
-                    >
-                      <option value="">Auto-select (highest eligible priority)</option>
-                      {visibleSubscriptions.map((s) => {
-                        const notes: string[] = [];
-                        if (!s.ready) notes.push('not ready');
-                        if (!s.owner.groups.includes(_HARNESS_OWNER_GROUP)) notes.push('not eligible for this SA');
-                        const suffix = notes.length ? ` — ${notes.join(', ')}` : '';
-                        return (
-                          <option key={`${s.namespace}/${s.name}`} value={s.name}>
-                            {s.display_name || s.name} ({s.namespace}/{s.name}) · priority{' '}
-                            {s.priority ?? '—'}
-                            {suffix}
-                          </option>
-                        );
-                      })}
-                    </select>
-                    {subscriptionListNote && <p style={noteStyle}>{subscriptionListNote}</p>}
-                  </div>
-                );
-              }
-
-              if (key === _SUBSCRIPTION_KEY && needsSubscriptionPicker && subscriptionsUnavailable) {
-                return (
-                  <div key={key} className="maaspal-config-form__field">
-                    <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
-                      {key}
-                    </label>
-                    <input
-                      id={`cfg-${key}`}
-                      type="text"
-                      value={values[key] ?? ''}
-                      onChange={(e) => handleChange(key, e.target.value, false)}
-                      style={selectStyle}
-                    />
-                    <p style={noteStyle}>
-                      Couldn&apos;t load subscriptions from MaaS Setup — enter the MaaSSubscription
-                      name manually, or leave blank for auto-selection.
-                    </p>
-                  </div>
-                );
-              }
-
-              const isNumber = typeof defaultVal === 'number';
-              const current = values[key];
-              return (
-                <div key={key} className="maaspal-config-form__field">
-                  <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
-                    {key}
-                  </label>
-                  <input
-                    id={`cfg-${key}`}
-                    type={isNumber ? 'number' : 'text'}
-                    value={current ?? ''}
-                    onChange={(e) => handleChange(key, e.target.value, isNumber)}
-                    style={selectStyle}
-                  />
-                </div>
-              );
-            })}
+            {mainEntries.map(([key, defaultVal]) => renderField(key, defaultVal))}
           </div>
+          {advancedEntries.length > 0 && (
+            <ExpandableSection
+              toggleText={`Advanced settings (${advancedEntries.length})`}
+              isExpanded={showAdvanced}
+              onToggle={(_e, expanded) => setShowAdvanced(expanded)}
+              style={{ marginTop: '0.75rem' }}
+            >
+              <div className="maaspal-config-form">
+                {advancedEntries.map(([key, defaultVal]) => renderField(key, defaultVal))}
+              </div>
+            </ExpandableSection>
+          )}
         </>
+      )}
+
+      {scenario.plan_template && (
+        <Alert
+          variant="info"
+          isInline
+          isPlain
+          title="What this run will do"
+          style={{ marginTop: '1rem' }}
+        >
+          {renderPlan(scenario.plan_template, values)}
+        </Alert>
+      )}
+      {missing.length > 0 && (
+        <p style={{ ...noteStyle, color: '#c62828', marginTop: '0.75rem' }}>
+          Required before launching:{' '}
+          {missing
+            // The model picker sets name and namespace together — one entry.
+            .filter((k) => !(k === _MODEL_NAMESPACE_KEY && missing.includes(_MODEL_NAME_KEY)))
+            .map((k) => inputs[k]?.label ?? (k === _MODEL_NAME_KEY ? 'Model' : humanizeKey(k)))
+            .join(', ')}
+        </p>
       )}
     </Modal>
   );

@@ -23,17 +23,17 @@ generatorOptions:
 configMapGenerator:
   - name: maaspal-scenarios
     files:
-      - scenarios/single_key_load.yaml
-      - scenarios/multi_key_load.yaml
-      - scenarios/direct_inference.yaml
-      - scenarios/rate_limit_validation.yaml
-      - scenarios/rate_limit_validation_existing_subscription.yaml
-      - scenarios/metrics_fill.yaml
-      - scenarios/subscription_without_authpolicy.yaml
+      - scenarios/smoke_test.yaml
+      - scenarios/verify_subscription.yaml
+      - scenarios/verify_subscription_rate_limit.yaml
+      - scenarios/keys_share_user_budget.yaml
+      - scenarios/rate_limit_window_recovery.yaml
+      - scenarios/subscription_auto_selection.yaml
+      - scenarios/rate_limit_per_user_or_shared.yaml
+      - scenarios/denied_without_auth_policy.yaml
       - scenarios/api_key_lifecycle.yaml
-      - scenarios/rate_limit_priority_precedence.yaml
-      - scenarios/platform_health_check.yaml
-      - scenarios/model_health_check.yaml
-      - scenarios/multi_model_subscription_spread.yaml
-      - scenarios/multi_model_full_load.yaml
-      - scenarios/rate_limit_shared_across_users.yaml
+      - scenarios/usage_metrics_accuracy.yaml
+      - scenarios/load_test.yaml
+      - scenarios/gateway_overhead.yaml
+      - scenarios/multi_model_load.yaml
+      - scenarios/model_config_health.yaml

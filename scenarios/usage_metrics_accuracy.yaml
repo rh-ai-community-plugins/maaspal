@@ -1,0 +1,98 @@
+name: usage_metrics_accuracy
+previous_names: [metrics_fill]
+title: "Do MaaS usage metrics match real traffic?"
+summary: >-
+  Sends a known burst and checks MaaS's own request and token counters went
+  up by exactly what was sent — the numbers your dashboards and chargeback use.
+description: >-
+  Snapshots Limitador's authorized_calls / authorized_hits counters for the
+  model's route, sends a burst, and checks each counter's increase matches
+  what the harness actually sent, within a tolerance. Waits for Prometheus to
+  scrape (about 30 s on most clusters). Counters are per model route, not per
+  caller, so other traffic to the same model during the run shows up as a
+  mismatch (ADR-014).
+category: "Usage metrics"
+kind: verify
+mutates: [api_keys]
+requires: [target_model_name, target_model_namespace, limitador_namespace]
+est_duration: "~1–2 min"
+plan_template: >-
+  Create 1 API key on ${subscription}, send ${config.request_count} requests to
+  ${model}, then compare MaaS's request and token counters against what was
+  sent (±${config.metrics_tolerance_pct}%).
+inputs:
+  request_count: {label: "Requests"}
+  metrics_tolerance_pct:
+    label: "Tolerance (%)"
+  limitador_namespace:
+    advanced: true
+    from_model: http_route
+    help: "The model's HTTPRoute — filled in from the selected model."
+  metrics_max_wait_s: {advanced: true}
+  concurrency: {advanced: true}
+  prompt: {advanced: true}
+config:
+  subscription: ""           # optional — leave blank for auto-selection
+  target_model_name: ""
+  target_model_namespace: ""
+  request_count: 200
+  concurrency: 10
+  metrics_tolerance_pct: 5
+  # Limitador's gateway counters are scoped by the target model's HTTPRoute
+  # name — filled in from the model picker.
+  limitador_namespace: ""
+  metrics_max_wait_s: 65
+  prompt: "Hello, world!"
+metrics_queries:
+  total_requests: 'sum(authorized_calls{limitador_namespace="${config.limitador_namespace}"})'
+  total_tokens: 'sum(authorized_hits{limitador_namespace="${config.limitador_namespace}"})'
+verdict:
+  pass: >-
+    MaaS's counters match: it recorded the ${harness.inference_results.total_requests}
+    requests and ${harness.inference_results.total_tokens_sent} tokens this run sent.
+  fail: >-
+    MaaS's counters don't match what was sent (${harness.inference_results.total_requests}
+    requests, ${harness.inference_results.total_tokens_sent} tokens) — or Prometheus never
+    caught up. Other traffic to the same model during the run also causes this.
+tasks:
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-metrics-key"
+      subscription: "${config.subscription}"
+  - name: send_requests
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_pool: true
+    assertions:
+      error_rate_pct:
+        label: "Inference error rate"
+        unit: "%"
+        promql: "${harness.inference_results.error_rate_pct}"
+        expect: "< 5"
+      maas_requests_match:
+        label: "MaaS request count matches what was sent"
+        description: "1 = Limitador's authorized_calls increase is within tolerance of the requests sent."
+        # vector(...) wraps the scalar for clamp_min (Thanos rejects a bare scalar).
+        promql: >-
+          abs(
+            (sum(authorized_calls{limitador_namespace="${config.limitador_namespace}"}) - ${baseline.total_requests})
+            - ${harness.inference_results.total_requests}
+          )
+          <= bool (${config.metrics_tolerance_pct} / 100 * clamp_min(vector(${harness.inference_results.total_requests}), 1))
+        expect: "== 1"
+        max_wait_s: "${config.metrics_max_wait_s}"
+      maas_tokens_match:
+        label: "MaaS token count matches what was sent"
+        description: "1 = Limitador's authorized_hits increase is within tolerance of the tokens used."
+        promql: >-
+          abs(
+            (sum(authorized_hits{limitador_namespace="${config.limitador_namespace}"}) - ${baseline.total_tokens})
+            - ${harness.inference_results.total_tokens_sent}
+          )
+          <= bool (${config.metrics_tolerance_pct} / 100 * clamp_min(vector(${harness.inference_results.total_tokens_sent}), 1))
+        expect: "== 1"
+        max_wait_s: "${config.metrics_max_wait_s}"
+cleanup: automatic

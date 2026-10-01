@@ -1,6 +1,43 @@
-name: multi_model_full_load
-description: "Deploy N models, M subscriptions distributed across them, K API keys across subscriptions, R requests across keys"
-category: "Load Testing"
+name: multi_model_load
+previous_names: [multi_model_full_load, multi_model_subscription_spread]
+title: "Does MaaS hold up with many models and subscriptions?"
+summary: >-
+  Stands up several throwaway models and subscriptions, spreads keys and
+  traffic across all of them, and checks every combination keeps working.
+description: >-
+  Deploys N simulated models, grants access to them with one auth policy,
+  creates M subscriptions randomly spread across the models, K API keys
+  spread across the subscriptions, and R requests spread across the keys —
+  each key sending to a model its subscription actually covers. Set Requests
+  to 0 (and turn auto-cleanup off) to just stand the environment up for
+  manual exploration in the MaaS Setup tab.
+category: "Performance"
+kind: explore
+mutates: [api_keys, subscriptions, auth_policies, models]
+needs_rbac: [model-write]
+est_duration: "~3–5 min"
+plan_template: >-
+  Deploy ${config.model_count} models in ${config.model_namespace}, create
+  ${config.subscription_count} subscriptions and ${config.api_key_count} API keys
+  spread across them, then send ${config.request_count} requests across all keys.
+inputs:
+  model_count: {label: "Models"}
+  subscription_count: {label: "Subscriptions"}
+  api_key_count: {label: "API keys"}
+  request_count:
+    label: "Requests"
+    help: "0 = just build the environment, send no traffic."
+  concurrency: {label: "Concurrent requests"}
+  model_namespace: {advanced: true}
+  model_name_prefix: {advanced: true}
+  subscription_name_prefix: {advanced: true}
+  subscription_namespace: {advanced: true}
+  max_models_per_subscription: {advanced: true, help: "0 = no cap."}
+  token_limit: {advanced: true}
+  model_ready_timeout: {advanced: true}
+  deploy_parallel: {advanced: true}
+  token_rate_limit_ready_timeout: {advanced: true}
+  prompt: {advanced: true}
 config:
   model_count: 3
   model_name_prefix: "maaspal-sim"
@@ -64,7 +101,9 @@ tasks:
       prompt: "${config.prompt}"
       key_pool: true
     assertions:
-      error_rate_pct:
-        promql: "${harness.inference_results.error_rate_pct}"
+      non_throttle_error_rate_pct:
+        label: "Error rate (excluding throttling)"
+        unit: "%"
+        promql: "${harness.inference_results.non_throttle_error_rate_pct}"
         expect: "< 5"
 cleanup: automatic

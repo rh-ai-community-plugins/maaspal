@@ -439,5 +439,192 @@
   font-size: 0.8rem;
   font-weight: 600;
   color: #444;
-  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+/* ---------- Assertion card: target, description, details ---------- */
+.maaspal-assertion-card__target {
+  font-size: 0.78rem;
+  color: #555;
+}
+
+.maaspal-assertion-card__desc {
+  font-size: 0.74rem;
+  color: #777;
+  line-height: 1.35;
+}
+
+.maaspal-assertion-card__details-toggle {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.72rem;
+  color: #1565c0;
+  cursor: pointer;
+}
+
+.maaspal-assertion-card__details-toggle:hover {
+  text-decoration: underline;
+}
+
+/* ---------- Run narrative ("What happened") ---------- */
+.maaspal-run-narrative {
+  margin: 0 0 1.25rem;
+}
+
+.maaspal-run-narrative__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.maaspal-run-narrative__item {
+  display: grid;
+  grid-template-columns: 1.1rem minmax(9rem, max-content) 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+}
+
+.maaspal-run-narrative__task {
+  font-weight: 600;
+  color: #333;
+}
+
+.maaspal-run-narrative__text {
+  color: #555;
+}
+
+.maaspal-run-narrative__item--pending .maaspal-run-narrative__text {
+  color: #999;
+}
+
+@media (max-width: 640px) {
+  .maaspal-run-narrative__item {
+    grid-template-columns: 1.1rem 1fr;
+  }
+  .maaspal-run-narrative__text {
+    grid-column: 2;
+  }
+}
+
+/* ---------- Run verdict banner ---------- */
+.maaspal-verdict {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 0.85rem 1rem;
+  margin: 0 0 1.25rem;
+  border-radius: 6px;
+  border-left: 4px solid var(--verdict-color, #9e9e9e);
+  background: color-mix(in srgb, var(--verdict-color, #9e9e9e) 7%, white);
+}
+
+.maaspal-verdict__icon {
+  font-size: 1.25rem;
+  line-height: 1.2;
+  color: var(--verdict-color, #9e9e9e);
+}
+
+.maaspal-verdict__text {
+  font-size: 0.95rem;
+  color: #222;
+  line-height: 1.45;
+}
+
+.maaspal-verdict__checks {
+  font-size: 0.78rem;
+  color: #666;
+  margin-top: 0.15rem;
+}
+
+/* ---------- Run detail panels (traffic, resources, tables) ---------- */
+.maaspal-panel {
+  border: 1px solid #e3e3e3;
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  background: #fff;
+  margin-bottom: 1rem;
+}
+
+.maaspal-panel__title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #333;
+  margin: 0 0 0.6rem;
+}
+
+.maaspal-stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.maaspal-stat__label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #777;
+}
+
+.maaspal-stat__value {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #222;
+  font-variant-numeric: tabular-nums;
+}
+
+.maaspal-stat__sub {
+  font-size: 0.72rem;
+  color: #888;
+}
+
+.maaspal-resource-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.82rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.maaspal-resource-list__kind {
+  display: inline-block;
+  min-width: 8.5rem;
+  color: #777;
+}
+
+.maaspal-resource-list code {
+  font-size: 0.8rem;
+}
+
+.maaspal-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.maaspal-detail-table th,
+.maaspal-detail-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem 0.35rem 0;
+  border-bottom: 1px solid #eee;
+  vertical-align: top;
+}
+
+.maaspal-detail-table th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #777;
+  font-weight: 600;
+}
+
+.maaspal-table-scroll {
+  overflow-x: auto;
 }

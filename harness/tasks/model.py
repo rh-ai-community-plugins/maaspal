@@ -273,6 +273,11 @@ class DeploySimulatedModelTask(Task):
         deployed.extend(results)
 
         not_ready = [r["name"] for r in results if not r["ready"]]
+        ctx.shared_state["task_summary"] = (
+            f"Deployed {len(results)} throwaway simulated model(s) in {namespace}: "
+            f"{len(results) - len(not_ready)} ready"
+            + (f", not ready: {', '.join(not_ready)}" if not_ready else "")
+        )
         if not_ready:
             print(
                 f"[deploy_simulated_model] WARNING: {len(not_ready)} model(s) did not become Ready "

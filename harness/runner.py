@@ -265,6 +265,137 @@ def _substitute_harness_vars(template: str, shared_state: dict) -> str | None:
     return None if missing else resolved
 
 
+# The traffic chart only needs enough points to draw the shape of a burst —
+# keep the progress JSON small however many requests a run sends.
+_TIMELINE_MAX_POINTS = 600
+
+
+def _downsample_timeline(timeline: list[list]) -> list[list]:
+    """Thin a send_requests timeline to at most _TIMELINE_MAX_POINTS entries,
+    always keeping the first and last points and every point where the
+    outcome changes (e.g. the very first 429) so the chart never hides the
+    moment throttling started."""
+    if len(timeline) <= _TIMELINE_MAX_POINTS:
+        return list(timeline)
+    stride = len(timeline) / _TIMELINE_MAX_POINTS
+    keep = {int(i * stride) for i in range(_TIMELINE_MAX_POINTS)}
+    keep.update({0, len(timeline) - 1})
+    keep.update(i for i in range(1, len(timeline)) if timeline[i][2] != timeline[i - 1][2])
+    return [timeline[i] for i in sorted(keep)]
+
+
+def _traffic_snapshot(shared_state: dict, default_limit: object = None) -> list[dict]:
+    """One entry per send_requests-family invocation (keyed by result_key),
+    for the run page's traffic summary card and chart. `limit` draws the
+    chart's token-limit reference line: a burst's own (e.g. one model's limit
+    in verify_subscription_models), else the scenario's `token_limit` config."""
+    out = []
+    for result_key, info in (shared_state.get("_traffic") or {}).items():
+        limit = info.get("limit", default_limit)
+        try:
+            limit = float(limit) if limit not in (None, "") else None
+        except (TypeError, ValueError):
+            limit = None
+        out.append(
+            {
+                "task": info.get("task"),
+                "result_key": result_key,
+                "label": info.get("label"),
+                "limit": limit,
+                "planned": info.get("planned"),
+                "summary": shared_state.get(result_key) or {},
+                "timeline": _downsample_timeline(info.get("timeline") or []),
+            }
+        )
+    return out
+
+
+def _resources_snapshot(shared_state: dict) -> list[dict]:
+    """What this run created or modified on the cluster, by name, for the run
+    page's "This run created" panel. Built only from bookkeeping tasks
+    already keep for their own cleanup — never includes key values or
+    ServiceAccount tokens, only names/ids."""
+    resources: list[dict] = []
+
+    def _add(kind: str, name: str, **extra) -> None:
+        resources.append({"kind": kind, "name": name, **{k: v for k, v in extra.items() if v}})
+
+    for m in shared_state.get("deployed_models") or []:
+        _add("Model", f"{m.get('namespace')}/{m.get('name')}")
+    for u in shared_state.get("users") or []:
+        _add("ServiceAccount", f"{u.get('namespace')}/{u.get('name')}")
+
+    if shared_state.get("new_subscription_name"):
+        _add(
+            "MaaSSubscription",
+            f"{shared_state.get('subscription_namespace')}/{shared_state['new_subscription_name']}",
+            action="created" if shared_state.get("_sub_created") else "patched",
+        )
+    for key in ("priority_test_subscriptions", "distributed_subscriptions"):
+        for rec in shared_state.get(key) or []:
+            _add(
+                "MaaSSubscription",
+                f"{rec.get('namespace')}/{rec.get('name')}",
+                action="created" if rec.get("created") else "patched",
+            )
+    if shared_state.get("auth_policy_name"):
+        _add(
+            "MaaSAuthPolicy",
+            f"{shared_state.get('auth_policy_namespace')}/{shared_state['auth_policy_name']}",
+            action="created" if shared_state.get("_policy_created") else "patched",
+        )
+
+    revoked = bool(shared_state.get("revoked_count"))
+    for k in shared_state.get("api_keys") or []:
+        _add(
+            "API key",
+            str(k.get("name") or k.get("id")),
+            subscription=k.get("subscription"),
+            owner=k.get("owner_username"),
+            action="revoked mid-run" if revoked else "created",
+        )
+    return resources
+
+
+def _tables_snapshot(shared_state: dict) -> list[dict]:
+    """Per-row detail tables a task publishes for the run page (e.g. one row
+    per model checked), via shared_state["_tables"][title] = {columns, rows}."""
+    return [
+        {"title": title, "columns": t.get("columns", []), "rows": t.get("rows", [])}
+        for title, t in (shared_state.get("_tables") or {}).items()
+    ]
+
+
+def _format_number(value: float) -> str:
+    return f"{int(value):,}" if float(value).is_integer() else f"{value:,.2f}"
+
+
+def _render_verdict(
+    verdict: dict, status: str, shared_state: dict, assertion_results: list[AssertionResult]
+) -> dict:
+    """One plain-language sentence for the top of the run page. Uses the
+    scenario's own `verdict: {pass: ..., fail: ...}` templates when present
+    (${harness.<ns>.<key>} filled from final shared_state, "—" if absent),
+    otherwise a generic "N of M checks passed"."""
+    passed = sum(1 for a in assertion_results if a.status == "PASSING")
+    total = len(assertion_results)
+    template = (verdict or {}).get("pass" if status == "PASS" else "fail")
+    if status == "CANCELLED":
+        text = "Run was stopped before it finished — results below are partial."
+    elif template:
+        def _sub(m: re.Match) -> str:
+            ns = shared_state.get(m.group(1), {})
+            value = ns.get(m.group(2)) if isinstance(ns, dict) else None
+            return _format_number(float(value)) if isinstance(value, (int, float)) else "—"
+
+        text = _HARNESS_VAR_RE.sub(_sub, str(template)).strip()
+    elif total:
+        text = f"{passed} of {total} checks passed."
+    else:
+        text = "Run completed — this scenario defines no checks."
+    return {"status": status, "text": text, "checks_passed": passed, "checks_total": total}
+
+
 class ScenarioRunner:
     def __init__(
         self, scenario_path: str, run_id: str, stop_event: asyncio.Event | None = None
@@ -350,14 +481,18 @@ class ScenarioRunner:
         except OSError as exc:
             print(f"[runner] could not write config snapshot: {exc}", flush=True)
 
-        def _assertion_dict(r: object, task_name: str | None) -> dict:
+        def _assertion_dict(r: AssertionResult, task_name: str | None) -> dict:
             return {
                 "task": task_name,
-                "name": r.name,  # type: ignore[attr-defined]
-                "status": r.status,  # type: ignore[attr-defined]
-                "value": r.current_value,  # type: ignore[attr-defined]
-                "expected_value": r.expected_value,  # type: ignore[attr-defined]
-                "expression": r.expression,  # type: ignore[attr-defined]
+                "name": r.name,
+                "status": r.status,
+                "value": r.current_value,
+                "expected_value": r.expected_value,
+                "expression": r.expression,
+                "label": r.label,
+                "description": r.description,
+                "unit": r.unit,
+                "target": r.target,
             }
 
         def _write_assertions(
@@ -381,6 +516,24 @@ class ScenarioRunner:
                 print(f"[runner] could not write assertions: {exc}", flush=True)
 
         task_completed_progress: dict[str, dict] = {}
+        task_completed_summary: dict[str, str] = {}
+        # The traffic chart's limit line: this run's effective token_limit, but
+        # only for scenarios that declare one (not a stray env var of that name).
+        chart_token_limit = (
+            config.get("token_limit") if "token_limit" in (scenario.get("config") or {}) else None
+        )
+        # Set once the run finishes (see the end of this method).
+        verdict_payload: dict | None = None
+
+        def _freeze_task_state(task_name: str) -> None:
+            """Move the just-finished task's live progress/narration out of
+            shared_state into its frozen per-task snapshot."""
+            tp = shared_state.pop("task_progress", None)
+            if tp:
+                task_completed_progress[task_name] = tp
+            summary = shared_state.pop("task_summary", None)
+            if summary:
+                task_completed_summary[task_name] = summary
 
         def _write_progress(current_idx: int, completed: list[TaskResult]) -> None:
             """Write current task progress to the dedicated PVC file."""
@@ -396,6 +549,9 @@ class ScenarioRunner:
                     cp = task_completed_progress.get(task.name)
                     if cp:
                         entry["progress"] = cp
+                    summary = task_completed_summary.get(task.name)
+                    if summary:
+                        entry["summary"] = summary
                     task_assertions = completed[i].assertions
                     if task_assertions:
                         if any(a.status == "FAILING" for a in task_assertions):
@@ -412,14 +568,25 @@ class ScenarioRunner:
                     tp = shared_state.get("task_progress")
                     if tp:
                         entry["progress"] = tp
+                    summary = shared_state.get("task_summary")
+                    if summary:
+                        entry["summary"] = summary
                     task_list.append(entry)
                 else:
                     task_list.append({"name": task.name, "status": "PENDING"})
             try:
                 _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+                payload: dict = {
+                    "tasks": task_list,
+                    "run_started_at": run_started_at,
+                    "traffic": _traffic_snapshot(shared_state, chart_token_limit),
+                    "resources": _resources_snapshot(shared_state),
+                    "tables": _tables_snapshot(shared_state),
+                }
+                if verdict_payload:
+                    payload["verdict"] = verdict_payload
                 (_RESULTS_DIR / f"{self.run_id}-progress.json").write_text(
-                    json.dumps({"tasks": task_list, "run_started_at": run_started_at}),
-                    encoding="utf-8",
+                    json.dumps(payload, default=str), encoding="utf-8"
                 )
             except OSError as exc:
                 print(f"[runner] could not write progress: {exc}", flush=True)
@@ -558,9 +725,7 @@ class ScenarioRunner:
             try:
                 result, stopped = await self._run_task_or_stop(task, ctx, start)
                 if stopped:
-                    tp = shared_state.pop("task_progress", None)
-                    if tp:
-                        task_completed_progress[task.name] = tp
+                    _freeze_task_state(task.name)
                     task_results.append(result)
                     break
                 if current_task_assertions:
@@ -576,9 +741,7 @@ class ScenarioRunner:
                     if result.status == "PASS" and any(a.status == "FAILING" for a in task_assertion_results):
                         result.status = "FAIL"
                         result.error = "assertions failed at task completion"
-                tp = shared_state.pop("task_progress", None)
-                if tp:
-                    task_completed_progress[task.name] = tp
+                _freeze_task_state(task.name)
                 task_results.append(result)
                 if result.status == "FAIL":
                     run_failed = True
@@ -589,9 +752,7 @@ class ScenarioRunner:
                     f"[runner] task FAILED: {task.name}\n{traceback.format_exc()}",
                     flush=True,
                 )
-                tp = shared_state.pop("task_progress", None)
-                if tp:
-                    task_completed_progress[task.name] = tp
+                _freeze_task_state(task.name)
                 task_results.append(
                     TaskResult(
                         task_name=task.name,
@@ -645,13 +806,17 @@ class ScenarioRunner:
             current_task_assertion_results=[],
             global_assertion_results=assertion_results,
         )
-        _write_progress(len(tasks), task_results)
         stopped = bool(self._stop_event and self._stop_event.is_set())
         status = (
             "CANCELLED" if stopped
             else "FAIL" if run_failed
             else compute_run_status(task_results, assertion_results)
         )
+        all_assertion_results = [a for tr in task_results for a in tr.assertions] + assertion_results
+        verdict_payload = _render_verdict(
+            scenario.get("verdict") or {}, status, shared_state, all_assertion_results
+        )
+        _write_progress(len(tasks), task_results)
 
         return RunResult(
             run_id=self.run_id,

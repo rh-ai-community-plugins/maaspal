@@ -422,6 +422,15 @@ def list_models() -> ResourceList:
                 "phase": status.get("phase"),
                 "ready": _is_ready(conditions),
                 "endpoint": status.get("endpoint"),
+                # "<namespace>/<HTTPRoute name>" — exactly the format
+                # Limitador's limitador_namespace metric label uses (ADR-014),
+                # so the run launcher can fill it from the model picker
+                # instead of scenarios hard-coding one cluster's route.
+                "http_route": (
+                    f"{status['httpRouteNamespace']}/{status['httpRouteName']}"
+                    if status.get("httpRouteNamespace") and status.get("httpRouteName")
+                    else None
+                ),
                 "subscriptions": [
                     {
                         "name": s.get("name"),
