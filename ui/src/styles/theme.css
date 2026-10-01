@@ -4,6 +4,9 @@
 
 /* ---------- Masthead ---------- */
 .maaspal-masthead {
+  /* Rendered as PatternFly <Page header>: claim the page grid's full-width
+     header row (a PF Masthead would carry this itself). */
+  grid-area: header;
   background: #111111;
   border-bottom: 3px solid #c62828;
   padding: 0 2rem;
@@ -627,4 +630,149 @@
 
 .maaspal-table-scroll {
   overflow-x: auto;
+}
+
+/* ---------- Config form: label + info popover ---------- */
+.maaspal-config-form__label-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.maaspal-config-form__info {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #6a6e73;
+  cursor: pointer;
+  line-height: 1;
+  font-size: 0.85rem;
+}
+
+.maaspal-config-form__info:hover,
+.maaspal-config-form__info:focus-visible {
+  color: #1565c0;
+}
+
+/* ---------- Run steps ("What happened") ---------- */
+.maaspal-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.maaspal-steps__item {
+  display: grid;
+  grid-template-columns: 1.1rem 1fr;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  align-items: baseline;
+}
+
+.maaspal-steps__task {
+  font-weight: 600;
+  color: #333;
+  margin-right: 0.6rem;
+}
+
+.maaspal-steps__text {
+  color: #555;
+}
+
+.maaspal-steps__text--muted {
+  color: #999;
+}
+
+.maaspal-steps__resources {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.8rem;
+}
+
+.maaspal-steps__meta {
+  color: #777;
+}
+
+.maaspal-steps__status {
+  margin-left: 0.5rem;
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+
+/* ---------- Findings ---------- */
+.maaspal-finding {
+  border: 1px solid #c5d6ea;
+  border-left: 4px solid #1565c0;
+  border-radius: 6px;
+  background: #f4f8fd;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.maaspal-finding__label {
+  margin: 0;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #1565c0;
+  font-weight: 700;
+}
+
+.maaspal-finding__title {
+  margin: 0.15rem 0 0.25rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #222;
+}
+
+.maaspal-finding__text {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #444;
+}
+
+/* ---------- Compact traffic line ---------- */
+.maaspal-traffic-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.82rem;
+  color: #555;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #e3e3e3;
+  border-radius: 6px;
+  background: #fff;
+  margin-bottom: 0.5rem;
+}
+
+.maaspal-traffic-line__name {
+  font-weight: 600;
+  color: #333;
+}
+
+/* ---------- Charts ---------- */
+.maaspal-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.maaspal-chart-tooltip {
+  position: absolute;
+  top: 4px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.75rem;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  pointer-events: none;
+  white-space: nowrap;
 }

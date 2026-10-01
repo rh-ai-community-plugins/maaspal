@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, ExpandableSection, Modal, Switch } from '@patternfly/react-core';
+import { Alert, Button, ExpandableSection, Modal, Popover, Switch } from '@patternfly/react-core';
+import { OutlinedQuestionCircleIcon } from '@patternfly/react-icons';
 import {
   createRun,
   getMaasModels,
@@ -47,7 +48,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
   const [values, setValues] = useState<ConfigValues>(() => initValues(scenario.config));
   const [autoCleanup, setAutoCleanup] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showHowItWorks, setShowHowItWorks] = useState(false);
+  const [showMoreDetails, setShowMoreDetails] = useState(false);
   const inputs = scenario.inputs ?? {};
   const requires = new Set(scenario.requires ?? []);
 
@@ -180,15 +181,31 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     return requires.has(key) ? `${base} *` : base;
   }
 
-  function help(key: string) {
+  /** ⓘ next to a label: what the setting means, for someone new to MaaS. */
+  function infoFor(key: string) {
     const text = inputs[key]?.help;
+    if (!text) return null;
+    const label = inputs[key]?.label ?? humanizeKey(key);
+    return (
+      <Popover headerContent={label} bodyContent={text} position="top">
+        <button
+          type="button"
+          className="maaspal-config-form__info"
+          aria-label={`More info about ${label}`}
+        >
+          <OutlinedQuestionCircleIcon />
+        </button>
+      </Popover>
+    );
+  }
+
+  function help(key: string) {
     const auto = inputs[key]?.from_subscription
       ? 'Auto-filled when you pick a subscription.'
       : inputs[key]?.from_model
         ? 'Auto-filled when you pick a model.'
         : null;
-    if (!text && !auto) return null;
-    return <p style={noteStyle}>{text ?? auto}</p>;
+    return auto ? <p style={noteStyle}>{auto}</p> : null;
   }
 
   function renderField(key: string, defaultVal: Scenario['config'][string]) {
@@ -207,9 +224,12 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
         (requires.has(_MODEL_NAME_KEY) ? 'Select a model exposed through MaaS…' : 'Cluster default model');
       return (
         <div key={key} className="maaspal-config-form__field">
-          <label className="maaspal-config-form__label" htmlFor="cfg-target_model">
-            {labelFor(key, 'Model')}
-          </label>
+          <div className="maaspal-config-form__label-row">
+            <label className="maaspal-config-form__label" htmlFor="cfg-target_model">
+                        {labelFor(key, 'Model')}
+            </label>
+            {infoFor(key)}
+          </div>
           <select
             id="cfg-target_model"
             value={currentKey}
@@ -229,6 +249,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             ))}
           </select>
           {modelListNote && <p style={noteStyle}>{modelListNote}</p>}
+          {help(key)}
         </div>
       );
     }
@@ -240,9 +261,12 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     if (key === _MODEL_NAME_KEY && needsModelPicker && modelsUnavailable) {
       return (
         <div key={key} className="maaspal-config-form__field">
-          <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
-            {labelFor(key)}
-          </label>
+          <div className="maaspal-config-form__label-row">
+            <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+                        {labelFor(key)}
+            </label>
+            {infoFor(key)}
+          </div>
           <input
             id={`cfg-${key}`}
             type="text"
@@ -261,9 +285,12 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     if (key === _SUBSCRIPTION_KEY && showingSubscriptionPicker) {
       return (
         <div key={key} className="maaspal-config-form__field">
-          <label className="maaspal-config-form__label" htmlFor="cfg-subscription">
-            {labelFor(key, 'Subscription')}
-          </label>
+          <div className="maaspal-config-form__label-row">
+            <label className="maaspal-config-form__label" htmlFor="cfg-subscription">
+                        {labelFor(key, 'Subscription')}
+            </label>
+            {infoFor(key)}
+          </div>
           <select
             id="cfg-subscription"
             value={selectedSubscriptionName}
@@ -298,9 +325,12 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     if (key === _SUBSCRIPTION_KEY && needsSubscriptionPicker && subscriptionsUnavailable) {
       return (
         <div key={key} className="maaspal-config-form__field">
-          <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
-            {labelFor(key)}
-          </label>
+          <div className="maaspal-config-form__label-row">
+            <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+                        {labelFor(key)}
+            </label>
+            {infoFor(key)}
+          </div>
           <input
             id={`cfg-${key}`}
             type="text"
@@ -320,9 +350,12 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     if (choices) {
       return (
         <div key={key} className="maaspal-config-form__field">
-          <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
-            {labelFor(key)}
-          </label>
+          <div className="maaspal-config-form__label-row">
+            <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+                        {labelFor(key)}
+            </label>
+            {infoFor(key)}
+          </div>
           <select
             id={`cfg-${key}`}
             value={String(values[key] ?? '')}
@@ -343,9 +376,12 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     const isNumber = typeof defaultVal === 'number';
     return (
       <div key={key} className="maaspal-config-form__field">
-        <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
-          {labelFor(key)}
-        </label>
+        <div className="maaspal-config-form__label-row">
+          <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+                    {labelFor(key)}
+          </label>
+          {infoFor(key)}
+        </div>
         <input
           id={`cfg-${key}`}
           type={isNumber ? 'number' : key.endsWith('_token') ? 'password' : 'text'}
@@ -388,14 +424,20 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
       <div style={{ marginBottom: '0.5rem' }}>
         <ScenarioBadges scenario={scenario} />
       </div>
-      {scenario.summary && scenario.description && (
-        <ExpandableSection
-          toggleText="How it works"
-          isExpanded={showHowItWorks}
-          onToggle={(_e, expanded) => setShowHowItWorks(expanded)}
-        >
-          <p style={{ color: '#555', fontSize: '0.85rem', margin: 0 }}>{scenario.description}</p>
-        </ExpandableSection>
+      {scenario.plan_template && (
+        <Alert variant="info" isInline isPlain title="What this run will do" style={{ marginTop: '0.75rem' }}>
+          {renderPlan(scenario.plan_template, values)}
+          {scenario.description && scenario.description !== scenario.summary && (
+            <ExpandableSection
+              toggleText="More details"
+              isExpanded={showMoreDetails}
+              onToggle={(_e, expanded) => setShowMoreDetails(expanded)}
+              style={{ marginTop: '0.35rem' }}
+            >
+              <p style={{ color: '#555', fontSize: '0.85rem', margin: 0 }}>{scenario.description}</p>
+            </ExpandableSection>
+          )}
+        </Alert>
       )}
 
       <div className="maaspal-config-form__field" style={{ margin: '1rem 0 1.25rem' }}>
@@ -435,17 +477,6 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
         </>
       )}
 
-      {scenario.plan_template && (
-        <Alert
-          variant="info"
-          isInline
-          isPlain
-          title="What this run will do"
-          style={{ marginTop: '1rem' }}
-        >
-          {renderPlan(scenario.plan_template, values)}
-        </Alert>
-      )}
       {missing.length > 0 && (
         <p style={{ ...noteStyle, color: '#c62828', marginTop: '0.75rem' }}>
           Required before launching:{' '}

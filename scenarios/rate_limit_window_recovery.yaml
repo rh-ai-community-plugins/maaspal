@@ -1,78 +1,97 @@
 name: rate_limit_window_recovery
 title: "Does access come back after the rate-limit window?"
 summary: >-
-  Uses up a subscription's token budget, waits out its window, and checks
+  Uses up a small token budget, waits for its time window to pass, and checks
   requests succeed again — throttling should be temporary, not stuck.
 description: >-
-  Creates a key on one of your subscriptions, sends requests one at a time
-  until MaaS throttles, then waits for the subscription's configured window
-  (plus a small buffer) and sends a few more requests, which should succeed.
-  Best with a short window (e.g. 1m); waits are capped, so a very long window
-  (like 24h) can't be fully waited out — the run says so if that happens.
+  Creates a temporary subscription with a small token limit over a short
+  window (1 minute by default), sends requests until MaaS throttles, waits
+  out the window plus a few seconds, then sends a few more — which should
+  succeed. Uses its own subscription so the limit and window are known and
+  short; your existing subscriptions are left alone.
 category: "Rate limits"
-kind: verify
-mutates: [api_keys]
-requires: [subscription, target_model_name, target_model_namespace]
-est_duration: "window + ~1 min"
+kind: explore
+mutates: [api_keys, subscriptions]
+requires: [target_model_name, target_model_namespace]
+est_duration: "~2 min"
 plan_template: >-
-  Create 1 API key on ${subscription}, send to ${model} until throttled (limit
-  ${config.token_limit} per ${config.token_window}), wait ${config.token_window}
-  + ${config.buffer_s}s, then send ${config.recovery_requests} more and expect them to succeed.
+  Create a temporary subscription allowing ${config.token_limit} tokens per
+  ${config.token_window} on ${model}, send until throttled, wait ${config.token_window}
+  + ${config.buffer_s}s, then send ${config.recovery_requests} more and expect access to be back.
 inputs:
-  subscription: {label: "Subscription"}
-  token_limit:
-    label: "Token limit"
-    from_subscription: limit
+  target_model_name:
+    label: "Model"
   token_window:
     label: "Window"
-    from_subscription: window
-    help: "How long to wait for the budget to refill — filled in from the subscription."
-  request_count:
-    label: "Max requests to get throttled"
-  recovery_requests: {label: "Requests after the wait"}
-  buffer_s: {advanced: true, help: "Extra seconds on top of the window."}
-  max_wait_s: {advanced: true, help: "Longest the run will wait, whatever the window."}
-  prompt: {advanced: true}
+    help: >-
+      How long a token budget lasts before it refills, e.g. 1m or 30s. The run
+      waits this long after being throttled.
+  recovery_requests:
+    label: "Requests after the wait"
+    help: "Keep this small — the refilled budget is the same small limit, so a long burst gets throttled again."
+  token_limit:
+    advanced: true
+    help: "The temporary subscription's token limit — small, so it's used up in seconds."
+  buffer_s:
+    advanced: true
+    help: "Extra seconds to wait on top of the window, so the check lands safely after the reset."
+  new_subscription_name:
+    advanced: true
+    help: "Name of the temporary MaaSSubscription this run creates and deletes afterwards."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions live in on this cluster (the MaaS tenant namespace)."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
 config:
-  subscription: ""
   target_model_name: ""
   target_model_namespace: ""
-  token_limit: 100
   token_window: "1m"
-  request_count: 60
   recovery_requests: 3
+  token_limit: 50
   buffer_s: 5
-  max_wait_s: 900
+  new_subscription_name: "maaspal-window-recovery-test"
+  subscription_namespace: "models-as-a-service"
   prompt: "Hello, world!"
 verdict:
   pass: >-
-    Throttled after ${harness.inference_results.tokens_before_first_429} tokens, and after waiting
-    out the ${config.token_window} window ${harness.inference_results_after_window.success_count}
+    Throttled after ${harness.inference_results.tokens_before_first_429} tokens, and once the
+    ${config.token_window} window passed, ${harness.inference_results_after_window.success_count}
     of ${config.recovery_requests} requests succeeded again.
   fail: >-
     Access did not come back as expected after the ${config.token_window} window —
     ${harness.inference_results_after_window.success_count} of ${config.recovery_requests} requests
     succeeded after the wait.
 tasks:
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.token_limit}"
+      token_window: "${config.token_window}"
   - name: provision_api_key
     params:
       key_name: "maaspal-recovery-key"
-      subscription: "${config.subscription}"
+      subscription: "${config.new_subscription_name}"
   - name: send_requests
     params:
       model: "${config.target_model_namespace}/${config.target_model_name}"
-      count: "${config.request_count}"
       concurrency: 1
       prompt: "${config.prompt}"
       key_pool: true
-      # No SDK retries anywhere in this scenario: a hidden retry landing in
-      # the next window is exactly the effect being measured.
+      # No SDK retries anywhere here: a hidden retry landing in the next
+      # window is exactly the effect being measured.
       retries: 0
+      until_throttled: true
       stop_after_429s: 2
+      chart: true
     assertions:
       throttled_at_all:
         label: "Budget used up (throttled)"
-        description: "Precondition: if this fails, raise Max requests — recovery means nothing without it."
+        description: "Precondition — recovery means nothing unless access was cut off first."
         unit: "429s"
         promql: "${harness.inference_results.rate_limited_count}"
         expect: "> 0"
@@ -80,7 +99,7 @@ tasks:
     params:
       duration_s: "${config.token_window}"
       buffer_s: "${config.buffer_s}"
-      max_s: "${config.max_wait_s}"
+      max_s: 900
       reason: "waiting for the rate-limit window to reset"
   - name: send_requests_after_window
     params:
@@ -94,6 +113,9 @@ tasks:
     assertions:
       recovered_success_count:
         label: "Requests that succeeded after the wait"
+        description: >-
+          At least the first should — later ones can legitimately be throttled
+          again, since the refilled budget is small.
         unit: "requests"
         promql: "${harness.inference_results_after_window.success_count}"
         expect: "> 0"

@@ -21,23 +21,49 @@ plan_template: >-
   ${config.subscription_count} subscriptions and ${config.api_key_count} API keys
   spread across them, then send ${config.request_count} requests across all keys.
 inputs:
-  model_count: {label: "Models"}
-  subscription_count: {label: "Subscriptions"}
-  api_key_count: {label: "API keys"}
+  model_count:
+    label: "Models"
+    help: "How many throwaway simulated models to deploy."
+  subscription_count:
+    label: "Subscriptions"
+    help: "How many temporary subscriptions to create, each covering a random subset of the models."
+  api_key_count:
+    label: "API keys"
+    help: "How many API keys to create, spread across the subscriptions."
   request_count:
     label: "Requests"
     help: "0 = just build the environment, send no traffic."
-  concurrency: {label: "Concurrent requests"}
-  model_namespace: {advanced: true}
-  model_name_prefix: {advanced: true}
-  subscription_name_prefix: {advanced: true}
-  subscription_namespace: {advanced: true}
+  concurrency:
+    label: "Concurrent requests"
+    help: "How many requests are in flight at the same time."
+  model_namespace:
+    advanced: true
+    help: "Where to deploy the models. Must carry the maas.opendatahub.io/gateway-access label so MaaS's gateway accepts their routes."
+  model_name_prefix:
+    advanced: true
+    help: "Name prefix for the throwaway models."
+  subscription_name_prefix:
+    advanced: true
+    help: "Name prefix for the temporary subscriptions."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions (and auth policies) live in on this cluster — the MaaS tenant namespace."
   max_models_per_subscription: {advanced: true, help: "0 = no cap."}
-  token_limit: {advanced: true}
-  model_ready_timeout: {advanced: true}
-  deploy_parallel: {advanced: true}
-  token_rate_limit_ready_timeout: {advanced: true}
-  prompt: {advanced: true}
+  token_limit:
+    advanced: true
+    help: "Each subscription's token limit — generous by default so throttling doesn't count as failures here."
+  model_ready_timeout:
+    advanced: true
+    help: "How long to wait for each model to start, in seconds."
+  deploy_parallel:
+    advanced: true
+    help: "Deploy all models at once (faster) or one at a time (gentler on a small cluster)."
+  token_rate_limit_ready_timeout:
+    advanced: true
+    help: "How long to wait, in seconds, for MaaS to finish generating each model's rate-limit policy before sending traffic."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
 config:
   model_count: 3
   model_name_prefix: "maaspal-sim"

@@ -132,6 +132,39 @@ def _evaluate_match_assertion(name: str, spec: dict[str, Any], shared_state: dic
     )
 
 
+_HARNESS_REF_RE = re.compile(r"\$\{harness\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\}")
+
+
+def _with_live_bounds(spec: dict[str, Any], shared_state: dict) -> dict[str, Any] | None:
+    """A copy of spec whose `between`/`expect` bounds have ${harness.ns.key}
+    references filled from live shared_state — so a check can compare against
+    a value only known at run time (e.g. the token limit read off the
+    subscription being tested), not just a ${config.x} known at load time.
+    None if any referenced value isn't populated yet (the assertion stays
+    PENDING rather than comparing against a placeholder)."""
+    missing = False
+
+    def _sub(text: object) -> str:
+        nonlocal missing
+
+        def _one(m: re.Match) -> str:
+            nonlocal missing
+            ns = shared_state.get(m.group(1), {})
+            if not isinstance(ns, dict) or ns.get(m.group(2)) is None:
+                missing = True
+                return "0"
+            return str(float(ns[m.group(2)]))
+
+        return _HARNESS_REF_RE.sub(_one, str(text))
+
+    out = dict(spec)
+    if "between" in spec:
+        out["between"] = [_sub(b) for b in spec["between"]]
+    if "expect" in spec:
+        out["expect"] = _sub(spec["expect"])
+    return None if missing else out
+
+
 def _evaluate_promql_assertion(name: str, spec: dict[str, Any], shared_state: dict) -> AssertionResult:
     """Assertion backed by a live PromQL query.
 
@@ -146,6 +179,10 @@ def _evaluate_promql_assertion(name: str, spec: dict[str, Any], shared_state: di
     this module a pure, synchronous evaluator like every other assertion form.
     """
     promql = spec.get("promql", "")
+    live_spec = _with_live_bounds(spec, shared_state)
+    if live_spec is None:
+        return AssertionResult(name=name, expression=promql, status="PENDING")
+    spec = live_spec
     observed = shared_state.get("metrics", {}).get(name)
     if observed is None:
         return AssertionResult(

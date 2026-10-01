@@ -5,7 +5,11 @@ import pytest
 from openai import APIStatusError
 
 from harness.tasks.base import TaskContext
-from harness.tasks.subscription_check import VerifySubscriptionModelsTask
+from harness.tasks.subscription_check import (
+    DiscoverSubscriptionModelsTask,
+    ReadSubscriptionLimitsTask,
+    SendRequestsToEachModelTask,
+)
 
 _SUB = {
     "name": "team-a",
@@ -14,17 +18,25 @@ _SUB = {
     "owner": {"groups": ["system:authenticated"], "users": []},
     "model_refs": [
         {"name": "small", "namespace": "llm", "token_rate_limits": [{"limit": 50, "window": "1m"}]},
-        {"name": "blocked", "namespace": "llm", "token_rate_limits": [{"limit": 50, "window": "1m"}]},
-        {"name": "big", "namespace": "llm", "token_rate_limits": [{"limit": 100000, "window": "1m"}]},
+        {"name": "blocked", "namespace": "llm", "token_rate_limits": []},
+        {"name": "unlisted", "namespace": "llm", "token_rate_limits": [{"limit": 1000, "window": "1h"}]},
     ],
 }
 
 
+def _ctx(state: dict | None = None) -> TaskContext:
+    async def _emit() -> None:
+        pass
+
+    return TaskContext(
+        run_id="abcdef123", scenario_name="s", maas_api_url="http://maas.test", sa_token="sa",
+        shared_state=state or {}, config={}, assertions={}, emit_assertion_state=_emit,
+    )
+
+
 def _status_error(code: int) -> APIStatusError:
     request = httpx.Request("POST", "http://m.test/v1/chat/completions")
-    return APIStatusError(
-        f"status {code}", response=httpx.Response(code, request=request), body=None
-    )
+    return APIStatusError(f"status {code}", response=httpx.Response(code, request=request), body=None)
 
 
 def _ok(tokens: int = 30) -> MagicMock:
@@ -33,89 +45,72 @@ def _ok(tokens: int = 30) -> MagicMock:
     return r
 
 
-def _ctx() -> TaskContext:
-    async def _emit() -> None:
-        pass
-
-    return TaskContext(
-        run_id="abcdef123", scenario_name="s", maas_api_url="http://maas.test", sa_token="sa",
-        shared_state={}, config={}, assertions={}, emit_assertion_state=_emit,
-    )
-
-
-async def _fake_provision(self, ctx: TaskContext) -> None:
-    ctx.shared_state.setdefault("api_keys", []).append(
-        {"id": "k1", "key": "sk-oai-test", "name": "maaspal-verify", "subscription": "team-a"}
-    )
-
-
-@pytest.fixture
-def _patched(monkeypatch: pytest.MonkeyPatch):
+@pytest.fixture(autouse=True)
+def _cluster(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("harness.tasks.subscription_check._find_subscription", lambda name: _SUB)
     monkeypatch.setattr(
         "harness.tasks.subscription_check._discovered_models",
         AsyncMock(return_value={
             "llm/small": ("http://maas.test/llm/small/v1", "small-id"),
             "llm/blocked": ("http://maas.test/llm/blocked/v1", "blocked-id"),
-            "llm/big": ("http://maas.test/llm/big/v1", "big-id"),
         }),
     )
-    monkeypatch.setattr(
-        "harness.tasks.auth.ProvisionApiKeyTask.run", _fake_provision
-    )
 
 
-async def test_reports_reachability_and_limit_enforcement_per_model(_patched) -> None:
-    # small: probed (limit 50 ≤ cap) — 2 OK at 30 tokens, then 429 forever.
-    small = [_ok(), _ok()] + [_status_error(429)] * 38
-    # blocked: probe-eligible too (same small limit), every request denied.
-    blocked = [_status_error(403)] * 40
-    # big: limit too high to probe — just the short reachability burst.
-    big = [_ok(), _ok(), _ok()]
-
-    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
-        client = MagicMock()
-        client.chat.completions.create = AsyncMock(side_effect=small + blocked + big)
-        mock_cls.return_value = client
-        ctx = _ctx()
-        await VerifySubscriptionModelsTask(
-            "verify_subscription_models", {"subscription": "team-a", "requests_per_model": 3}
-        ).run(ctx)
-
-    check = ctx.shared_state["subscription_check"]
-    assert check == {"model_count": 3, "reachable_count": 2, "probed_count": 1, "enforced_count": 1}
-
-    rows = ctx.shared_state["_tables"]["Subscription models"]["rows"]
-    assert rows[0][0] == "llm/small"
-    assert rows[0][3] == "✓ throttled at 60 tokens"
-    assert rows[1][2].startswith("✗ 40× 401/403")
-    assert rows[1][3] == "not probed — unreachable"
-    assert rows[2][3].startswith("not probed — limit above probe cap")
-
-    # Every burst went out with the one pinned key and SDK retries off, so
-    # every 429 counts exactly once.
-    for call in mock_cls.call_args_list:
-        assert call.kwargs["api_key"] == "sk-oai-test"
-        assert call.kwargs["max_retries"] == 0
-    assert ctx.shared_state["_traffic"]["subscription_model_1"]["label"] == "llm/small"
-    assert "2/3 models reachable" in ctx.shared_state["task_summary"]
+async def test_read_subscription_limits_reads_the_configured_limit() -> None:
+    ctx = _ctx()
+    await ReadSubscriptionLimitsTask(
+        "read_subscription_limits", {"subscription": "team-a", "model_name": "small", "model_namespace": "llm"}
+    ).run(ctx)
+    assert ctx.shared_state["subscription_limits"] == {"token_limit": 50, "window": "1m", "window_s": 60.0}
+    assert ctx.shared_state["task_summary"] == "team-a allows 50 tokens per 1m on llm/small"
 
 
-async def test_key_creation_failure_explains_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("harness.tasks.subscription_check._find_subscription", lambda name: _SUB)
-
-    async def _denied(self, ctx: TaskContext) -> None:
-        request = httpx.Request("POST", "http://maas.test/maas-api/v1/api-keys")
-        response = httpx.Response(403, request=request, text="not an owner")
-        raise httpx.HTTPStatusError("denied", request=request, response=response)
-
-    monkeypatch.setattr("harness.tasks.auth.ProvisionApiKeyTask.run", _denied)
-    with pytest.raises(RuntimeError, match="is this harness's identity one of its owners"):
-        await VerifySubscriptionModelsTask(
-            "verify_subscription_models", {"subscription": "team-a"}
+@pytest.mark.parametrize(
+    ("model", "message"),
+    [("other", "doesn't cover llm/other"), ("blocked", "has no token rate limit")],
+)
+async def test_read_subscription_limits_explains_what_is_missing(model: str, message: str) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        await ReadSubscriptionLimitsTask(
+            "read_subscription_limits", {"subscription": "team-a", "model_name": model, "model_namespace": "llm"}
         ).run(_ctx())
 
 
-async def test_requires_a_subscription() -> None:
-    with pytest.raises(RuntimeError, match="Pick a subscription"):
-        await VerifySubscriptionModelsTask("verify_subscription_models", {}).run(_ctx())
+async def test_discover_lists_the_subscription_models_with_their_limits() -> None:
+    ctx = _ctx()
+    await DiscoverSubscriptionModelsTask("discover_subscription_models", {"subscription": "team-a"}).run(ctx)
+    models = ctx.shared_state["subscription_models"]
+    assert [m["ref"] for m in models] == ["llm/small", "llm/blocked", "llm/unlisted"]
+    # Not in /v1/models: its own per-model route, never discovery's fallback.
+    assert models[2]["url"] == "http://maas.test/llm/unlisted/v1"
+    rows = ctx.shared_state["_tables"]["Subscription models"]["rows"]
+    assert rows[0][:3] == ["llm/small", "50 tokens / 1m", "✓"]
+    assert rows[1][1] == "no limit configured"
+    assert rows[2][2] == "✗"
+
+
+async def test_send_to_each_model_fills_in_reachability() -> None:
+    ctx = _ctx({"api_keys": [{"id": "k1", "key": "sk-oai-test"}]})
+    await DiscoverSubscriptionModelsTask("discover_subscription_models", {"subscription": "team-a"}).run(ctx)
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            side_effect=[_ok(), _ok(), _ok()] + [_status_error(403)] * 3 + [_ok(), _status_error(503), _ok()]
+        )
+        mock_cls.return_value = client
+        await SendRequestsToEachModelTask("send_requests_to_each_model", {"requests_per_model": 3}).run(ctx)
+
+    assert ctx.shared_state["subscription_check"]["reachable_count"] == 2
+    rows = ctx.shared_state["_tables"]["Subscription models"]["rows"]
+    assert rows[0][3] == "✓ 3/3 OK"
+    assert rows[1][3] == "✗ 3× denied (401/403)"
+    assert rows[2][3] == "✓ 2/3 OK"
+    for call in mock_cls.call_args_list:
+        assert call.kwargs["api_key"] == "sk-oai-test"
+    assert "2 of 3 model(s) answered" in ctx.shared_state["task_summary"]
+
+
+async def test_send_to_each_model_needs_a_key() -> None:
+    with pytest.raises(RuntimeError, match="No API key"):
+        await SendRequestsToEachModelTask("send_requests_to_each_model", {}).run(_ctx())

@@ -327,3 +327,25 @@ def test_simple_form_has_target_and_no_label() -> None:
     r = evaluate_assertion("error_rate_pct", "< 5", {"inference_results": {"error_rate_pct": 1.0}})
     assert r.target == "< 5"
     assert r.label is None
+
+
+def test_bounds_can_reference_live_harness_values() -> None:
+    """The limit under test may only be known at run time (read off the
+    subscription), so bounds accept ${harness.ns.key} as well as numbers."""
+    spec = {
+        "promql": "x",
+        "between": ["${harness.subscription_limits.token_limit}", "${harness.subscription_limits.token_limit} + 100"],
+    }
+    pending = evaluate_assertion("x", spec, {"metrics": {"x": 120.0}})
+    assert pending.status == "PENDING"  # limit not read yet
+
+    state = {"metrics": {"x": 120.0}, "subscription_limits": {"token_limit": 100}}
+    r = evaluate_assertion("x", spec, state)
+    assert r.status == "PASSING"
+    assert r.target == "100 – 200"
+
+
+def test_expect_can_reference_live_harness_values() -> None:
+    state = {"metrics": {"x": 3.0}, "users": {"count": 2}}
+    r = evaluate_assertion("x", {"promql": "x", "expect": "> ${harness.users.count}"}, state)
+    assert r.status == "PASSING"

@@ -30,13 +30,27 @@ inputs:
   token_limit:
     advanced: true
     help: "Deliberately generous — rate limiting must not be why requests fail here."
-  new_subscription_name: {advanced: true}
-  subscription_namespace: {advanced: true}
-  model_name_prefix: {advanced: true}
-  model_ready_timeout: {advanced: true}
-  concurrency: {advanced: true}
-  key_count: {advanced: true}
-  prompt: {advanced: true}
+  new_subscription_name:
+    advanced: true
+    help: "Name of the temporary MaaSSubscription (quota, but no access) this run creates and deletes afterwards."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions (and auth policies) live in on this cluster — the MaaS tenant namespace."
+  model_name_prefix:
+    advanced: true
+    help: "Name prefix for the throwaway model this run deploys and deletes afterwards."
+  model_ready_timeout:
+    advanced: true
+    help: "How long to wait for the throwaway model to start, in seconds."
+  concurrency:
+    advanced: true
+    help: "How many requests are in flight at the same time."
+  key_count:
+    advanced: true
+    help: "How many throwaway users (each with one API key) to test with."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
 config:
   new_subscription_name: "maaspal-fail-closed-test"
   subscription_namespace: "models-as-a-service"

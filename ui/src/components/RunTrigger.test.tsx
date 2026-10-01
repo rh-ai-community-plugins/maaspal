@@ -387,3 +387,23 @@ test('show_if hides fields that do not apply to the selected mode', async () => 
   fireEvent.change(screen.getByLabelText('Subscription to test'), { target: { value: 'temporary' } });
   expect(screen.queryByLabelText('Subscription')).not.toBeInTheDocument();
 });
+
+test('help text lives in an info popover, and the description under "More details"', async () => {
+  mockFetch({ available: true, reason: null, items: [modelAWithRoute] }, { available: true, reason: null, items: [subWithLimit] });
+  const scenario: Scenario = {
+    ...rateLimitV2,
+    inputs: { ...rateLimitV2.inputs, token_limit: { label: 'Token limit', help: 'How many tokens per window.' } },
+  };
+
+  await act(async () => {
+    render(<RunTrigger scenario={scenario} onConfirm={jest.fn()} onCancel={jest.fn()} />);
+  });
+
+  expect(screen.queryByText('How it works')).not.toBeInTheDocument();
+  expect(screen.queryByText('How many tokens per window.')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'More info about Token limit' }));
+  expect(await screen.findByText('How many tokens per window.')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'More details' }));
+  expect(screen.getByText('How it works text')).toBeInTheDocument();
+});

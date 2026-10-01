@@ -20,7 +20,13 @@ import aiosqlite
 
 from api import maas_client
 from api.db import get_db_path
-from harness.cleanup_state import read_cleanup_state, write_cleanup_status
+from harness.cleanup_state import (
+    mark_task_cleanup,
+    read_cleanup_state,
+    rewrite_progress_resources,
+    write_cleanup_state,
+    write_cleanup_status,
+)
 from harness.tasks.base import TaskContext
 from harness.tasks.registry import REGISTRY
 
@@ -73,9 +79,15 @@ async def run_manual_cleanup(run_id: str) -> None:
             print(f"[api] manual cleanup: {name}", flush=True)
             try:
                 await task_class(name=name, params={}).cleanup(ctx)
+                mark_task_cleanup(shared_state, name, ok=True)
             except Exception:
                 any_failed = True
+                mark_task_cleanup(shared_state, name, ok=False)
                 print(f"[api] manual cleanup FAILED: {name}\n{traceback.format_exc()}", flush=True)
+
+        # The run page's per-resource list reflects this cleanup too.
+        write_cleanup_state(_RESULTS_DIR, run_id, shared_state)
+        rewrite_progress_resources(_RESULTS_DIR, run_id, shared_state)
 
         status = "failed" if any_failed else "done"
     except Exception as exc:

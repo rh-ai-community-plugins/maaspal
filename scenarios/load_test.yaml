@@ -19,15 +19,23 @@ plan_template: >-
 inputs:
   target_model_name: {label: "Model"}
   request_count: {label: "Requests"}
-  concurrency: {label: "Concurrent requests"}
+  concurrency:
+    label: "Concurrent requests"
+    help: "How many requests are in flight at the same time — the main load knob."
   key_count:
     label: "API keys"
     help: "Requests are spread evenly across the keys."
   max_error_rate_pct:
+    help: "Highest acceptable share of failed requests, not counting 429s (throttling by your subscription is reported separately, not as an error)."
     label: "Max error rate (%, excluding throttling)"
   max_p99_latency_ms:
+    help: "Highest acceptable p99 latency: 99% of requests must finish faster than this."
     label: "Max p99 latency (ms)"
-  prompt: {advanced: true}
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+  subscription:
+    help: "Leave on auto-select to let MaaS pick, as it would for a real user (highest-priority subscription you're eligible for)."
 config:
   request_count: 100
   concurrency: 5

@@ -54,7 +54,9 @@ async def test_scenarios_returns_all_fourteen_with_metadata(client) -> None:
     assert set(rate_limit["previous_names"]) == {
         "rate_limit_validation", "rate_limit_validation_existing_subscription",
     }
-    assert rate_limit["inputs"]["token_limit"]["from_subscription"] == "limit"
+    # The limit itself is read off the subscription at run time, not typed in.
+    assert "token_limit" not in rate_limit["config"]
+    assert rate_limit["inputs"]["limitador_namespace"]["from_model"] == "http_route"
 
 
 async def test_scenario_metadata_defaults_for_a_bare_custom_scenario(client, tmp_path, monkeypatch) -> None:

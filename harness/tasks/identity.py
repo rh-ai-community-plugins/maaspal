@@ -9,7 +9,7 @@ from harness.result import TaskResult
 # Module import, not names: auth imports the registry, which imports this
 # module back — see harness/tasks/subscription_check.py.
 from harness.tasks import auth as _auth
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 # Matches harness/tasks/model.py's own _DEFAULT_NAMESPACE convention — the
@@ -83,6 +83,7 @@ class CreateUserTask(Task):
                     "token": token,
                 }
             )
+            record_created(ctx, self.name, "ServiceAccount", f"{namespace}/{sa_name}")
 
             ctx.shared_state["task_progress"] = {"current": i + 1, "total": count}
             ctx.shared_state["task_summary"] = (
@@ -192,6 +193,10 @@ class ProvisionKeysForUsersTask(Task):
                         "expiresAt": data.get("expiresAt"),
                         "owner_username": user["username"],
                     }
+                )
+                record_created(
+                    ctx, self.name, "API key", str(data.get("name") or data["id"]),
+                    key_id=data["id"], subscription=data.get("subscription"), owner=user["username"],
                 )
 
                 checks["total_keys"] += 1

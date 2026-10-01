@@ -87,3 +87,49 @@ def read_cleanup_status(results_dir: Path, run_id: str) -> dict:
         return json.loads(_path(results_dir, run_id, "cleanup-status.json").read_text())
     except (OSError, ValueError):
         return {"status": "pending", "updated_at": None, "error": None}
+
+
+# ---------- Per-resource cleanup tracking (ADR-025) ----------
+#
+# Tasks record what they create via harness/tasks/base.py:record_created(),
+# into shared_state["_created"]. Each record carries the owning task's name,
+# so whoever runs cleanup (the harness at run end, or the API server's manual
+# "Clean Up Now" later) can mark exactly that task's resources with the
+# outcome of that task's own cleanup(). Shared here so both paths agree.
+
+# status values: "active" (exists, cleanup not run yet) | "removed" |
+# "restored" (a pre-existing object we patched, put back) | "revoked" (API key
+# revoked mid-run) | "cleanup failed" | "left in place" (auto cleanup off)
+
+
+def resources_from_state(shared_state: dict) -> list[dict]:
+    """The run page's "created" list — names only, never key values/tokens."""
+    return [dict(r) for r in shared_state.get("_created") or []]
+
+
+def mark_task_cleanup(shared_state: dict, task_name: str, ok: bool) -> None:
+    for rec in shared_state.get("_created") or []:
+        if rec.get("task") != task_name or rec.get("status") not in ("active", "cleanup failed", "left in place"):
+            continue
+        if not ok:
+            rec["status"] = "cleanup failed"
+        else:
+            rec["status"] = "restored" if rec.get("action") == "patched" else "removed"
+
+
+def mark_left_in_place(shared_state: dict) -> None:
+    for rec in shared_state.get("_created") or []:
+        if rec.get("status") == "active":
+            rec["status"] = "left in place"
+
+
+def rewrite_progress_resources(results_dir: Path, run_id: str, shared_state: dict) -> None:
+    """Refresh the resources list in an already-written -progress.json — used
+    by the API's manual cleanup, after the harness process has exited."""
+    path = _path(results_dir, run_id, "progress.json")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["resources"] = resources_from_state(shared_state)
+        path.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        print(f"[cleanup_state] could not refresh progress resources: {exc}", flush=True)

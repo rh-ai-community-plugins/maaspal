@@ -24,8 +24,12 @@ inputs:
     label: "Model"
     placeholder: "All models"
     help: "Leave blank to check every internally hosted model."
-  gateway_name: {advanced: true}
-  gateway_namespace: {advanced: true}
+  gateway_name:
+    advanced: true
+    help: "The Gateway MaaS routes model traffic through. maas-default-gateway on a standard install."
+  gateway_namespace:
+    advanced: true
+    help: "Namespace of that Gateway — openshift-ingress on a standard install."
 config:
   target_model_name: ""       # blank = check every internally hosted model
   target_model_namespace: ""

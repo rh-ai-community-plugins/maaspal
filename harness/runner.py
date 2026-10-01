@@ -107,6 +107,9 @@ def _redact_sensitive_config(value):
     return value
 
 from harness.cleanup_state import (
+    mark_left_in_place,
+    mark_task_cleanup,
+    resources_from_state,
     read_auto_cleanup_flag,
     write_cleanup_state,
     write_cleanup_status,
@@ -305,56 +308,10 @@ def _traffic_snapshot(shared_state: dict, default_limit: object = None) -> list[
                 "planned": info.get("planned"),
                 "summary": shared_state.get(result_key) or {},
                 "timeline": _downsample_timeline(info.get("timeline") or []),
+                "chart": bool(info.get("chart")),
             }
         )
     return out
-
-
-def _resources_snapshot(shared_state: dict) -> list[dict]:
-    """What this run created or modified on the cluster, by name, for the run
-    page's "This run created" panel. Built only from bookkeeping tasks
-    already keep for their own cleanup — never includes key values or
-    ServiceAccount tokens, only names/ids."""
-    resources: list[dict] = []
-
-    def _add(kind: str, name: str, **extra) -> None:
-        resources.append({"kind": kind, "name": name, **{k: v for k, v in extra.items() if v}})
-
-    for m in shared_state.get("deployed_models") or []:
-        _add("Model", f"{m.get('namespace')}/{m.get('name')}")
-    for u in shared_state.get("users") or []:
-        _add("ServiceAccount", f"{u.get('namespace')}/{u.get('name')}")
-
-    if shared_state.get("new_subscription_name"):
-        _add(
-            "MaaSSubscription",
-            f"{shared_state.get('subscription_namespace')}/{shared_state['new_subscription_name']}",
-            action="created" if shared_state.get("_sub_created") else "patched",
-        )
-    for key in ("priority_test_subscriptions", "distributed_subscriptions"):
-        for rec in shared_state.get(key) or []:
-            _add(
-                "MaaSSubscription",
-                f"{rec.get('namespace')}/{rec.get('name')}",
-                action="created" if rec.get("created") else "patched",
-            )
-    if shared_state.get("auth_policy_name"):
-        _add(
-            "MaaSAuthPolicy",
-            f"{shared_state.get('auth_policy_namespace')}/{shared_state['auth_policy_name']}",
-            action="created" if shared_state.get("_policy_created") else "patched",
-        )
-
-    revoked = bool(shared_state.get("revoked_count"))
-    for k in shared_state.get("api_keys") or []:
-        _add(
-            "API key",
-            str(k.get("name") or k.get("id")),
-            subscription=k.get("subscription"),
-            owner=k.get("owner_username"),
-            action="revoked mid-run" if revoked else "created",
-        )
-    return resources
 
 
 def _tables_snapshot(shared_state: dict) -> list[dict]:
@@ -382,6 +339,11 @@ def _render_verdict(
     template = (verdict or {}).get("pass" if status == "PASS" else "fail")
     if status == "CANCELLED":
         text = "Run was stopped before it finished — results below are partial."
+    elif shared_state.get("_verdict_text"):
+        # A task's own conclusion beats a static template — e.g. a rate-limit
+        # burst that found the limit too large to use up ("Inconclusive: …"),
+        # or a classification task's finding.
+        text = str(shared_state["_verdict_text"])
     elif template:
         def _sub(m: re.Match) -> str:
             ns = shared_state.get(m.group(1), {})
@@ -580,8 +542,10 @@ class ScenarioRunner:
                     "tasks": task_list,
                     "run_started_at": run_started_at,
                     "traffic": _traffic_snapshot(shared_state, chart_token_limit),
-                    "resources": _resources_snapshot(shared_state),
+                    "resources": resources_from_state(shared_state),
+                    "findings": list(shared_state.get("_findings") or []),
                     "tables": _tables_snapshot(shared_state),
+                    "metrics_charts": _metrics_charts_snapshot(),
                 }
                 if verdict_payload:
                     payload["verdict"] = verdict_payload
@@ -610,6 +574,39 @@ class ScenarioRunner:
         sa_token = _read_sa_token(config)
         metrics_url: str = config.get("MAAS_METRICS_URL", "")
         metrics_queries: dict[str, str] = scenario.get("metrics_queries") or {}
+        # `metrics_charts:` pairs a MaaS-reported value (a shared_state
+        # "metrics" key, e.g. total_tokens_delta) with the harness's own count
+        # of the same thing (e.g. inference_results.total_tokens_sent). Both are
+        # sampled on every metrics poll — including while settling after the
+        # traffic stops — so the run page can show MaaS's counter catching up
+        # with what was really sent (Prometheus scrape lag), not just whether
+        # the two matched in the end.
+        metrics_charts: list[dict] = scenario.get("metrics_charts") or []
+        metrics_chart_points: list[list[list]] = [[] for _ in metrics_charts]
+
+        def _record_metrics_chart_points() -> None:
+            t = round(time.monotonic() - run_start, 1)
+            metrics = shared_state.get("metrics") or {}
+            for chart_spec, points in zip(metrics_charts, metrics_chart_points, strict=True):
+                ns, _, key = str(chart_spec.get("harness", "")).partition(".")
+                harness_value = (shared_state.get(ns) or {}).get(key, 0)
+                maas_value = metrics.get(chart_spec.get("maas"))
+                if maas_value is None:
+                    continue
+                points.append([t, float(maas_value), float(harness_value)])
+
+        def _metrics_charts_snapshot() -> list[dict]:
+            return [
+                {
+                    "title": c.get("title", ""),
+                    "unit": c.get("unit", ""),
+                    "maas_label": c.get("maas_label", "Reported by MaaS"),
+                    "harness_label": c.get("harness_label", "Sent by this run"),
+                    "points": _downsample_timeline(points),
+                }
+                for c, points in zip(metrics_charts, metrics_chart_points, strict=True)
+                if points
+            ]
         # Promql-form assertions (see harness/result.py:_evaluate_promql_assertion)
         # each fire their own ad hoc query, in addition to the named metrics_queries
         # above. promql_after_baseline holds each template with ${baseline.x} already
@@ -650,6 +647,7 @@ class ScenarioRunner:
                 if key in baseline
             }
             shared_state["metrics"] = {**raw, **deltas}
+            _record_metrics_chart_points()
 
         async def _settle_and_evaluate(
             assertions_to_check: dict[str, str | dict], max_wait_s: float
@@ -778,16 +776,24 @@ class ScenarioRunner:
                 print(f"[runner] cleanup: {task.name}", flush=True)
                 try:
                     await task.cleanup(ctx)
+                    mark_task_cleanup(shared_state, task.name, ok=True)
                 except Exception:
                     cleanup_failed = True
+                    mark_task_cleanup(shared_state, task.name, ok=False)
                     print(
                         f"[runner] cleanup FAILED: {task.name}\n{traceback.format_exc()}",
                         flush=True,
                     )
+                # Show each resource's removal as it happens.
+                _write_progress(len(task_results), task_results)
             write_cleanup_status(_RESULTS_DIR, self.run_id, "failed" if cleanup_failed else "done")
         else:
             print("[runner] auto-cleanup disabled — skipping task cleanup", flush=True)
+            mark_left_in_place(shared_state)
             write_cleanup_status(_RESULTS_DIR, self.run_id, "skipped")
+        # Persist the per-resource statuses too, so a later manual "Clean Up
+        # Now" (api/cleanup.py) starts from them.
+        write_cleanup_state(_RESULTS_DIR, self.run_id, shared_state)
 
         # Stop the background metrics poller, then let the scenario's top-level
         # assertions settle the same way per-task ones do (_settle_and_evaluate).

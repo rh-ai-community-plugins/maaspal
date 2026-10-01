@@ -828,3 +828,64 @@ async def test_key_pool_requests_interleave_round_robin() -> None:
         await task.run(ctx)
 
     assert sent_with == ["sk-a", "sk-b", "sk-a", "sk-b", "sk-a"]
+
+
+async def test_until_throttled_keeps_sending_until_limit_then_stops() -> None:
+    outcomes = [_usage_response(30)] * 4 + [_api_status_error(429)] * 3 + [_usage_response(30)] * 50
+    state = await _run_sequence(outcomes, until_throttled="true", max_requests="57")
+    ir = state["inference_results"]
+    assert ir["total_requests"] == 7  # 4 OK, then 3 throttled ends the burst
+    assert ir["tokens_before_first_429"] == 120
+    assert state["_traffic"]["inference_results"]["planned"] is None
+    assert "sent until throttled" in state["task_summary"]
+
+
+async def test_until_throttled_progress_tracks_tokens_toward_the_limit() -> None:
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = AsyncMock(side_effect=[_usage_response(30), _usage_response(30), _api_status_error(429)] * 3)
+        mock_cls.return_value = m
+        ctx = _make_ctx({"subscription_limits": {"token_limit": 50}})
+        task = SendRequestsTask(
+            "send_requests",
+            {"url": "http://m.test", "token": "sk-t", "concurrency": "1", "until_throttled": True,
+             "max_requests": "9", "limit_from_shared_state": "subscription_limits.token_limit"},
+        )
+        await task.run(ctx)
+    # Frozen at the moment the burst ended — capped at the limit.
+    assert ctx.shared_state["task_progress"] == {"current": 50, "total": 50, "unit": "tokens"}
+
+
+async def test_until_throttled_gives_up_honestly_on_a_limit_too_large_to_use_up() -> None:
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = AsyncMock(side_effect=lambda **_: _usage_response(20))
+        mock_cls.return_value = m
+        ctx = _make_ctx({"subscription_limits": {"token_limit": 100000}})
+        task = SendRequestsTask(
+            "send_requests",
+            {"url": "http://m.test", "token": "sk-t", "concurrency": "1", "until_throttled": "true",
+             "max_requests": "500", "limit_from_shared_state": "subscription_limits.token_limit"},
+        )
+        await task.run(ctx)
+    ir = ctx.shared_state["inference_results"]
+    assert ir["total_requests"] == 3  # stopped right after the estimate
+    assert ir["limit_unreachable"] == 1
+    assert ctx.shared_state["_verdict_text"].startswith("Inconclusive")
+    assert "~5,000 requests" in ctx.shared_state["task_summary"]
+
+
+async def test_chart_flag_and_insecure_tls_reach_the_client() -> None:
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls, \
+         patch("harness.tasks.inference.DefaultAsyncHttpxClient") as http_cls:
+        mock_cls.return_value = _mock_client()
+        ctx = _make_ctx({"deployed_models": [{"name": "sim-1", "namespace": "llm",
+                                              "internal_url": "https://sim-1.llm.svc.cluster.local:8000"}]})
+        await SendRequestsTask(
+            "send_requests",
+            {"count": "1", "url_from_shared_state": "deployed_models", "insecure_tls": "true", "chart": "true", "token": "x"},
+        ).run(ctx)
+    assert http_cls.call_args.kwargs["verify"] is False
+    _assert_client_built_with(mock_cls, api_key="x", base_url="https://sim-1.llm.svc.cluster.local:8000/v1")
+    assert mock_cls.return_value.chat.completions.create.call_args.kwargs["model"] == "sim-1"
+    assert ctx.shared_state["_traffic"]["inference_results"]["chart"] is True

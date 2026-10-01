@@ -15,6 +15,15 @@ _DEBOUNCE_SECS = 0.1
 # retry can land in a fresh window and quietly succeed) sets `retries: 0`.
 _DEFAULT_RETRIES = 2
 
+# `until_throttled` bursts: hard ceiling on requests, and how many throttled
+# requests in a row end the burst. Internal, not user settings — the user's
+# question is "where does throttling start", not "how many requests to send".
+_UNTIL_THROTTLED_MAX_REQUESTS = 500
+_UNTIL_THROTTLED_STOP_AFTER_429S = 3
+# Successful requests to average before estimating whether a limit can be
+# used up within the request ceiling at all.
+_ESTIMATE_AFTER_SUCCESSES = 3
+
 # Per-request timeline entries kept in memory per send_requests invocation —
 # the runner downsamples further before writing it out for the UI chart.
 _TIMELINE_CAP = 5000
@@ -33,9 +42,10 @@ def _status_class(status_code: int | None) -> str:
     return "error"
 
 
-def _summary_line(r: dict, planned: int) -> str:
+def _summary_line(r: dict, planned: int | None) -> str:
     """One-line human narration of a send_requests burst, shown under its chip."""
-    parts = [f"{r['total_requests']}/{planned} requests", f"{r['success_count']} OK"]
+    sent = f"{r['total_requests']}/{planned}" if planned else str(r["total_requests"])
+    parts = [f"{sent} requests", f"{r['success_count']} OK"]
     if r["rate_limited_count"]:
         parts.append(f"{r['rate_limited_count']} throttled (429)")
     if r["unauthorized_count"]:
@@ -93,6 +103,41 @@ class SendRequestsTask(Task):
         # to exhaust whatever limit it's pointed at) without hammering the
         # gateway for the rest of it once the answer is already in.
         stop_after_429s = int(self.params.get("stop_after_429s", 0))
+        # Rate-limit bursts: keep sending until MaaS throttles, rather than a
+        # user-chosen request count. `limit_from_shared_state` ("ns.key", e.g.
+        # "subscription_limits.token_limit") lets the burst give up early —
+        # honestly, as "inconclusive" — when the limit is clearly too large to
+        # use up within the request ceiling, instead of grinding through it.
+        until_throttled = str(self.params.get("until_throttled", "")).lower() in ("true", "1", "yes")
+        limit_tokens: float | None = None
+        if until_throttled:
+            count = int(self.params.get("max_requests", _UNTIL_THROTTLED_MAX_REQUESTS))
+            stop_after_429s = stop_after_429s or _UNTIL_THROTTLED_STOP_AFTER_429S
+            ref = self.params.get("limit_from_shared_state")
+            if ref:
+                ns, _, key = str(ref).partition(".")
+                value = (ctx.shared_state.get(ns) or {}).get(key)
+                limit_tokens = float(value) if value is not None else None
+        # Whether the run page should draw this burst's traffic chart — only
+        # where the shape over time answers the scenario's question.
+        chart = str(self.params.get("chart", "")).lower() in ("true", "1", "yes")
+        # Self-signed / cluster-CA endpoints (a model's in-cluster service).
+        insecure_tls = str(self.params.get("insecure_tls", "")).lower() in ("true", "1", "yes")
+
+        url_from_shared_state = self.params.get("url_from_shared_state")
+        if url_from_shared_state:
+            # A model deploy_simulated_model just created, called directly on
+            # its in-cluster address — bypassing the MaaS gateway entirely
+            # (scenarios/gateway_overhead.yaml).
+            models = ctx.shared_state.get(url_from_shared_state, [])
+            if not models or not models[0].get("internal_url"):
+                raise RuntimeError(
+                    f"url_from_shared_state={url_from_shared_state!r}: no deployed model with an "
+                    "in-cluster address — run deploy_simulated_model first"
+                )
+            internal = str(models[0]["internal_url"]).rstrip("/")
+            self.params["url"] = internal if internal.endswith("/v1") else f"{internal}/v1"
+            self.params["model"] = models[0]["name"]
 
         # Every HTTP response the SDK receives, retries included — the SDK
         # otherwise hides its own automatic 429/5xx retries entirely, so a
@@ -110,7 +155,10 @@ class SendRequestsTask(Task):
                 api_key=api_key,
                 base_url=base_url,
                 max_retries=retries,
-                http_client=DefaultAsyncHttpxClient(event_hooks={"response": [_count_attempt]}),
+                http_client=DefaultAsyncHttpxClient(
+                    event_hooks={"response": [_count_attempt]},
+                    verify=not insecure_tls,
+                ),
             )
 
         key_index = self.params.get("key_index")
@@ -244,9 +292,19 @@ class SendRequestsTask(Task):
         # completed request — the run page's traffic chart.
         timeline: list[list] = []
         skipped = 0
+        # Set when a limit is clearly too large to use up within the request
+        # ceiling — the rest of the burst is skipped.
+        unreachable_note: str | None = None
+        traffic_entry: dict = {"chart": chart}
+        if limit_tokens is not None:
+            # The limit read off the subscription under test — the chart's
+            # reference line (otherwise the scenario's own token_limit config).
+            traffic_entry["limit"] = limit_tokens
         ctx.shared_state.setdefault("_traffic", {})[result_key] = {
+            **traffic_entry,
             "task": self.name,
-            "planned": count,
+            # The safety ceiling isn't a plan the user should see.
+            "planned": None if until_throttled else count,
             "timeline": timeline,
         }
         run_start = time.monotonic()
@@ -259,11 +317,31 @@ class SendRequestsTask(Task):
             nonlocal server_error_count, other_error_count
             nonlocal total_tokens_sent, prompt_tokens_sent, completion_tokens_sent
             nonlocal first_rate_limited_at_tokens, requests_before_first_429
-            nonlocal seconds_to_first_429, successes_after_first_429, skipped
+            nonlocal seconds_to_first_429, successes_after_first_429, skipped, unreachable_note
             async with sem:
-                if stop_after_429s and rate_limited_count >= stop_after_429s:
+                if (stop_after_429s and rate_limited_count >= stop_after_429s) or unreachable_note:
                     skipped += 1
                     return
+                if (
+                    limit_tokens
+                    and first_rate_limited_at_tokens is None
+                    and success >= _ESTIMATE_AFTER_SUCCESSES
+                    and total_tokens_sent > 0
+                ):
+                    per_request = total_tokens_sent / success
+                    needed = limit_tokens / per_request
+                    if needed > count:
+                        unreachable_note = (
+                            f"limit of {limit_tokens:g} tokens needs ~{needed:,.0f} requests at "
+                            f"~{per_request:.0f} tokens each — more than this run sends ({count})"
+                        )
+                        ctx.shared_state["_verdict_text"] = (
+                            f"Inconclusive: this subscription's limit is too large to use up by "
+                            f"traffic — {unreachable_note}. Try a subscription with a smaller "
+                            f"limit, or create one just for testing."
+                        )
+                        skipped += 1
+                        return
                 t0 = time.monotonic()
                 status_class = "ok"
                 effective_model = (key_models[client_idx] if key_models else None) or model
@@ -352,8 +430,18 @@ class SendRequestsTask(Task):
                     result_data["requests_before_first_429"] = requests_before_first_429
                     result_data["seconds_to_first_429"] = round(seconds_to_first_429 or 0.0, 3)
                 ctx.shared_state[result_key] = result_data
-                ctx.shared_state["task_progress"] = {"current": total, "total": count}
-                ctx.shared_state["task_summary"] = _summary_line(result_data, count)
+                if until_throttled and limit_tokens:
+                    # Progress toward the limit is what this burst is about.
+                    ctx.shared_state["task_progress"] = {
+                        "current": min(total_tokens_sent, int(limit_tokens)),
+                        "total": int(limit_tokens),
+                        "unit": "tokens",
+                    }
+                elif until_throttled:
+                    ctx.shared_state["task_progress"] = {"current": total, "total": None, "unit": "requests"}
+                else:
+                    ctx.shared_state["task_progress"] = {"current": total, "total": count}
+                ctx.shared_state["task_summary"] = _summary_line(result_data, None if until_throttled else count)
                 now = time.monotonic()
                 if now - last_emit >= _DEBOUNCE_SECS:
                     last_emit = now
@@ -376,6 +464,17 @@ class SendRequestsTask(Task):
         await asyncio.gather(*request_tasks)
         if count <= 0:
             ctx.shared_state["task_summary"] = "No requests configured (count: 0) — skipped"
+        elif unreachable_note:
+            ctx.shared_state[result_key]["limit_unreachable"] = 1
+            ctx.shared_state["task_summary"] = (
+                _summary_line(ctx.shared_state[result_key], ctx.shared_state[result_key]["total_requests"])
+                + f" · stopped: {unreachable_note}"
+            )
+        elif skipped and until_throttled:
+            ctx.shared_state["task_summary"] = (
+                _summary_line(ctx.shared_state[result_key], ctx.shared_state[result_key]["total_requests"])
+                + f" · sent until throttled (stopped after {stop_after_429s} throttled requests)"
+            )
         elif skipped:
             ctx.shared_state["task_summary"] = (
                 _summary_line(ctx.shared_state[result_key], count)
@@ -475,7 +574,16 @@ class SendRequestsTask(Task):
     def _resolve_key_pool_entries(self, ctx: TaskContext) -> list[dict]:
         if not self.params.get("key_pool"):
             return []
-        return list(ctx.shared_state.get("api_keys", []))
+        keys = list(ctx.shared_state.get("api_keys", []))
+        # `key_pool_filter`: "active" = keys not revoked mid-run, "revoked" =
+        # only those — e.g. revoke 1 of 3 keys, then check the other 2 still
+        # work and the revoked one is denied (scenarios/api_key_lifecycle.yaml).
+        pool_filter = self.params.get("key_pool_filter")
+        if pool_filter == "active":
+            keys = [k for k in keys if not k.get("revoked")]
+        elif pool_filter == "revoked":
+            keys = [k for k in keys if k.get("revoked")]
+        return keys
 
     async def _resolve_models_by_subscription(
         self, ctx: TaskContext, key_pool_entries: list[dict]
@@ -547,3 +655,5 @@ REGISTRY["send_requests_as_second_user"] = SendRequestsTask
 # sends the same burst via MaaS after sending it direct.
 REGISTRY["send_requests_after_window"] = SendRequestsTask
 REGISTRY["send_requests_via_maas"] = SendRequestsTask
+# scenarios/api_key_lifecycle.yaml: after revoking one key, the others must still work.
+REGISTRY["verify_other_keys_still_work"] = SendRequestsTask

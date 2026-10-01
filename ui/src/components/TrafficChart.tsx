@@ -21,8 +21,9 @@ const OUTCOMES: Record<Exclude<TrafficOutcome, 'ok'>, { label: string; color: st
 };
 const OK_LABEL = 'OK';
 
+// Wide and short: the chart supports the numbers above it, it doesn't lead.
 const W = 640;
-const H = 220;
+const H = 150;
 const M = { top: 24, right: 16, bottom: 30, left: 52 };
 
 function niceMax(v: number): number {
@@ -145,17 +146,17 @@ export function TrafficChart({ timeline, limit, title = 'Tokens served over time
           {ticks(yMax).map((v) => (
             <g key={`y${v}`}>
               <line x1={M.left} x2={W - M.right} y1={sy(v)} y2={sy(v)} stroke={GRID_COLOR} />
-              <text x={M.left - 6} y={sy(v)} dy="0.32em" textAnchor="end" fontSize={10} fill={AXIS_TEXT}>
+              <text x={M.left - 6} y={sy(v)} dy="0.32em" textAnchor="end" fontSize={11} fill={AXIS_TEXT}>
                 {fmt(v)}
               </text>
             </g>
           ))}
           {ticks(xMax).map((v) => (
-            <text key={`x${v}`} x={sx(v)} y={H - M.bottom + 16} textAnchor="middle" fontSize={10} fill={AXIS_TEXT}>
+            <text key={`x${v}`} x={sx(v)} y={H - M.bottom + 16} textAnchor="middle" fontSize={11} fill={AXIS_TEXT}>
               {fmt(v)}s
             </text>
           ))}
-          <text x={M.left - 6} y={10} textAnchor="end" fontSize={10} fill={AXIS_TEXT}>
+          <text x={M.left - 6} y={10} textAnchor="end" fontSize={11} fill={AXIS_TEXT}>
             tokens
           </text>
 
@@ -170,7 +171,8 @@ export function TrafficChart({ timeline, limit, title = 'Tokens served over time
                 strokeWidth={1.5}
                 strokeDasharray="4 3"
               />
-              <text x={W - M.right} y={sy(limit) - 4} textAnchor="end" fontSize={10} fill={LIMIT_COLOR}>
+              {/* Left end: throttled markers cluster at the right, after the limit is hit. */}
+              <text x={M.left + 4} y={sy(limit) - 4} textAnchor="start" fontSize={11} fill={LIMIT_COLOR}>
                 limit {fmt(limit)}
               </text>
             </g>

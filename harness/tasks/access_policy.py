@@ -4,7 +4,7 @@ import traceback
 from kubernetes import client as k8s_client
 
 from harness.result import TaskResult
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 _GROUP = "maas.opendatahub.io"
@@ -105,6 +105,10 @@ class ApplyAuthPolicyTask(Task):
 
         ctx.shared_state["auth_policy_name"] = policy_name
         ctx.shared_state["auth_policy_namespace"] = namespace
+        record_created(
+            ctx, self.name, "MaaSAuthPolicy", f"{namespace}/{policy_name}",
+            existed=not ctx.shared_state.get("_policy_created"),
+        )
         subjects = [*subject_groups, *subject_users]
         ctx.shared_state["task_summary"] = (
             f"{'Created' if ctx.shared_state.get('_policy_created') else 'Temporarily patched'} "

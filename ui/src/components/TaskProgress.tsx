@@ -52,20 +52,28 @@ export function TaskProgress({ tasks }: Props) {
 
   if (tasks.length === 0) return null;
 
-  const narrated = tasks.filter((t) => t.summary);
-
   return (
     <>
     <div className="maaspal-task-pipeline">
       {tasks.map((task, i) => {
         const color = STATUS_COLOR[task.status];
         const isRunning = task.status === 'RUNNING';
+        const total = task.progress?.total ?? null;
+        // A DONE task's bar is full only when its total was the plan (N of N
+        // requests) — a "tokens toward the limit" bar shows where it really
+        // ended up.
         const pct =
-          task.progress && task.progress.total > 0
-            ? task.status === 'DONE'
+          task.progress && total && total > 0
+            ? task.status === 'DONE' && !task.progress.unit
               ? 100
-              : Math.round((task.progress.current / task.progress.total) * 100)
+              : Math.min(100, Math.round((task.progress.current / total) * 100))
             : null;
+        const unit = task.progress?.unit ? ` ${task.progress.unit}` : '';
+        const progressLabel = task.progress
+          ? total
+            ? `${task.progress.current.toLocaleString()} / ${total.toLocaleString()}${unit}`
+            : `${task.progress.current.toLocaleString()}${unit || ' sent'}`
+          : null;
         const badgeColor = task.assertions_status
           ? ASSERTION_BADGE_COLOR[task.assertions_status]
           : null;
@@ -102,17 +110,17 @@ export function TaskProgress({ tasks }: Props) {
                   />
                 )}
               </div>
-              {pct !== null && (
+              {progressLabel && (
                 <div className="maaspal-task-chip__progress-wrap">
-                  <div className="maaspal-task-chip__progress-bar">
-                    <div
-                      className="maaspal-task-chip__progress-fill"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <span className="maaspal-task-chip__progress-label">
-                    {task.progress!.current} / {task.progress!.total}
-                  </span>
+                  {pct !== null && (
+                    <div className="maaspal-task-chip__progress-bar">
+                      <div
+                        className="maaspal-task-chip__progress-fill"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  )}
+                  <span className="maaspal-task-chip__progress-label">{progressLabel}</span>
                 </div>
               )}
             </div>
@@ -120,26 +128,6 @@ export function TaskProgress({ tasks }: Props) {
         );
       })}
     </div>
-    {narrated.length > 0 && (
-      <div className="maaspal-run-narrative" aria-label="What happened">
-        <p className="maaspal-section-heading" style={{ marginBottom: '0.35rem' }}>
-          What happened
-        </p>
-        <ol className="maaspal-run-narrative__list">
-          {tasks.map((task) =>
-            task.summary ? (
-              <li key={task.name} className={`maaspal-run-narrative__item maaspal-run-narrative__item--${task.status.toLowerCase()}`}>
-                <span className="maaspal-run-narrative__icon" style={{ color: STATUS_COLOR[task.status] }}>
-                  {task.status === 'RUNNING' ? '◎' : STATUS_ICON[task.status]}
-                </span>
-                <span className="maaspal-run-narrative__task">{formatTaskName(task.name)}</span>
-                <span className="maaspal-run-narrative__text">{task.summary}</span>
-              </li>
-            ) : null,
-          )}
-        </ol>
-      </div>
-    )}
     </>
   );
 }

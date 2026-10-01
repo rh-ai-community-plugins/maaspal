@@ -8,7 +8,7 @@ import pytest
 
 from harness.result import TaskResult
 from harness.runner import ScenarioRunner
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 
@@ -1206,6 +1206,7 @@ def test_progress_json_carries_narration_traffic_resources_and_verdict(
             ctx.shared_state["api_keys"] = [
                 {"id": "k1", "name": "maaspal-key-1", "key": "sk-oai-SECRET", "subscription": "free"}
             ]
+            record_created(ctx, self.name, "API key", "maaspal-key-1", key_id="k1", subscription="free")
             ctx.shared_state["inference_results"] = {"total_requests": 2, "tokens_before_first_429": 57}
             ctx.shared_state["_traffic"] = {
                 "inference_results": {
@@ -1249,7 +1250,10 @@ def test_progress_json_carries_narration_traffic_resources_and_verdict(
     assert traffic["summary"]["tokens_before_first_429"] == 57
     assert [p[2] for p in traffic["timeline"]] == ["ok", "throttled"]
     assert payload["resources"] == [
-        {"kind": "API key", "name": "maaspal-key-1", "subscription": "free", "action": "created"}
+        {
+            "kind": "API key", "name": "maaspal-key-1", "task": "_narrating", "action": "created",
+            "status": "removed", "key_id": "k1", "subscription": "free",
+        }
     ]
     assert payload["verdict"]["status"] == "PASS"
     assert payload["verdict"]["text"] == "Throttled after 57 tokens (limit 50)."
@@ -1273,3 +1277,170 @@ def test_downsample_timeline_keeps_status_transitions() -> None:
     assert len(thinned) <= _TIMELINE_MAX_POINTS + 10
     assert any(p[2] == "throttled" for p in thinned)
     assert thinned[0] == timeline[0] and thinned[-1] == timeline[-1]
+
+
+def test_each_resource_shows_its_own_cleanup_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removed, restored (a patched pre-existing object), and failed are
+    reported per resource, from the owning task's own cleanup result."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+
+    class _Creates(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            record_created(ctx, self.name, "MaaSSubscription", "ns/new-sub")
+            record_created(ctx, self.name, "MaaSSubscription", "ns/existing-sub", existed=True)
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    class _CleanupFails(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            record_created(ctx, self.name, "Model", "llm/sim-1")
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            raise RuntimeError("delete failed")
+
+    REGISTRY["_creates"] = _Creates
+    REGISTRY["_cleanup_fails"] = _CleanupFails
+    try:
+        path = _write(tmp_path, """
+            name: test_resources
+            config: {}
+            tasks:
+              - name: _creates
+              - name: _cleanup_fails
+        """)
+        asyncio.run(ScenarioRunner(path, "res-001").run())
+    finally:
+        REGISTRY.pop("_creates", None)
+        REGISTRY.pop("_cleanup_fails", None)
+
+    resources = json.loads((tmp_path / "res-001-progress.json").read_text())["resources"]
+    assert {r["name"]: r["status"] for r in resources} == {
+        "ns/new-sub": "removed",
+        "ns/existing-sub": "restored",
+        "llm/sim-1": "cleanup failed",
+    }
+
+
+def test_auto_cleanup_off_marks_resources_left_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harness import runner as runner_module
+    from harness.cleanup_state import write_auto_cleanup_flag
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+    write_auto_cleanup_flag(tmp_path, "res-002", False)
+
+    class _Creates(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            record_created(ctx, self.name, "API key", "k")
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_creates2"] = _Creates
+    try:
+        path = _write(tmp_path, """
+            name: test_resources
+            config: {}
+            tasks:
+              - name: _creates2
+        """)
+        asyncio.run(ScenarioRunner(path, "res-002").run())
+    finally:
+        REGISTRY.pop("_creates2", None)
+
+    resources = json.loads((tmp_path / "res-002-progress.json").read_text())["resources"]
+    assert resources[0]["status"] == "left in place"
+
+
+def test_task_verdict_text_overrides_the_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+
+    class _Concludes(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            ctx.shared_state["_verdict_text"] = "Inconclusive: limit too large."
+            ctx.shared_state["_findings"] = [{"title": "Finding", "text": "x"}]
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_concludes"] = _Concludes
+    try:
+        path = _write(tmp_path, """
+            name: test_verdict
+            config: {}
+            tasks:
+              - name: _concludes
+            verdict:
+              pass: "template text"
+        """)
+        asyncio.run(ScenarioRunner(path, "v-001").run())
+    finally:
+        REGISTRY.pop("_concludes", None)
+
+    payload = json.loads((tmp_path / "v-001-progress.json").read_text())
+    assert payload["verdict"]["text"] == "Inconclusive: limit too large."
+    assert payload["findings"] == [{"title": "Finding", "text": "x"}]
+
+
+def test_metrics_charts_sample_maas_and_harness_side_by_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each metrics poll records MaaS's value next to the harness's own count,
+    so the run page can show the MaaS counter catching up (scrape lag)."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+    readings = iter([10.0, 10.0, 30.0, 55.0, 55.0, 55.0, 55.0, 55.0])
+
+    async def fake_fetch_metrics(base_url: str, queries: dict, token: str) -> dict:
+        return {"total_requests": next(readings, 55.0)}
+
+    monkeypatch.setattr(runner_module, "fetch_metrics", fake_fetch_metrics)
+    monkeypatch.setattr(runner_module, "_METRICS_FINAL_MAX_WAIT_S", 0.05)
+    monkeypatch.setattr(runner_module, "_METRICS_FINAL_POLL_INTERVAL_S", 0.01)
+
+    class _Sends(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            ctx.shared_state["inference_results"] = {"total_requests": 45.0}
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_sends"] = _Sends
+    try:
+        path = _write(tmp_path, """
+            name: test_metrics_charts
+            config:
+              MAAS_METRICS_URL: "http://thanos.test/api/v1/query"
+            metrics_queries:
+              total_requests: "sum(foo)"
+            metrics_charts:
+              - title: Requests
+                maas: total_requests_delta
+                harness: inference_results.total_requests
+            tasks:
+              - name: _sends
+            assertions:
+              maas_requests_match:
+                compare: metrics.total_requests_delta
+                to: inference_results.total_requests
+                tolerance_pct: 0
+        """)
+        asyncio.run(ScenarioRunner(path, "mc-001").run())
+    finally:
+        REGISTRY.pop("_sends", None)
+
+    [chart] = json.loads((tmp_path / "mc-001-progress.json").read_text())["metrics_charts"]
+    assert chart["title"] == "Requests"
+    maas_values = [p[1] for p in chart["points"]]
+    assert maas_values[-1] == 45.0  # converged on what was sent
+    assert all(p[2] == 45.0 for p in chart["points"] if p[1] == 45.0)

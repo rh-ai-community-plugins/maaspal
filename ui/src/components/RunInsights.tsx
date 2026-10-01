@@ -1,5 +1,15 @@
-import type { RunResource, RunTable, RunVerdict, TrafficBurst, TrafficSummary } from '../api/client';
+import type {
+  MetricsChart,
+  RunFinding,
+  RunResource,
+  RunTable,
+  RunVerdict,
+  TaskProgressEntry,
+  TrafficBurst,
+  TrafficSummary,
+} from '../api/client';
 import { formatTaskName } from '../scenarioTitles';
+import { MetricsComparisonChart } from './MetricsComparisonChart';
 import { TrafficChart } from './TrafficChart';
 
 const VERDICT_STYLE: Record<RunVerdict['status'], { color: string; icon: string; label: string }> = {
@@ -61,6 +71,7 @@ function outcomeBreakdown(s: TrafficSummary): string {
  * assertions check, plus context (tokens split, latency spread, retries). */
 export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
   const s = burst.summary;
+  if (!burst.chart) return <TrafficLine burst={burst} />;
   const retries =
     s.http_attempts !== undefined && s.total_requests !== undefined && s.http_attempts > s.total_requests
       ? s.http_attempts - s.total_requests
@@ -115,35 +126,175 @@ export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
   );
 }
 
-/** "This run created": what the run put on (or changed in) the cluster, by
- * name, and whether cleanup has removed it yet. */
-export function ResourcesPanel({ resources, cleanupStatus }: { resources: RunResource[]; cleanupStatus?: string }) {
-  if (resources.length === 0) return null;
-  const cleanupNote =
-    cleanupStatus === 'done'
-      ? 'All cleaned up ✓'
-      : cleanupStatus === 'cleaning'
-        ? 'Cleaning up…'
-        : cleanupStatus === 'skipped'
-          ? 'Left in place — auto cleanup was off'
-          : cleanupStatus === 'failed'
-            ? 'Cleanup failed — some of these may remain'
-            : 'Removed automatically when the run finishes';
+/** One line for a burst whose shape over time doesn't answer the scenario's
+ * question (e.g. "3 requests · 3 denied") — the numbers, without a chart. */
+function TrafficLine({ burst }: { burst: TrafficBurst }) {
+  const s = burst.summary;
+  const heading = burst.label ? `${formatTaskName(burst.task)} — ${burst.label}` : formatTaskName(burst.task);
   return (
-    <section className="maaspal-panel" aria-label="Resources this run created">
-      <p className="maaspal-panel__title">This run created</p>
-      <ul className="maaspal-resource-list">
-        {resources.map((r, i) => (
-          <li key={`${r.kind}-${r.name}-${i}`}>
-            <span className="maaspal-resource-list__kind">{r.kind}</span>
-            <code>{r.name}</code>
-            {r.subscription && <span style={{ color: '#777' }}> · on {r.subscription}</span>}
-            {r.owner && <span style={{ color: '#777' }}> · as {r.owner}</span>}
-            {r.action && r.action !== 'created' && <span style={{ color: '#b26a00' }}> · {r.action}</span>}
+    <div className="maaspal-traffic-line" aria-label={`Traffic: ${heading}`}>
+      <span className="maaspal-traffic-line__name">{heading}</span>
+      <span>
+        {n(s.total_requests)} requests · {outcomeBreakdown(s)} · {n(s.total_tokens_sent)} tokens · p50{' '}
+        {n(s.p50_latency_ms)} ms
+      </span>
+    </div>
+  );
+}
+
+const RESOURCE_STATUS: Record<string, { label: string; color: string }> = {
+  active: { label: 'exists', color: '#6a6e73' },
+  removed: { label: 'removed ✓', color: '#2e7d32' },
+  restored: { label: 'restored ✓', color: '#2e7d32' },
+  revoked: { label: 'revoked ✓', color: '#2e7d32' },
+  'cleanup failed': { label: 'cleanup failed ✗', color: '#c62828' },
+  'left in place': { label: 'left in place', color: '#b26a00' },
+};
+
+function ResourceItem({ r }: { r: RunResource }) {
+  const st = RESOURCE_STATUS[r.status ?? 'active'] ?? RESOURCE_STATUS.active;
+  return (
+    <li className="maaspal-steps__resource">
+      <span className="maaspal-resource-list__kind">
+        {r.action === 'patched' ? `${r.kind} (changed)` : r.kind}
+      </span>
+      <code>{r.name}</code>
+      <span className="maaspal-steps__status" style={{ color: st.color }}>
+        {st.label}
+      </span>
+      {r.subscription && <span className="maaspal-steps__meta"> · on {r.subscription}</span>}
+      {r.owner && <span className="maaspal-steps__meta"> · as {r.owner}</span>}
+    </li>
+  );
+}
+
+const STEP_ICON: Record<TaskProgressEntry['status'], { icon: string; color: string }> = {
+  PENDING: { icon: '○', color: '#9e9e9e' },
+  RUNNING: { icon: '◎', color: '#1565c0' },
+  DONE: { icon: '✓', color: '#2e7d32' },
+  FAIL: { icon: '✗', color: '#c62828' },
+  CANCELLED: { icon: '⊘', color: '#b26a00' },
+};
+
+function cleanupSummary(resources: RunResource[], cleanupStatus?: string): { text: string; color: string } {
+  const count = (status: string) => resources.filter((r) => r.status === status).length;
+  const failed = count('cleanup failed');
+  const left = count('left in place');
+  const done = count('removed') + count('restored') + count('revoked');
+  if (failed) return { text: `${failed} of ${resources.length} could not be removed — use Clean Up Now, or remove them by hand.`, color: '#c62828' };
+  if (left) return { text: `${left} left in place (auto cleanup was off) — use Clean Up Now to remove them.`, color: '#b26a00' };
+  if (done === resources.length) return { text: `Everything this run created was removed or put back.`, color: '#2e7d32' };
+  if (cleanupStatus === 'cleaning') return { text: 'Cleaning up…', color: '#1565c0' };
+  return { text: 'Removed automatically when the run finishes.', color: '#6a6e73' };
+}
+
+/** What happened, step by step: each task's one-line narration plus
+ * whatever that step created, with each object's own cleanup status, and a
+ * final Cleanup row. The chips above show live progress; this is the story. */
+export function RunSteps({
+  tasks,
+  resources,
+  cleanupStatus,
+}: {
+  tasks: TaskProgressEntry[];
+  resources: RunResource[];
+  cleanupStatus?: string;
+}) {
+  if (!tasks.some((t) => t.summary) && resources.length === 0) return null;
+  const byTask = new Map<string, RunResource[]>();
+  for (const r of resources) {
+    const key = r.task ?? '';
+    byTask.set(key, [...(byTask.get(key) ?? []), r]);
+  }
+  const unattributed = byTask.get('') ?? [];
+  const cleanup = cleanupSummary(resources, cleanupStatus);
+  return (
+    <section className="maaspal-panel" aria-label="What happened">
+      <p className="maaspal-panel__title">What happened</p>
+      <ol className="maaspal-steps">
+        {tasks.map((t) => {
+          const own = byTask.get(t.name) ?? [];
+          const icon = STEP_ICON[t.status];
+          return (
+            <li key={t.name} className={`maaspal-steps__item maaspal-steps__item--${t.status.toLowerCase()}`}>
+              <span className="maaspal-steps__icon" style={{ color: icon.color }} aria-label={t.status}>
+                {icon.icon}
+              </span>
+              <div>
+                <span className="maaspal-steps__task">{formatTaskName(t.name)}</span>
+                {t.summary ? (
+                  <span className="maaspal-steps__text">{t.summary}</span>
+                ) : (
+                  t.status === 'PENDING' && <span className="maaspal-steps__text maaspal-steps__text--muted">waiting</span>
+                )}
+                {own.length > 0 && (
+                  <ul className="maaspal-steps__resources">
+                    {own.map((r) => (
+                      <ResourceItem key={`${r.kind}-${r.name}`} r={r} />
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </li>
+          );
+        })}
+        {resources.length > 0 && (
+          <li className="maaspal-steps__item">
+            <span className="maaspal-steps__icon" style={{ color: cleanup.color }}>
+              ⟲
+            </span>
+            <div>
+              <span className="maaspal-steps__task">Cleanup</span>
+              <span className="maaspal-steps__text" style={{ color: cleanup.color }}>
+                {cleanup.text}
+              </span>
+              {unattributed.length > 0 && (
+                <ul className="maaspal-steps__resources">
+                  {unattributed.map((r) => (
+                    <ResourceItem key={`${r.kind}-${r.name}`} r={r} />
+                  ))}
+                </ul>
+              )}
+            </div>
           </li>
+        )}
+      </ol>
+    </section>
+  );
+}
+
+/** A run's conclusion when the scenario finds something out rather than
+ * checking an expectation (e.g. "Limits are per user"). */
+export function FindingsPanel({ findings }: { findings: RunFinding[] }) {
+  if (findings.length === 0) return null;
+  return (
+    <>
+      {findings.map((f, i) => (
+        <section key={i} className="maaspal-finding" aria-label={`Finding: ${f.title}`}>
+          <p className="maaspal-finding__label">Finding</p>
+          <p className="maaspal-finding__title">{f.title}</p>
+          <p className="maaspal-finding__text">{f.text}</p>
+        </section>
+      ))}
+    </>
+  );
+}
+
+/** MaaS-reported vs harness-counted, side by side (one chart per measure). */
+export function MetricsChartsPanel({ charts }: { charts: MetricsChart[] }) {
+  if (charts.length === 0) return null;
+  return (
+    <section className="maaspal-panel" aria-label="MaaS metrics vs this run">
+      <p className="maaspal-panel__title">MaaS metrics vs what this run sent</p>
+      <p className="maaspal-stat__sub" style={{ margin: '-0.3rem 0 0.6rem' }}>
+        MaaS&apos;s counters lag behind real traffic until Prometheus scrapes them (~30 s); the lines
+        should meet once it catches up.
+      </p>
+      <div className="maaspal-chart-grid">
+        {charts.map((c) => (
+          <MetricsComparisonChart key={c.title} chart={c} />
         ))}
-      </ul>
-      <p className="maaspal-stat__sub" style={{ marginTop: '0.5rem' }}>{cleanupNote}</p>
+      </div>
     </section>
   );
 }

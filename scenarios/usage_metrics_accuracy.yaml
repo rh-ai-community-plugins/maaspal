@@ -24,13 +24,29 @@ inputs:
   request_count: {label: "Requests"}
   metrics_tolerance_pct:
     label: "Tolerance (%)"
+    help: >-
+      How far MaaS's count may differ from what this run sent and still pass.
+      Other traffic to the same model during the run also shows up in MaaS's count.
   limitador_namespace:
     advanced: true
     from_model: http_route
-    help: "The model's HTTPRoute — filled in from the selected model."
-  metrics_max_wait_s: {advanced: true}
-  concurrency: {advanced: true}
-  prompt: {advanced: true}
+    help: >-
+      Which route's counters to read from Limitador (the gateway's rate-limit
+      service): the model's HTTPRoute, "<namespace>/<route name>". Filled in
+      from the model you pick.
+  metrics_max_wait_s:
+    advanced: true
+    help: >-
+      How long to keep re-reading MaaS's counters after the traffic stops,
+      waiting for Prometheus to pick it up (it scrapes every ~30 s).
+  concurrency:
+    advanced: true
+    help: "How many requests are in flight at the same time."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+  subscription:
+    help: "Leave on auto-select to let MaaS pick, as it would for a real user (highest-priority subscription you're eligible for)."
 config:
   subscription: ""           # optional — leave blank for auto-selection
   target_model_name: ""
@@ -46,6 +62,17 @@ config:
 metrics_queries:
   total_requests: 'sum(authorized_calls{limitador_namespace="${config.limitador_namespace}"})'
   total_tokens: 'sum(authorized_hits{limitador_namespace="${config.limitador_namespace}"})'
+# Plot what MaaS reported next to what this run sent, sampled every metrics
+# poll — the gap closing over time is Prometheus catching up (scrape lag).
+metrics_charts:
+  - title: "Requests"
+    unit: "requests"
+    maas: total_requests_delta
+    harness: inference_results.total_requests
+  - title: "Tokens"
+    unit: "tokens"
+    maas: total_tokens_delta
+    harness: inference_results.total_tokens_sent
 verdict:
   pass: >-
     MaaS's counters match: it recorded the ${harness.inference_results.total_requests}

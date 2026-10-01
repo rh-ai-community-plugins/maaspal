@@ -6,7 +6,7 @@ import traceback
 from kubernetes import client as k8s_client
 
 from harness.result import TaskResult
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 _GROUP = "maas.opendatahub.io"
@@ -292,6 +292,7 @@ class ApplyRateLimitSubscriptionTask(Task):
             model_name, model_namespace, token_limit, token_window,
         )
         _create_or_patch_subscription(api, sub_name, namespace, body, existing)
+        record_created(ctx, self.name, "MaaSSubscription", f"{namespace}/{sub_name}", existed=existing is not None)
         print(
             f"[apply_rate_limit_subscription] {'created' if existing is None else 'patched'} "
             f"{sub_name} token_limit={token_limit}/{token_window} for {model_namespace}/{model_name}",
@@ -381,6 +382,7 @@ class ApplyPriorityTestSubscriptionsTask(Task):
                 model_name, model_namespace, token_limit, token_window,
             )
             _create_or_patch_subscription(api, sub_name, namespace, body, existing)
+            record_created(ctx, self.name, "MaaSSubscription", f"{namespace}/{sub_name}", existed=existing is not None)
             print(
                 f"[apply_priority_test_subscriptions] "
                 f"{'created' if existing is None else 'patched'} {sub_name} "
@@ -516,6 +518,7 @@ class ProvisionSubscriptionsDistributedTask(Task):
             )
             existing = _get_existing_subscription(api, sub_name, namespace)
             _create_or_patch_subscription(api, sub_name, namespace, body, existing)
+            record_created(ctx, self.name, "MaaSSubscription", f"{namespace}/{sub_name}", existed=existing is not None)
             model_summary = ", ".join(m["name"] for m in selected)
             print(
                 f"[provision_subscriptions_distributed] "

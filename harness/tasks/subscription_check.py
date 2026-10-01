@@ -6,23 +6,12 @@ from harness.durations import parse_duration_s
 from harness.result import TaskResult
 
 # Module imports, not `from ... import Name`: harness/tasks/registry.py imports
-# every task module, and auth/inference import the registry back — whichever
+# every task module, and inference imports the registry back — whichever
 # module loads first, the others can be half-initialized at this point.
 # Attributes are looked up at call time below, once everything has loaded.
-from harness.tasks import auth as _auth
 from harness.tasks import inference as _inference
 from harness.tasks.base import Task, TaskContext
 from harness.tasks.registry import REGISTRY
-
-# Probing a limit means sending until the first 429 — only sensible when the
-# configured budget is small enough to exhaust quickly, and the window long
-# enough that a short sequential burst can't straddle a reset.
-_DEFAULT_PROBE_MAX_TOKENS = 1000
-_DEFAULT_PROBE_MAX_REQUESTS = 40
-_MIN_PROBE_WINDOW_S = 10.0
-# Same allowance scenarios/verify_subscription_rate_limit.yaml uses: with
-# concurrency 1, at most one in-flight request can push usage past the limit.
-_DEFAULT_SPILLOVER_TOKENS = 100
 
 
 def _find_subscription(name: str) -> dict:
@@ -59,161 +48,183 @@ async def _discovered_models(ctx: TaskContext) -> dict[str, tuple[str, str]]:
     return out
 
 
-class VerifySubscriptionModelsTask(Task):
-    """"Does my subscription work for every model it covers?" — mints one API
-    key pinned to an existing subscription, then for each model in its
-    modelRefs: sends a short burst to confirm the model is actually reachable
-    with that key, and — when the configured token limit is small enough to
-    exhaust quickly — keeps sending until the first 429 to confirm the limit
-    MaaS enforces is the one the subscription declares. One row per model in
-    the run page's "Subscription models" table.
+def _limit_text(ref: dict) -> str:
+    limits = ref.get("token_rate_limits") or []
+    if not limits:
+        return "no limit configured"
+    return ", ".join(f"{lim['limit']} tokens / {lim.get('window', '?')}" for lim in limits)
 
-    A key is bound to a subscription, not a model, so one key covers every
-    model; the gateway keeps a separate token counter per (subscription,
-    model), so each model's limit is probed independently.
-    """
+
+class ReadSubscriptionLimitsTask(Task):
+    """Reads the token rate limit an existing subscription actually declares
+    for one model, so a rate-limit check compares against the real
+    configuration instead of a number the user had to copy in by hand.
+    Writes shared_state["subscription_limits"] = {token_limit, window,
+    window_s} — referenced by assertions as ${harness.subscription_limits.x}
+    and by send_requests' `limit_from_shared_state`."""
+
+    async def run(self, ctx: TaskContext) -> TaskResult:
+        start = time.monotonic()
+        sub_name = str(self.params.get("subscription") or "")
+        model_name = str(self.params.get("model_name") or "")
+        model_namespace = str(self.params.get("model_namespace") or "")
+        if not sub_name:
+            raise RuntimeError("Pick a subscription to test")
+
+        sub = _find_subscription(sub_name)
+        refs = sub["model_refs"]
+        ref = next(
+            (r for r in refs if r["name"] == model_name and r["namespace"] == model_namespace),
+            None,
+        )
+        if ref is None:
+            covered = ", ".join(f"{r['namespace']}/{r['name']}" for r in refs) or "none"
+            raise RuntimeError(
+                f"Subscription {sub_name!r} doesn't cover {model_namespace}/{model_name} "
+                f"(it covers: {covered})"
+            )
+        limits = ref.get("token_rate_limits") or []
+        if not limits:
+            raise RuntimeError(
+                f"Subscription {sub_name!r} has no token rate limit for {model_namespace}/{model_name} — "
+                "nothing to enforce"
+            )
+        limit = int(limits[0]["limit"])
+        window = str(limits[0].get("window", ""))
+        ctx.shared_state["subscription_limits"] = {
+            "token_limit": limit,
+            "window": window,
+            "window_s": parse_duration_s(window) if window else None,
+        }
+        ctx.shared_state["task_summary"] = (
+            f"{sub_name} allows {limit} tokens per {window} on {model_namespace}/{model_name}"
+            + (f" (first of {len(limits)} limits)" if len(limits) > 1 else "")
+        )
+        await ctx.emit_assertion_state()
+        return TaskResult(task_name=self.name, status="PASS", duration_ms=(time.monotonic() - start) * 1000)
+
+    async def cleanup(self, ctx: TaskContext) -> None:
+        pass
+
+
+class DiscoverSubscriptionModelsTask(Task):
+    """Lists the models one existing subscription covers (its modelRefs, with
+    their configured limits) and whether each is listed in GET /v1/models.
+    Writes shared_state["subscription_models"] for
+    send_requests_to_each_model, and a "Subscription models" table."""
 
     async def run(self, ctx: TaskContext) -> TaskResult:
         start = time.monotonic()
         sub_name = str(self.params.get("subscription") or "")
         if not sub_name:
             raise RuntimeError("Pick a subscription to verify")
-        requests_per_model = int(self.params.get("requests_per_model", 3))
-        probe_max_tokens = int(self.params.get("probe_limit_max_tokens", _DEFAULT_PROBE_MAX_TOKENS))
-        probe_max_requests = int(self.params.get("probe_max_requests", _DEFAULT_PROBE_MAX_REQUESTS))
-        spillover = int(self.params.get("spillover_tokens", _DEFAULT_SPILLOVER_TOKENS))
-        prompt = str(self.params.get("prompt", "Hello, world!"))
 
         sub = _find_subscription(sub_name)
-        model_refs = sub["model_refs"]
-        print(
-            f"[verify_subscription_models] {sub['namespace']}/{sub_name}: "
-            f"{len(model_refs)} model(s), priority={sub.get('priority')}",
-            flush=True,
-        )
-
-        key_task = _auth.ProvisionApiKeyTask(
-            self.name,
-            {"key_name": f"maaspal-verify-{ctx.run_id[:8]}", "subscription": sub_name},
-        )
-        try:
-            await key_task.run(ctx)
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"Couldn't create an API key on subscription {sub_name!r} "
-                f"({exc.response.status_code}: {exc.response.text[:200]}) — is this harness's "
-                f"identity one of its owners ({', '.join(sub['owner']['groups'] + sub['owner']['users'])})?"
-            ) from exc
-        key = ctx.shared_state["api_keys"][-1]["key"]
         discovered = await _discovered_models(ctx)
-
-        counts = {
-            "model_count": len(model_refs),
-            "reachable_count": 0,
-            "probed_count": 0,
-            "enforced_count": 0,
-        }
-        rows: list[list[str]] = []
-
-        for i, ref in enumerate(model_refs):
+        models = []
+        for ref in sub["model_refs"]:
             ref_id = f"{ref['namespace']}/{ref['name']}"
-            limits = ref.get("token_rate_limits") or []
-            limit = int(limits[0]["limit"]) if limits else None
-            window = str(limits[0].get("window", "")) if limits else ""
-            limit_text = f"{limit} / {window}" if limit is not None else "none"
-
-            probe_note = ""
-            probe = False
-            if limit is None:
-                probe_note = "no limit configured"
-            elif limit > probe_max_tokens:
-                probe_note = f"limit above probe cap ({probe_max_tokens})"
-            elif parse_duration_s(window) < _MIN_PROBE_WINDOW_S:
-                probe_note = "window too short to probe reliably"
-            else:
-                probe = True
-
             if ref_id in discovered:
                 url, model_id = discovered[ref_id]
-                listed = True
             else:
                 # Not in /v1/models — try its dedicated per-model route
-                # directly rather than letting discovery fall back to some
-                # unrelated model (see inference.SendRequestsTask._discover_model).
+                # rather than letting discovery fall back to an unrelated
+                # model (see inference.SendRequestsTask._discover_model).
                 url, model_id = f"{ctx.maas_api_url}/{ref_id}/v1", ref["name"]
-                listed = False
+            models.append({
+                "ref": ref_id,
+                "url": url,
+                "model_id": model_id,
+                "listed": ref_id in discovered,
+                "limit": _limit_text(ref),
+            })
+        ctx.shared_state["subscription_models"] = models
+        ctx.shared_state["subscription_check"] = {
+            "model_count": len(models),
+            "listed_count": sum(m["listed"] for m in models),
+        }
+        ctx.shared_state.setdefault("_tables", {})["Subscription models"] = {
+            "columns": ["Model", "Configured limit", "Listed in /v1/models", "Reachable"],
+            "rows": [[m["ref"], m["limit"], "✓" if m["listed"] else "✗", "…"] for m in models],
+        }
+        ctx.shared_state["task_summary"] = (
+            f"{sub_name} covers {len(models)} model(s): " + (", ".join(m["ref"] for m in models) or "none")
+        )
+        await ctx.emit_assertion_state()
+        return TaskResult(task_name=self.name, status="PASS", duration_ms=(time.monotonic() - start) * 1000)
 
+    async def cleanup(self, ctx: TaskContext) -> None:
+        pass
+
+
+class SendRequestsToEachModelTask(Task):
+    """Sends a short burst to every model discover_subscription_models found,
+    using the API key the scenario created (the last one in
+    shared_state["api_keys"]), and fills in the table's Reachable column.
+    Reachability only — rate limits have their own scenarios."""
+
+    async def run(self, ctx: TaskContext) -> TaskResult:
+        start = time.monotonic()
+        models = ctx.shared_state.get("subscription_models") or []
+        api_keys = ctx.shared_state.get("api_keys") or []
+        if not api_keys:
+            raise RuntimeError("No API key to send with — run provision_api_key first")
+        key = api_keys[-1]["key"]
+        requests_per_model = int(self.params.get("requests_per_model", 3))
+        prompt = str(self.params.get("prompt", "Hello, world!"))
+
+        check = ctx.shared_state.setdefault("subscription_check", {"model_count": len(models)})
+        check["reachable_count"] = 0
+        table = ctx.shared_state.setdefault("_tables", {}).setdefault(
+            "Subscription models", {"columns": [], "rows": []}
+        )
+        for i, m in enumerate(models):
             result_key = f"subscription_model_{i + 1}"
-            sender = _inference.SendRequestsTask(
+            await _inference.SendRequestsTask(
                 self.name,
                 {
-                    "url": url,
-                    "model": model_id,
+                    "url": m["url"],
+                    "model": m["model_id"],
                     "token": key,
-                    "count": probe_max_requests if probe else requests_per_model,
+                    "count": requests_per_model,
                     "concurrency": 1,
                     "prompt": prompt,
                     "retries": 0,
                     "result_key": result_key,
                 },
-            )
-            await sender.run(ctx)
-            ctx.shared_state["_traffic"][result_key]["label"] = ref_id
-            if limit is not None:
-                ctx.shared_state["_traffic"][result_key]["limit"] = limit
+            ).run(ctx)
+            ctx.shared_state["_traffic"][result_key]["label"] = m["ref"]
             r = ctx.shared_state.get(result_key, {})
-
             reachable = r.get("success_count", 0) > 0
-            counts["reachable_count"] += int(reachable)
-            throttled_at = r.get("tokens_before_first_429")
-            if probe and reachable:
-                counts["probed_count"] += 1
-                enforced = (
-                    throttled_at is not None
-                    and limit <= throttled_at <= limit + spillover
-                    and r.get("successes_after_first_429", 0) == 0
-                )
-                counts["enforced_count"] += int(enforced)
-                if throttled_at is None:
-                    limit_result = f"✗ never throttled ({r.get('total_tokens_sent', 0)} tokens sent)"
-                else:
-                    limit_result = f"{'✓' if enforced else '✗'} throttled at {throttled_at} tokens"
+            check["reachable_count"] += int(reachable)
+            if reachable:
+                reach = f"✓ {r['success_count']}/{r['total_requests']} OK"
             else:
-                limit_result = f"not probed — {probe_note}" if probe_note else "not probed — unreachable"
-
-            failures = []
-            if r.get("unauthorized_count"):
-                failures.append(f"{r['unauthorized_count']}× 401/403")
-            if r.get("server_error_count"):
-                failures.append(f"{r['server_error_count']}× 5xx")
-            if r.get("other_error_count"):
-                failures.append(f"{r['other_error_count']}× other error")
-            reach_text = "✓" if reachable else "✗ " + (", ".join(failures) or "no successful request")
-            if not listed:
-                reach_text += " (not listed in /v1/models)"
-
-            rows.append([ref_id, limit_text, reach_text, limit_result])
-            ctx.shared_state["subscription_check"] = dict(counts)
-            ctx.shared_state["task_progress"] = {"current": i + 1, "total": len(model_refs)}
+                causes = []
+                if r.get("unauthorized_count"):
+                    causes.append(f"{r['unauthorized_count']}× denied (401/403)")
+                if r.get("rate_limited_count"):
+                    causes.append(f"{r['rate_limited_count']}× throttled (429)")
+                if r.get("server_error_count"):
+                    causes.append(f"{r['server_error_count']}× server error")
+                if r.get("other_error_count"):
+                    causes.append(f"{r['other_error_count']}× other error")
+                reach = "✗ " + (", ".join(causes) or "no successful request")
+            for row in table["rows"]:
+                if row and row[0] == m["ref"]:
+                    row[-1] = reach
+            ctx.shared_state["task_progress"] = {"current": i + 1, "total": len(models), "unit": "models"}
             ctx.shared_state["task_summary"] = (
-                f"Subscription {sub_name}: {counts['reachable_count']}/{i + 1} models reachable · "
-                f"{counts['enforced_count']}/{counts['probed_count']} probed limits enforced"
+                f"{check['reachable_count']} of {i + 1} model(s) answered with this subscription's key"
             )
-            ctx.shared_state.setdefault("_tables", {})["Subscription models"] = {
-                "columns": ["Model", "Configured limit", "Reachable", "Limit enforcement"],
-                "rows": rows,
-            }
             await ctx.emit_assertion_state()
 
-        ctx.shared_state["subscription_check"] = counts
-        return TaskResult(
-            task_name=self.name,
-            status="PASS",
-            duration_ms=(time.monotonic() - start) * 1000,
-        )
+        return TaskResult(task_name=self.name, status="PASS", duration_ms=(time.monotonic() - start) * 1000)
 
     async def cleanup(self, ctx: TaskContext) -> None:
-        await _auth._revoke_keys(ctx)
+        pass
 
 
-REGISTRY["verify_subscription_models"] = VerifySubscriptionModelsTask
+REGISTRY["read_subscription_limits"] = ReadSubscriptionLimitsTask
+REGISTRY["discover_subscription_models"] = DiscoverSubscriptionModelsTask
+REGISTRY["send_requests_to_each_model"] = SendRequestsToEachModelTask

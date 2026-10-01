@@ -1,8 +1,15 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Button, Grid, GridItem, Page, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
+import { Button, ExpandableSection, Grid, GridItem, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
 import { AssertionPanel } from './AssertionPanel';
 import { LogStream } from './LogStream';
-import { DetailTable, ResourcesPanel, TrafficPanel, VerdictBanner } from './RunInsights';
+import {
+  DetailTable,
+  FindingsPanel,
+  MetricsChartsPanel,
+  RunSteps,
+  TrafficPanel,
+  VerdictBanner,
+} from './RunInsights';
 import { TaskProgress } from './TaskProgress';
 import { useScenarioTitle } from '../scenarioTitles';
 import {
@@ -19,6 +26,9 @@ import {
 } from '../api/client';
 
 const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING']);
+// Cleanup keeps going after a run reaches its final status — keep polling the
+// run until cleanup is settled too, or resource statuses go stale.
+const CLEANUP_SETTLED = new Set(['done', 'failed', 'skipped']);
 
 // Code-split: RunSettingsModal pulls in Monaco (self-hosted, see monacoSetup.ts),
 // a sizeable bundle not worth loading for every run view when most never open it.
@@ -71,6 +81,8 @@ export function RunDetail({ runId, onBack }: Props) {
   const [stopping, setStopping] = useState(false);
   const [cleaningUp, setCleaningUp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // null = follow the default (open only when the run failed).
+  const [logsOpen, setLogsOpen] = useState<boolean | null>(null);
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -91,7 +103,7 @@ export function RunDetail({ runId, onBack }: Props) {
       getRun(runId)
         .then((r) => {
           setRun(r);
-          if (r.status !== 'RUNNING' && r.status !== 'PENDING') {
+          if (!ACTIVE_STATUSES.has(r.status.toUpperCase()) && CLEANUP_SETTLED.has(r.cleanup_status)) {
             clearInterval(interval);
           }
         })
@@ -112,7 +124,14 @@ export function RunDetail({ runId, onBack }: Props) {
     function applyProgress(p: ProgressResponse) {
       setTaskProgress(p.tasks);
       if (p.run_started_at) setRunStartedAt(p.run_started_at);
-      setInsights({ traffic: p.traffic, resources: p.resources, tables: p.tables, verdict: p.verdict });
+      setInsights({
+        traffic: p.traffic,
+        resources: p.resources,
+        tables: p.tables,
+        verdict: p.verdict,
+        findings: p.findings,
+        metrics_charts: p.metrics_charts,
+      });
     }
     getProgress(runId).then(applyProgress).catch(() => {});
     const interval = setInterval(() => {
@@ -157,7 +176,7 @@ export function RunDetail({ runId, onBack }: Props) {
   }
 
   return (
-    <Page>
+    <>
       <PageSection>
         <div className="maaspal-run-detail-bar">
           <Button variant="link" isInline onClick={onBack}>
@@ -263,28 +282,48 @@ export function RunDetail({ runId, onBack }: Props) {
           )}
         </div>
 
-        {insights.verdict && <VerdictBanner verdict={insights.verdict} />}
+        {/* A scenario that finds something out leads with the finding; one
+            that checks an expectation leads with the verdict. */}
+        {(insights.findings ?? []).length > 0 ? (
+          <FindingsPanel findings={insights.findings ?? []} />
+        ) : (
+          insights.verdict && <VerdictBanner verdict={insights.verdict} />
+        )}
 
         <TaskProgress tasks={taskProgress} />
 
         <Grid hasGutter>
           <GridItem span={12} lg={8}>
-            {(insights.traffic ?? []).map((burst) => (
-              <TrafficPanel key={burst.result_key} burst={burst} />
-            ))}
+            <RunSteps
+              tasks={taskProgress}
+              resources={insights.resources ?? []}
+              cleanupStatus={run?.cleanup_status}
+            />
+            <MetricsChartsPanel charts={insights.metrics_charts ?? []} />
+            {/* Charted bursts first — they answer the scenario's question;
+                the rest are one-line summaries. */}
+            {[...(insights.traffic ?? [])]
+              .sort((a, b) => Number(!!b.chart) - Number(!!a.chart))
+              .map((burst) => (
+                <TrafficPanel key={burst.result_key} burst={burst} />
+              ))}
             {(insights.tables ?? []).map((table) => (
               <DetailTable key={table.title} table={table} />
             ))}
-            <p className="maaspal-section-heading">Live Logs</p>
-            <LogStream runId={runId} />
           </GridItem>
           <GridItem span={12} lg={4}>
             <AssertionPanel assertions={assertions} taskProgress={taskProgress} />
-            <div style={{ marginTop: '1rem' }}>
-              <ResourcesPanel resources={insights.resources ?? []} cleanupStatus={run?.cleanup_status} />
-            </div>
           </GridItem>
         </Grid>
+
+        <ExpandableSection
+          toggleText="Logs"
+          isExpanded={logsOpen ?? run?.status.toUpperCase() === 'FAIL'}
+          onToggle={(_e, expanded) => setLogsOpen(expanded)}
+          style={{ marginTop: '1rem' }}
+        >
+          <LogStream runId={runId} />
+        </ExpandableSection>
       </PageSection>
 
       {showSettings && (
@@ -292,6 +331,6 @@ export function RunDetail({ runId, onBack }: Props) {
           <RunSettingsModal runId={runId} onClose={() => setShowSettings(false)} />
         </Suspense>
       )}
-    </Page>
+    </>
   );
 }

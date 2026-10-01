@@ -5,7 +5,7 @@ import traceback
 from kubernetes import client as k8s_client
 
 from harness.result import TaskResult
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 _ISVC_GROUP = "serving.kserve.io"
@@ -86,6 +86,27 @@ def _llm_isvc_body(
             },
         },
     }
+
+
+def _internal_url(api: k8s_client.CustomObjectsApi, name: str, namespace: str) -> str | None:
+    """The model's in-cluster address (an LLMInferenceService status.addresses
+    entry on a *.svc host), for calling it directly — bypassing the MaaS
+    gateway (scenarios/gateway_overhead.yaml). Falls back to status.url.
+    Not yet verified against a live cluster's exact address format; the URL
+    actually used is logged and shown in the run's narration."""
+    try:
+        obj = api.get_namespaced_custom_object(
+            group=_ISVC_GROUP, version=_ISVC_VERSION, namespace=namespace, plural=_ISVC_PLURAL, name=name,
+        )
+    except Exception as exc:
+        print(f"[deploy_simulated_model] could not read {namespace}/{name} addresses: {exc}", flush=True)
+        return None
+    status = (obj or {}).get("status", {})
+    urls = [a.get("url") for a in status.get("addresses") or [] if a.get("url")]
+    internal = next((u for u in urls if ".svc" in u), None)
+    chosen = internal or status.get("url")
+    print(f"[deploy_simulated_model] {namespace}/{name} in-cluster address: {chosen}", flush=True)
+    return chosen
 
 
 async def _wait_for_isvc_ready(
@@ -262,7 +283,14 @@ class DeploySimulatedModelTask(Task):
             ready_count += 1
             ctx.shared_state["task_progress"] = {"current": ready_count, "total": count}
             await ctx.emit_assertion_state()
-            return {"name": isvc_name, "namespace": namespace, "isvc_created": not isvc_existed, "ref_created": not ref_existed, "ready": ref_ready}
+            return {
+                "name": isvc_name,
+                "namespace": namespace,
+                "isvc_created": not isvc_existed,
+                "ref_created": not ref_existed,
+                "ready": ref_ready,
+                "internal_url": _internal_url(api, isvc_name, namespace),
+            }
 
         if parallel:
             results = await asyncio.gather(*[_deploy_one(i) for i in range(count)])
@@ -271,6 +299,10 @@ class DeploySimulatedModelTask(Task):
             for i in range(count):
                 results.append(await _deploy_one(i))
         deployed.extend(results)
+        for r in results:
+            record_created(
+                ctx, self.name, "Model", f"{r['namespace']}/{r['name']}", existed=not r["isvc_created"]
+            )
 
         not_ready = [r["name"] for r in results if not r["ready"]]
         ctx.shared_state["task_summary"] = (

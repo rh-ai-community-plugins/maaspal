@@ -87,3 +87,20 @@ Categories are now organised by question: Quick check, Rate limits, Access contr
 
 **Neutral:**
 - Existing custom scenarios keep working unchanged. Every new key is optional and defaulted by the API.
+
+## Update: round 2 (after review)
+
+- **Titles stay questions.** Jobs-to-be-done titles were tried and read less clearly than the questions.
+- **Rate-limit scenarios stop asking for limits and request counts.**
+  - "Is my subscription's rate limit enforced?" now only tests an existing subscription. It reads the subscription's own limit (`read_subscription_limits`) and sends until throttled.
+  - The three "how does MaaS behave" rate-limit scenarios (keys share one budget, window recovery, per user or shared) each create their own small temporary subscription.
+  - Assertion bounds may reference `${harness.ns.key}` values known only at run time.
+- **Findings, not expectations.** "Are limits per user or shared?" reports what it found (`_findings`), and the run page leads with that instead of the verdict.
+- **Purposeful charts.** Only bursts marked `chart: true` get the traffic chart; others are a one-line summary. Usage metrics get a MaaS-vs-sent comparison chart instead.
+- **Run page.**
+  - The "What happened" steps and the created-resources list are merged, with per-resource cleanup status (`record_created` plus `harness/cleanup_state.py`), kept current by polling until cleanup settles.
+  - Logs are collapsible.
+  - The single scrollbar comes from making the masthead the `<Page header>`.
+- **Launch form.** "How it works" became "More details" inside "What this run will do", and every non-obvious input has an ⓘ explanation.
+- **Overlap removed.** The smoke test no longer revokes or searches. `api_key_lifecycle` owns that, plus "revoking one key leaves the others working".
+- **Gateway overhead uses a throwaway model**, so it needs no endpoint details. The model's in-cluster address is taken from `LLMInferenceService.status.addresses`, which has not yet been verified on a live cluster.

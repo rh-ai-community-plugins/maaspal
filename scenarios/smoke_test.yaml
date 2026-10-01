@@ -2,39 +2,43 @@ name: smoke_test
 previous_names: [platform_health_check]
 title: "Is MaaS working end to end?"
 summary: >-
-  The 30-second check: models are listed, a key can be created and found,
-  inference works with it, and revoking it cuts access off immediately.
+  The quick check: models are listed, an API key can be created, and
+  inference works with it.
 description: >-
-  Walks the whole user journey through the MaaS REST API and gateway exactly
-  as an end user would — no Kubernetes CR reads or writes. Lists models,
-  creates one API key (letting MaaS auto-select the subscription), finds it
-  via search, sends a few inference requests with it, revokes it, and
-  confirms the very next request is denied.
+  Walks the basic user journey through the MaaS REST API and gateway exactly
+  as an end user would — no Kubernetes reads or writes. Lists the models MaaS
+  exposes, creates one API key (letting MaaS pick the subscription), and
+  sends a few inference requests with it. For the full API key lifecycle
+  (search, revocation), see "Do API keys behave correctly?".
 category: "Quick check"
 kind: verify
 order: 1
 mutates: [api_keys]
-est_duration: "~30 s"
+est_duration: "~20 s"
 plan_template: >-
-  Create 1 API key on ${subscription}, send ${config.request_count} requests to
-  ${model}, revoke the key,
-  then send ${config.request_count} more and expect them all to be denied.
+  List MaaS's models, create 1 API key on ${subscription}, and send
+  ${config.request_count} requests to ${model}.
 inputs:
   target_model_name:
     label: "Model"
-    help: "Leave blank to use the cluster default (DEFAULT_MODEL)."
+    placeholder: "Cluster default model"
+    help: "Leave blank to use the cluster's default model (DEFAULT_MODEL in the MaaS:PAL config)."
   request_count:
-    label: "Requests per step"
-  concurrency: {advanced: true}
-  prompt: {advanced: true}
+    label: "Requests"
+  concurrency:
+    advanced: true
+    help: "How many requests are in flight at the same time."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
 config:
   request_count: 3
   concurrency: 1
   prompt: "Hello, world!"
-  target_model_name: ""      # optional — blank uses DEFAULT_MODEL; model picker activates when both present
-  target_model_namespace: "" # paired with target_model_name
+  target_model_name: ""
+  target_model_namespace: ""
 verdict:
-  pass: "MaaS works end to end: key created, inference succeeded, and revocation took effect immediately."
+  pass: "MaaS works end to end: models are listed, a key was created, and inference succeeded with it."
   fail: "Something in the basic MaaS journey is broken — see which step failed below."
 tasks:
   - name: check_platform_health
@@ -49,17 +53,9 @@ tasks:
       key_name: "maaspal-smoke-key"
       count: 1
     assertions:
-      name_echo_match_count:
-        label: "Key created with the requested name"
-        promql: "${harness.key_provision_checks.name_echo_match_count}"
-        expect: "== 1"
-  - name: verify_api_key_search
-    params:
-      name_prefix: "maaspal-smoke-key"
-    assertions:
-      found_count:
-        label: "New key found by search"
-        promql: "${harness.search_check.found_count}"
+      expires_at_present_count:
+        label: "Key created (with an expiry date)"
+        promql: "${harness.key_provision_checks.expires_at_present_count}"
         expect: "== 1"
   - name: send_requests
     params:
@@ -74,22 +70,4 @@ tasks:
         unit: "%"
         promql: "${harness.inference_results.error_rate_pct}"
         expect: "< 5"
-  - name: revoke_api_keys
-    params: {}
-  - name: verify_revoked_key_denied
-    params:
-      count: "${config.request_count}"
-      concurrency: "${config.concurrency}"
-      prompt: "${config.prompt}"
-      model: "${config.target_model_namespace}/${config.target_model_name}"
-      key_pool: true
-      # A retry could only re-hit the same revoked key; keep the count honest.
-      retries: 0
-    assertions:
-      revoked_requests_denied_count:
-        label: "Requests denied after revocation (401/403)"
-        description: "Every request with the revoked key should be rejected as unauthorized."
-        unit: "requests"
-        promql: "${harness.inference_results.unauthorized_count}"
-        expect: "== ${config.request_count}"
 cleanup: automatic

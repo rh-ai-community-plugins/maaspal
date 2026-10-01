@@ -1,5 +1,12 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { DetailTable, ResourcesPanel, TrafficPanel, VerdictBanner } from './RunInsights';
+import {
+  DetailTable,
+  FindingsPanel,
+  MetricsChartsPanel,
+  RunSteps,
+  TrafficPanel,
+  VerdictBanner,
+} from './RunInsights';
 import type { TrafficBurst } from '../api/client';
 
 const burst: TrafficBurst = {
@@ -7,6 +14,7 @@ const burst: TrafficBurst = {
   result_key: 'inference_results',
   planned: 60,
   limit: 100,
+  chart: true,
   summary: {
     total_requests: 9,
     http_attempts: 9,
@@ -68,19 +76,80 @@ test('chart data is reachable as a table', () => {
   expect(screen.getAllByRole('row')).toHaveLength(burst.timeline.length + 1);
 });
 
-test('resources panel lists what the run created and the cleanup state', () => {
+test('a burst without a chart is a single summary line', () => {
   render(
-    <ResourcesPanel
-      resources={[
-        { kind: 'MaaSSubscription', name: 'models-as-a-service/maaspal-rate-limit-test', action: 'created' },
-        { kind: 'API key', name: 'maaspal-rate-key', subscription: 'maaspal-rate-limit-test', action: 'created' },
+    <TrafficPanel
+      burst={{
+        task: 'verify_revoked_key_denied',
+        result_key: 'r',
+        chart: false,
+        summary: { total_requests: 3, success_count: 0, unauthorized_count: 3, total_tokens_sent: 0, p50_latency_ms: 12 },
+        timeline: [[0.1, 0, 'denied', 12]],
+      }}
+    />,
+  );
+  expect(screen.getByText(/3 requests · 0 OK · 3 denied/)).toBeInTheDocument();
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+});
+
+test('steps show each step with the resources it created and their cleanup status', () => {
+  render(
+    <RunSteps
+      tasks={[
+        { name: 'apply_rate_limit_subscription', status: 'DONE', summary: 'Created subscription ns/test' },
+        { name: 'provision_api_key', status: 'DONE', summary: 'Created 1 API key' },
+        { name: 'send_requests', status: 'RUNNING', summary: '5 requests · 5 OK' },
       ]}
+      resources={[
+        { kind: 'MaaSSubscription', name: 'ns/test', task: 'apply_rate_limit_subscription', status: 'removed' },
+        { kind: 'MaaSSubscription', name: 'ns/existing', task: 'apply_rate_limit_subscription', action: 'patched', status: 'restored' },
+        { kind: 'API key', name: 'maaspal-rate-key', task: 'provision_api_key', subscription: 'test', status: 'cleanup failed' },
+      ]}
+      cleanupStatus="failed"
+    />,
+  );
+  expect(screen.getByText('Created subscription ns/test')).toBeInTheDocument();
+  expect(screen.getByText('removed ✓')).toBeInTheDocument();
+  expect(screen.getByText('restored ✓')).toBeInTheDocument();
+  expect(screen.getByText('MaaSSubscription (changed)')).toBeInTheDocument();
+  expect(screen.getByText('cleanup failed ✗')).toBeInTheDocument();
+  expect(screen.getByText(/1 of 3 could not be removed/)).toBeInTheDocument();
+});
+
+test('steps say when resources were left in place', () => {
+  render(
+    <RunSteps
+      tasks={[{ name: 'provision_api_key', status: 'DONE', summary: 'Created 1 API key' }]}
+      resources={[{ kind: 'API key', name: 'k', task: 'provision_api_key', status: 'left in place' }]}
       cleanupStatus="skipped"
     />,
   );
-  expect(screen.getByText('models-as-a-service/maaspal-rate-limit-test')).toBeInTheDocument();
-  expect(screen.getByText(/on maaspal-rate-limit-test/)).toBeInTheDocument();
-  expect(screen.getByText(/left in place/i)).toBeInTheDocument();
+  expect(screen.getByText(/left in place \(auto cleanup was off\)/)).toBeInTheDocument();
+});
+
+test('findings state what the run found out', () => {
+  render(<FindingsPanel findings={[{ title: 'Limits are per user', text: 'Each user gets their own budget.' }]} />);
+  expect(screen.getByText('Finding')).toBeInTheDocument();
+  expect(screen.getByText('Limits are per user')).toBeInTheDocument();
+});
+
+test('metrics charts compare MaaS-reported values with what was sent', () => {
+  render(
+    <MetricsChartsPanel
+      charts={[
+        {
+          title: 'Tokens',
+          unit: 'tokens',
+          maas_label: 'Reported by MaaS',
+          harness_label: 'Sent by this run',
+          points: [[0, 0, 0], [5, 120, 900], [35, 900, 900]],
+        },
+      ]}
+    />,
+  );
+  expect(screen.getByRole('img', { name: /tokens: reported by maas 900, sent by this run 900/i })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /show data table/i }));
+  expect(screen.getAllByRole('row')).toHaveLength(4);
 });
 
 test('detail table renders the rows a task published', () => {

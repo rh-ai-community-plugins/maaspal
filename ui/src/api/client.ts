@@ -141,7 +141,9 @@ export async function stopRun(runId: string): Promise<void> {
 export interface TaskProgressEntry {
   name: string;
   status: 'PENDING' | 'RUNNING' | 'DONE' | 'FAIL' | 'CANCELLED';
-  progress?: { current: number; total: number };
+  // total null = open-ended (e.g. "send until throttled"); unit labels it
+  // ("tokens" when the bar tracks progress toward a rate limit).
+  progress?: { current: number; total: number | null; unit?: string };
   assertions_status?: 'PASSING' | 'FAILING' | 'PENDING';
   started_at?: string;
   duration_ms?: number;
@@ -181,17 +183,43 @@ export interface TrafficBurst {
   label?: string;
   // The configured token limit, drawn as the chart's reference line.
   limit?: number | null;
+  // Whether this burst's shape over time answers the scenario's question —
+  // otherwise it's shown as a one-line summary, no chart.
+  chart?: boolean;
   planned?: number;
   summary: TrafficSummary;
   timeline: TrafficPoint[];
 }
 
+export type ResourceStatus = 'active' | 'removed' | 'restored' | 'revoked' | 'cleanup failed' | 'left in place';
+
 export interface RunResource {
   kind: string;
   name: string;
-  action?: string;
+  // The task that created it — its step on the run page.
+  task?: string;
+  // "patched" = an object that already existed, changed for the run.
+  action?: 'created' | 'patched';
+  status?: ResourceStatus;
   subscription?: string;
   owner?: string;
+}
+
+export interface RunFinding {
+  title: string;
+  text: string;
+  outcome?: string;
+}
+
+// [seconds since run start, value reported by MaaS, value counted by the harness]
+export type MetricsPoint = [number, number, number];
+
+export interface MetricsChart {
+  title: string;
+  unit: string;
+  maas_label: string;
+  harness_label: string;
+  points: MetricsPoint[];
 }
 
 export interface RunTable {
@@ -213,6 +241,8 @@ export interface ProgressResponse {
   traffic?: TrafficBurst[];
   resources?: RunResource[];
   tables?: RunTable[];
+  findings?: RunFinding[];
+  metrics_charts?: MetricsChart[];
   verdict?: RunVerdict;
 }
 

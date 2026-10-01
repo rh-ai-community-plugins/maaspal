@@ -24,20 +24,36 @@ plan_template: >-
   ${config.high_priority_token_limit} tokens) on ${model}, create an
   auto-selected key, and send ${config.request_count} requests with it.
 inputs:
-  low_priority: {label: "Low priority"}
-  high_priority: {label: "High priority"}
+  low_priority:
+    label: "Low priority"
+    help: "Priority of the first temporary subscription. When you're eligible for several subscriptions on a model, MaaS binds new keys to the highest priority."
+  high_priority:
+    label: "High priority"
+    help: "Priority of the second temporary subscription — the one new keys should get."
   low_priority_token_limit:
     label: "Low-priority token limit"
     help: "Kept tiny on purpose — the burst below blows straight through it, so being bound to this one shows up as throttling."
-  high_priority_token_limit: {label: "High-priority token limit"}
+  high_priority_token_limit:
+    label: "High-priority token limit"
+    help: "Generous, so the high-priority subscription never throttles this test's traffic."
   request_count:
     label: "Requests"
     help: "Must send well over the low-priority limit in tokens (~10–30 tokens per request on the simulator)."
-  new_low_priority_subscription_name: {advanced: true}
-  new_high_priority_subscription_name: {advanced: true}
-  subscription_namespace: {advanced: true}
-  concurrency: {advanced: true}
-  prompt: {advanced: true}
+  new_low_priority_subscription_name:
+    advanced: true
+    help: "Name of the temporary low-priority subscription."
+  new_high_priority_subscription_name:
+    advanced: true
+    help: "Name of the temporary high-priority subscription."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions (and auth policies) live in on this cluster — the MaaS tenant namespace."
+  concurrency:
+    advanced: true
+    help: "How many requests are in flight at the same time."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
 config:
   target_model_name: ""       # the MaaSModelRef's own name
   target_model_namespace: ""  # the namespace that MaaSModelRef lives in
