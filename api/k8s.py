@@ -175,6 +175,26 @@ def stop_run(run_id: str) -> bool:
     return True
 
 
+def run_job_state(run_id: str) -> tuple[str | None, bool]:
+    """(job state, pod still exists) for a run — state is "suspended" (Stop),
+    "failed", "active", or None when no Job carries the run's label. Used to
+    finalize a run whose harness died without writing a result."""
+    k8s = _kube()
+    selector = f"maaspal-run-id={run_id}"
+    jobs = k8s.BatchV1Api().list_namespaced_job(namespace=NAMESPACE, label_selector=selector).items
+    pods = k8s.CoreV1Api().list_namespaced_pod(namespace=NAMESPACE, label_selector=selector).items
+    if not jobs:
+        return None, bool(pods)
+    job = jobs[0]
+    if job.spec.suspend:
+        state = "suspended"
+    elif (job.status.failed or 0) > 0:
+        state = "failed"
+    else:
+        state = "active"
+    return state, bool(pods)
+
+
 def delete_stopped_job(run_id: str) -> None:
     """Remove a run's suspended Job once the run is final — a suspended Job
     never completes, so ttlSecondsAfterFinished would never clean it up.

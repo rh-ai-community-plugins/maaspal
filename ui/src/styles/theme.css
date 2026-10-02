@@ -828,3 +828,7 @@
   margin: 0;
   background: none;
 }
+
+.maaspal-traffic-line__toggle {
+  margin-left: auto;
+}

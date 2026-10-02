@@ -466,7 +466,7 @@ class SendRequestsTask(Task):
             **traffic_entry,
             "task": self.name,
             # The safety ceiling isn't a plan the user should see.
-            "planned": None if until_throttled else count,
+            "planned": None if (until_throttled or stage_levels) else count,
             "timeline": timeline,
         }
         run_start = time.monotonic()
@@ -630,7 +630,16 @@ class SendRequestsTask(Task):
                     }
                 else:
                     ctx.shared_state["task_progress"] = {"current": total, "total": count}
-                ctx.shared_state["task_summary"] = _summary_line(result_data, None if until_throttled else count)
+                if stage_levels:
+                    # The request ceiling in step mode is a safety cap, not a plan.
+                    ctx.shared_state["task_summary"] = (
+                        f"Step {stage_idx + 1}/{len(stage_levels)}: {current_concurrency} in flight · "
+                        + _summary_line(result_data, None)
+                    )
+                else:
+                    ctx.shared_state["task_summary"] = _summary_line(
+                        result_data, None if until_throttled else count
+                    )
                 now = time.monotonic()
                 if now - last_emit >= _DEBOUNCE_SECS:
                     last_emit = now
@@ -705,10 +714,14 @@ class SendRequestsTask(Task):
                 stop_reason = "stages done"
 
             monitor = asyncio.create_task(ramp_monitor() if until_throttled else stage_controller())
-            await asyncio.gather(*(worker(i) for i in range(max_concurrency)))
-            monitor.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await monitor
+            try:
+                await asyncio.gather(*(worker(i) for i in range(max_concurrency)))
+            finally:
+                # Also when this task itself is cancelled (Stop) — never leave
+                # the ramp/step controller running after the burst is over.
+                monitor.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await monitor
         else:
             if key_pool_entries:
                 assignments = _distribute(count, len(key_pool_entries))
@@ -747,6 +760,7 @@ class SendRequestsTask(Task):
             final = stages_out[-1]
             result["final_stage_p99_latency_ms"] = final["p99_latency_ms"]
             result["final_stage_error_rate_pct"] = final["error_rate_pct"]
+            result["final_stage_throttled_pct"] = final["throttled_pct"]
             best = max(stages_out, key=lambda st: st["requests_per_s"])
             ctx.shared_state["task_summary"] = (
                 f"{len(stages_out)} steps up to {final['concurrency']} in flight · peak "

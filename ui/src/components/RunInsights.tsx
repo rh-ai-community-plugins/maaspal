@@ -90,9 +90,12 @@ function ErrorSamples({ s }: { s: TrafficSummary }) {
 }
 
 export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
+  // Open as a chart when the scenario marked this burst as the one that
+  // answers its question; any burst can be switched either way.
+  const [expanded, setExpanded] = useState(!!burst.chart);
   const s = burst.summary;
   if (s.stages?.length) return <StagesPanel burst={burst} />;
-  if (!burst.chart) return <TrafficLine burst={burst} />;
+  if (!expanded) return <TrafficLine burst={burst} onToggle={() => setExpanded(true)} />;
   const retries =
     s.http_attempts !== undefined && s.total_requests !== undefined && s.http_attempts > s.total_requests
       ? s.http_attempts - s.total_requests
@@ -101,7 +104,12 @@ export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
   const heading = burst.label ? `${formatTaskName(burst.task)} — ${burst.label}` : formatTaskName(burst.task);
   return (
     <section className="maaspal-panel" aria-label={`Traffic: ${heading}`}>
-      <p className="maaspal-panel__title">Traffic · {heading}</p>
+      <div className="maaspal-panel__header">
+        <p className="maaspal-panel__title">Traffic · {heading}</p>
+        <Button variant="link" isInline onClick={() => setExpanded(false)} aria-expanded>
+          Show summary
+        </Button>
+      </div>
       <div className="maaspal-stat-row">
         <Stat
           label="Requests"
@@ -162,6 +170,7 @@ export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
 /** Several bursts drawn on one timeline (a chart_group) — e.g. before and
  * after waiting out a rate-limit window, or user A then user B. */
 export function TrafficGroupPanel({ bursts }: { bursts: TrafficBurst[] }) {
+  const [showChart, setShowChart] = useState(bursts.some((b) => b.chart));
   const sorted = [...bursts].sort((a, b) => (a.t0 ?? 0) - (b.t0 ?? 0));
   const start = sorted[0]?.t0 ?? 0;
   const segments = sorted.map((b) => ({
@@ -172,13 +181,20 @@ export function TrafficGroupPanel({ bursts }: { bursts: TrafficBurst[] }) {
   const limit = sorted.find((b) => b.limit != null)?.limit ?? null;
   return (
     <section className="maaspal-panel" aria-label="Traffic">
-      <p className="maaspal-panel__title">Traffic</p>
+      <div className="maaspal-panel__header">
+        <p className="maaspal-panel__title">Traffic</p>
+        <Button variant="link" isInline onClick={() => setShowChart((v) => !v)} aria-expanded={showChart}>
+          {showChart ? 'Hide chart' : 'Show chart'}
+        </Button>
+      </div>
       {sorted.map((b) => (
         <TrafficLine key={b.result_key} burst={b} bare />
       ))}
-      <div style={{ marginTop: '0.6rem' }}>
-        <TrafficChart segments={segments} limit={limit} />
-      </div>
+      {showChart && (
+        <div style={{ marginTop: '0.6rem' }}>
+          <TrafficChart segments={segments} limit={limit} />
+        </div>
+      )}
     </section>
   );
 }
@@ -287,7 +303,15 @@ function StagesPanel({ burst }: { burst: TrafficBurst }) {
 
 /** One line for a burst whose shape over time doesn't answer the scenario's
  * question (e.g. "3 requests · 3 denied") — the numbers, without a chart. */
-function TrafficLine({ burst, bare = false }: { burst: TrafficBurst; bare?: boolean }) {
+function TrafficLine({
+  burst,
+  bare = false,
+  onToggle,
+}: {
+  burst: TrafficBurst;
+  bare?: boolean;
+  onToggle?: () => void;
+}) {
   const s = burst.summary;
   const heading = burst.label ? `${formatTaskName(burst.task)} — ${burst.label}` : formatTaskName(burst.task);
   const firstError = !s.success_count ? s.error_samples?.[0] : undefined;
@@ -299,6 +323,11 @@ function TrafficLine({ burst, bare = false }: { burst: TrafficBurst; bare?: bool
         {n(s.p50_latency_ms)} ms
         {s.tokens_before_first_429 !== undefined && ` · throttled after ${n(s.tokens_before_first_429)} tokens`}
       </span>
+      {onToggle && burst.timeline.length > 0 && (
+        <Button variant="link" isInline onClick={onToggle} aria-expanded={false} className="maaspal-traffic-line__toggle">
+          Show chart
+        </Button>
+      )}
       {firstError && (
         <span className="maaspal-traffic-line__error">
           most common error: {n(firstError.count)}× <code>{firstError.message}</code>

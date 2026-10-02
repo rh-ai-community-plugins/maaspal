@@ -262,3 +262,32 @@ test('step load shows a row per step and charts throughput and p95 by step', () 
   expect(screen.getByRole('img', { name: 'Throughput by concurrency step' })).toBeInTheDocument();
   expect(screen.getByRole('img', { name: 'p95 latency by concurrency step' })).toBeInTheDocument();
 });
+
+
+test('any burst can switch between its one-line summary and the full chart', () => {
+  render(<TrafficPanel burst={{ ...burst, chart: false }} />);
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show chart' }));
+  expect(screen.getByRole('img', { name: /tokens served over time/i })).toBeInTheDocument();
+  expect(screen.getByText('Throttled after')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show summary' }));
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+});
+
+test('a grouped chart can be hidden and shown again', () => {
+  const base = { task: 'send_requests', chart: true, chart_group: 'g', limit: 50 };
+  render(
+    <TrafficGroupPanel
+      bursts={[
+        { ...base, result_key: 'a', label: 'A', t0: 1, summary: { total_requests: 1, success_count: 1 }, timeline: [[0.1, 20, 'ok', 50]] },
+        { ...base, result_key: 'b', label: 'B', t0: 5, summary: { total_requests: 1, success_count: 1 }, timeline: [[0.1, 20, 'ok', 50]] },
+      ]}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Hide chart' }));
+  expect(screen.queryByRole('img')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Show chart' }));
+  expect(screen.getByRole('img')).toBeInTheDocument();
+});

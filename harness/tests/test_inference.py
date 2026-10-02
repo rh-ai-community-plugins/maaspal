@@ -1004,6 +1004,28 @@ async def test_skip_unless_skips_when_precondition_missing() -> None:
     assert ctx.shared_state["task_summary"].startswith("Skipped")
 
 
+async def test_step_load_narration_names_the_step_not_the_request_cap() -> None:
+    limiter = _WindowedLimiter(limit=10**9, window_s=60.0, latency_s=0.05)
+    summaries: list[str] = []
+
+    async def _emit() -> None:
+        summaries.append(ctx.shared_state.get("task_summary", ""))
+
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = limiter.create
+        mock_cls.return_value = m
+        ctx = _make_ctx()
+        ctx.emit_assertion_state = _emit
+        await SendRequestsTask(
+            "send_requests",
+            {"url": "http://m.test", "token": "sk-t", "stages": "1,2", "stage_duration_s": "0.3"},
+        ).run(ctx)
+    live = [s for s in summaries if s.startswith("Step")]
+    assert live and all("1000000000" not in s for s in summaries)
+    assert any(s.startswith("Step 2/2: 2 in flight") for s in live)
+
+
 async def test_step_load_reports_each_concurrency_step() -> None:
     """A slow model (2 slots, 50 ms each ≈ 40 req/s ceiling): throughput
     rises from 1 to 2 in flight, then flattens while latency climbs at 4."""
@@ -1024,7 +1046,10 @@ async def test_step_load_reports_each_concurrency_step() -> None:
     assert stages[1]["requests_per_s"] > stages[0]["requests_per_s"] * 1.5
     assert stages[2]["p50_latency_ms"] > stages[1]["p50_latency_ms"] * 1.5
     assert ir["final_stage_p99_latency_ms"] == stages[-1]["p99_latency_ms"]
+    assert ir["final_stage_throttled_pct"] == 0
     assert "3 steps up to 4 in flight" in ctx.shared_state["task_summary"]
+    # The internal request cap must never surface as a "planned" count.
+    assert ctx.shared_state["_traffic"]["inference_results"]["planned"] is None
 
 
 async def test_bursts_carry_their_chart_group_label_and_start_time() -> None:

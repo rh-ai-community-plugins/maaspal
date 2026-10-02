@@ -49,3 +49,15 @@ Deleting the run's pod turned out to be unsafe. The Job had the default `backoff
 - The run's Job is found through the pod's `ownerReference`, so this also works for Jobs created before they carried the run-id label.
 - It needs `patch` on `jobs` (`deploy/rbac.yaml`). Without it, `stop_run` falls back to deleting the pod and logs a warning.
 - Suspended Jobs never complete, so their TTL never fires. The API deletes a stopped run's Job once it has recorded the run as CANCELLED.
+
+## Update: a stop that never finished
+
+Confirmed live on a stopped `load_test` run: cleanup completed, but the harness never wrote its result, the pod lingered until SIGKILL, and the run stayed `RUNNING`. The cause was the background metrics poller.
+- After the stop, `_interruptible_sleep` returned without yielding, because waiting on an already-set Event never suspends.
+- The poller had nothing to query, because its checks referenced values a stopped run never produces.
+- Together that made a loop that starved the event loop, so it could never be cancelled.
+
+**Fixes:**
+- The sleep always yields, and the poller exits on stop.
+- The pooled request workers cancel their ramp or step controller on the way out.
+- As a backstop, the API finalizes a run whose Job is suspended or failed, whose pod is gone, and which never wrote a result.

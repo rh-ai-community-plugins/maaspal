@@ -1444,3 +1444,78 @@ def test_metrics_charts_sample_maas_and_harness_side_by_side(
     maas_values = [p[1] for p in chart["points"]]
     assert maas_values[-1] == 45.0  # converged on what was sent
     assert all(p[2] == 45.0 for p in chart["points"] if p[1] == 45.0)
+
+
+def test_stop_with_unresolvable_metrics_checks_still_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (confirmed live): after a Stop, a promql check whose
+    ${harness.x} value never appears left the metrics poller with nothing to
+    query, and its sleep returned instantly once the stop event was set — a
+    loop that never yielded, so cancelling it hung the run until SIGKILL and
+    no result was ever written."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+
+    async def fake_fetch_metrics(base_url: str, queries: dict, token: str) -> dict:
+        return {}
+
+    monkeypatch.setattr(runner_module, "fetch_metrics", fake_fetch_metrics)
+
+    class _Slow(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            await asyncio.sleep(30)
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_slow_stop"] = _Slow
+    try:
+        path = _write(tmp_path, """
+            name: test_stop_hang
+            config:
+              MAAS_METRICS_URL: "http://thanos.test/api/v1/query"
+            tasks:
+              - name: _slow_stop
+                assertions:
+                  never_resolves:
+                    promql: "${harness.inference_results.final_stage_p99_latency_ms}"
+                    expect: "< 100"
+        """)
+
+        async def _go():
+            stop = asyncio.Event()
+            runner = ScenarioRunner(path, "stop-hang-001", stop_event=stop)
+            task = asyncio.create_task(runner.run())
+            await asyncio.sleep(0.2)
+            stop.set()
+            return await asyncio.wait_for(task, timeout=5)
+
+        result = asyncio.run(_go())
+    finally:
+        REGISTRY.pop("_slow_stop", None)
+
+    assert result.status == "CANCELLED"
+    payload = json.loads((tmp_path / "stop-hang-001-progress.json").read_text())
+    assert payload["verdict"]["status"] == "CANCELLED"
+
+
+def test_interruptible_sleep_yields_even_when_already_stopped() -> None:
+    async def _go():
+        stop = asyncio.Event()
+        stop.set()
+        runner = ScenarioRunner("unused.yaml", "r", stop_event=stop)
+        ticks = 0
+
+        async def other() -> None:
+            nonlocal ticks
+            ticks += 1
+
+        task = asyncio.create_task(other())
+        await runner._interruptible_sleep(5)
+        await task
+        return ticks
+
+    assert asyncio.run(_go()) == 1

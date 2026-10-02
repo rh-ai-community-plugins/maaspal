@@ -378,9 +378,19 @@ class ScenarioRunner:
         self._stop_event = stop_event
 
     async def _interruptible_sleep(self, seconds: float) -> None:
-        """Like asyncio.sleep, but wakes immediately if a stop is requested."""
+        """Like asyncio.sleep, but wakes immediately if a stop is requested.
+
+        Always yields to the event loop. Waiting on an already-set Event
+        completes without suspending, so without the explicit sleep(0) a loop
+        calling this after a stop could spin forever, starving every other
+        task — including the cancellation meant to end it (confirmed live:
+        a stopped run hung after cleanup until SIGKILL, never writing its
+        result)."""
         if not self._stop_event:
             await asyncio.sleep(seconds)
+            return
+        if self._stop_event.is_set():
+            await asyncio.sleep(0)
             return
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
@@ -676,7 +686,9 @@ class ScenarioRunner:
                 elapsed += _METRICS_FINAL_POLL_INTERVAL_S
 
         async def _metrics_bg() -> None:
-            while True:
+            # Nothing left to poll for once a stop is requested — the
+            # top-level settle after cleanup does its own final fetch.
+            while not (self._stop_event and self._stop_event.is_set()):
                 await _fetch_metrics_once()
                 if shared_state.get("metrics"):
                     await emit()

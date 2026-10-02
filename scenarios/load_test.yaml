@@ -5,19 +5,25 @@ summary: >-
   Steps up concurrent traffic through MaaS and shows where latency or errors
   start to climb — telling throttling by your subscription apart from real failures.
 description: >-
-  Creates one or more API keys and sends continuous traffic through the MaaS
-  gateway in steps of rising concurrency (5, then 10, 25 and 50 requests in
+  Creates a temporary subscription with an effectively unlimited token limit
+  for the chosen model (so quota can't be what slows things down — any 429
+  here is itself a finding), creates API keys on it, and sends continuous
+  traffic through the MaaS gateway in steps of rising concurrency (5, then 10, 25 and 50 requests in
   flight by default, 30 s each). For each step it reports throughput,
   latency and errors, so you can see where things start to struggle rather
-  than one averaged number. Throttling (429) by your subscription's own limit
-  is reported separately from genuine errors. Pass/fail is judged at the
-  heaviest step.
+  than one averaged number. Throttling (429) is reported separately from
+  genuine errors — with unlimited quota, any 429 points at a limit somewhere
+  else (e.g. another policy on the gateway). Pass/fail is judged at the
+  heaviest step. The model needs an auth policy that admits authenticated
+  users (most do); if not, requests are denied and the error reasons say so.
 category: "Performance"
-kind: verify
-mutates: [api_keys]
+kind: explore
+mutates: [api_keys, subscriptions]
+requires: [target_model_name, target_model_namespace]
 est_duration: "~2–3 min"
 plan_template: >-
-  Create ${config.key_count} API key(s) on ${subscription}, then send to ${model} with
+  Create a temporary unlimited subscription for ${model} and ${config.key_count} API key(s)
+  on it, then send with
   ${config.concurrency_steps} requests in flight, ${config.step_duration_s}s per step.
 inputs:
   target_model_name: {label: "Model"}
@@ -43,8 +49,17 @@ inputs:
   prompt:
     advanced: true
     help: "The chat message sent in every request."
-  subscription:
-    help: "Leave on auto-select to let MaaS pick, as it would for a real user (highest-priority subscription you're eligible for)."
+  token_limit:
+    advanced: true
+    help: >-
+      The temporary subscription's token limit, per second. Deliberately far
+      above anything a load test can send, so quota never throttles it.
+  new_subscription_name:
+    advanced: true
+    help: "Name of the temporary MaaSSubscription this run creates and deletes afterwards."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions live in on this cluster (the MaaS tenant namespace)."
 config:
   concurrency_steps: "5, 10, 25, 50"
   step_duration_s: 30
@@ -52,12 +67,14 @@ config:
   max_error_rate_pct: 5
   max_p99_latency_ms: 10000
   prompt: "Hello, world!"
-  subscription: ""           # optional — leave blank for auto-selection
-  target_model_name: ""      # optional — blank uses DEFAULT_MODEL
+  target_model_name: ""
   target_model_namespace: ""
+  token_limit: 1000000000
+  new_subscription_name: "maaspal-load-test"
+  subscription_namespace: "models-as-a-service"
 verdict:
   pass: >-
-    MaaS held up through every step: at the heaviest step, p99 was
+    MaaS held up through every step without throttling: at the heaviest step, p99 was
     ${harness.inference_results.final_stage_p99_latency_ms} ms with
     ${harness.inference_results.final_stage_error_rate_pct}% errors.
   fail: >-
@@ -65,11 +82,19 @@ verdict:
     ${harness.inference_results.final_stage_p99_latency_ms} ms,
     ${harness.inference_results.final_stage_error_rate_pct}% errors. The step table shows where it started.
 tasks:
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.token_limit}"
+      token_window: "1s"
   - name: provision_api_key
     params:
       key_name: "maaspal-load-key"
       count: "${config.key_count}"
-      subscription: "${config.subscription}"
+      subscription: "${config.new_subscription_name}"
   - name: send_requests
     params:
       stages: "${config.concurrency_steps}"
@@ -84,6 +109,12 @@ tasks:
         unit: "%"
         promql: "${harness.inference_results.final_stage_error_rate_pct}"
         expect: "< ${config.max_error_rate_pct}"
+      final_stage_throttled_pct:
+        label: "Throttled at the heaviest step"
+        description: "Should be none — this run's subscription is effectively unlimited."
+        unit: "%"
+        promql: "${harness.inference_results.final_stage_throttled_pct}"
+        expect: "== 0"
       final_stage_p99_latency_ms:
         label: "p99 latency at the heaviest step"
         unit: "ms"
