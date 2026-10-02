@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@patternfly/react-core';
 import type {
+  ErrorSample,
   LoadStage,
   MetricsChart,
   RunFinding,
@@ -76,13 +77,42 @@ function outcomeBreakdown(s: TrafficSummary): string {
 /** Why requests failed — the most common error messages, so a burst that
  * failed for a reason the counts can't name explains itself. */
 function ErrorSamples({ s }: { s: TrafficSummary }) {
-  const samples = s.error_samples ?? [];
+  return <ErrorList samples={s.error_samples ?? []} label="Most common errors" />;
+}
+
+/** What the attempts the SDK retried on its own got back — failures callers
+ * never saw, but the gateway did. */
+function RetriedAttempts({ s }: { s: TrafficSummary }) {
+  const retried = s.retried_failed_attempts ?? 0;
+  const samples = s.attempt_error_samples ?? [];
+  if (retried <= 0 || samples.length === 0) return null;
+  return (
+    <>
+      <p className="maaspal-stages__retries">
+        The SDK retried {n(retried)} failed attempt{retried === 1 ? '' : 's'} on its own, as a real client would —
+        callers never saw {retried === 1 ? 'it' : 'them'}. What those attempts got back:
+      </p>
+      <ErrorList samples={samples} label="Failed attempts the SDK retried" />
+    </>
+  );
+}
+
+function ErrorList({ samples, label }: { samples: ErrorSample[]; label: string }) {
   if (samples.length === 0) return null;
   return (
-    <ul className="maaspal-error-samples" aria-label="Most common errors">
+    <ul className="maaspal-error-samples" aria-label={label}>
       {samples.map((e) => (
         <li key={e.message}>
           <strong>{n(e.count)}×</strong> <code>{e.message}</code>
+          {e.median_ms !== undefined && (
+            <span className="maaspal-error-samples__timing">
+              {' '}
+              after {n(e.median_ms)} ms
+              {e.p10_ms !== undefined && e.p90_ms !== undefined && e.p90_ms > e.p10_ms
+                ? ` (most ${n(e.p10_ms)}–${n(e.p90_ms)} ms)`
+                : ''}
+            </span>
+          )}
         </li>
       ))}
     </ul>
@@ -162,6 +192,7 @@ export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
         )}
       </div>
       <ErrorSamples s={s} />
+      <RetriedAttempts s={s} />
       <TrafficChart timeline={burst.timeline} limit={burst.limit ?? null} />
     </section>
   );
@@ -256,7 +287,9 @@ function StepChart({
 /** Step load: one row per concurrency step, plus throughput and p95 by step
  * — where MaaS starts to struggle, not one averaged number. */
 function StagesPanel({ burst }: { burst: TrafficBurst }) {
-  const stages = burst.summary.stages ?? [];
+  const s = burst.summary;
+  const stages = s.stages ?? [];
+  const showAttempts = stages.some((st) => (st.failed_attempts_pct ?? 0) > 0);
   return (
     <section className="maaspal-panel" aria-label="Load steps">
       <p className="maaspal-panel__title">Load by step</p>
@@ -273,6 +306,11 @@ function StagesPanel({ burst }: { burst: TrafficBurst }) {
               <th>p99</th>
               <th>Errors</th>
               <th>Throttled</th>
+              {showAttempts && (
+                <th title="Share of all HTTP attempts that failed, including ones the SDK retried — the gateway can start failing before callers notice">
+                  Failed attempts
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -287,16 +325,21 @@ function StagesPanel({ burst }: { burst: TrafficBurst }) {
                 <td>{n(st.p99_latency_ms)} ms</td>
                 <td>{st.error_rate_pct}%</td>
                 <td>{st.throttled_pct}%</td>
+                {showAttempts && <td>{st.failed_attempts_pct ?? 0}%</td>}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <ErrorSamples s={burst.summary} />
+      <ErrorSamples s={s} />
+      <RetriedAttempts s={s} />
       <div className="maaspal-chart-grid" style={{ marginTop: '0.75rem' }}>
         <StepChart title="Throughput" unit="req/s" stages={stages} value={(st) => st.requests_per_s} />
         <StepChart title="p95 latency" unit="ms" stages={stages} value={(st) => st.p95_latency_ms} />
       </div>
+      {/* The same tokens-over-time chart the panel showed while running,
+          so it doesn't disappear once the step table arrives. */}
+      <TrafficChart timeline={burst.timeline} limit={burst.limit ?? null} />
     </section>
   );
 }

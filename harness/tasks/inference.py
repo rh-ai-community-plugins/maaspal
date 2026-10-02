@@ -151,6 +151,58 @@ def _summary_line(r: dict, planned: int | None) -> str:
     return " · ".join(parts)
 
 
+def _latency_spread(values: list[float]) -> dict:
+    """Median and 10th–90th percentile latency of one failure reason."""
+    if not values:
+        return {}
+    ordered = sorted(values)
+    pick = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))]  # noqa: E731
+    return {
+        "median_ms": round(pick(0.5), 1),
+        "p10_ms": round(pick(0.1), 1),
+        "p90_ms": round(pick(0.9), 1),
+    }
+
+
+def _timing_text(sample: dict) -> str:
+    """", each after about 202 ms — …" for a failure reason whose times
+    cluster tightly (a timeout's signature), else its typical time."""
+    median, p10, p90 = sample.get("median_ms"), sample.get("p10_ms"), sample.get("p90_ms")
+    if median is None or p10 is None or p90 is None:
+        return ""
+    if sample.get("count", 0) >= 5 and median > 0 and (p90 - p10) <= 0.15 * median:
+        return (
+            f", each after about {median:,.0f} ms — the same time every time, which"
+            " looks like a timeout somewhere in the path rather than the model"
+        )
+    return f", typically after {median:,.0f} ms"
+
+
+def _errors_note(result: dict) -> str | None:
+    """Sentences about genuine (non-429) failures — the ones callers got and
+    the ones the SDK retried away — appended to the verdict so a passing load
+    test never reads as if nothing failed."""
+    sentences = []
+    samples = result.get("error_samples") or []
+    failed = (result.get("fail_count") or 0) - (result.get("rate_limited_count") or 0)
+    if failed > 0 and samples:
+        top = samples[0]
+        sentences.append(
+            f"{failed:,} request{'s' if failed != 1 else ''} failed, most often"
+            f" {top['message']} ({top['count']:,}×){_timing_text(top)}."
+        )
+    retried = result.get("retried_failed_attempts") or 0
+    attempt_samples = result.get("attempt_error_samples") or []
+    if retried > 0 and attempt_samples:
+        top = attempt_samples[0]
+        sentences.append(
+            f"The SDK also retried {retried:,} failed attempt{'s' if retried != 1 else ''}"
+            f" that callers never saw — most often {top['message']} ({top['count']:,}×)"
+            f"{_timing_text(top)}."
+        )
+    return " ".join(sentences) or None
+
+
 def _float_or_none(value: object, shared_state: dict, ref: object) -> float | None:
     """A number from an explicit param, else from shared_state["ns"]["key"]."""
     if value not in (None, ""):
@@ -287,10 +339,30 @@ class SendRequestsTask(Task):
         # numbers keeps harness-side counts comparable to gateway-side ones
         # (e.g. Limitador's limited_calls).
         http_attempts = 0
+        # Every failed attempt, including the ones the SDK retried and the
+        # caller never saw: what came back and how long it took. Retrying is
+        # part of the real client experience, so retries stay on; this is what
+        # makes them visible (e.g. gateway 500s the retries papered over).
+        attempt_failures: dict[str, list[float]] = {}
+        # Per load step: [attempts, failed attempts].
+        stage_attempts: dict[int, list[int]] = {}
 
-        async def _count_attempt(_response: httpx.Response) -> None:
+        async def _mark_attempt_start(request: httpx.Request) -> None:
+            request.extensions["maaspal_t0"] = time.monotonic()
+
+        async def _count_attempt(response: httpx.Response) -> None:
             nonlocal http_attempts
             http_attempts += 1
+            failed = response.status_code >= 400
+            if failed:
+                t0 = response.request.extensions.get("maaspal_t0")
+                took_ms = (time.monotonic() - t0) * 1000 if isinstance(t0, float) else 0.0
+                message = f"HTTP {response.status_code} {response.reason_phrase}".strip()
+                attempt_failures.setdefault(message, []).append(took_ms)
+            if stage_levels:
+                counts = stage_attempts.setdefault(stage_idx, [0, 0])
+                counts[0] += 1
+                counts[1] += int(failed)
 
         def _client(api_key: str, base_url: str) -> AsyncOpenAI:
             return AsyncOpenAI(
@@ -298,7 +370,7 @@ class SendRequestsTask(Task):
                 base_url=base_url,
                 max_retries=retries,
                 http_client=DefaultAsyncHttpxClient(
-                    event_hooks={"response": [_count_attempt]},
+                    event_hooks={"request": [_mark_attempt_start], "response": [_count_attempt]},
                     verify=not insecure_tls,
                 ),
             )
@@ -416,6 +488,12 @@ class SendRequestsTask(Task):
         not_found_count = 0
         other_error_count = 0
         error_counts: dict[str, int] = {}
+        # How long each failure reason took — a tight cluster (every 500 after
+        # ~200 ms) is the signature of a timeout in the path, not the model.
+        error_latencies: dict[str, list[float]] = {}
+        # Failures the caller actually got back as an HTTP error (after any
+        # retries) — the rest of attempt_failures were retried away.
+        final_http_failures = 0
         total_tokens_sent = 0
         prompt_tokens_sent = 0
         completion_tokens_sent = 0
@@ -462,6 +540,10 @@ class SendRequestsTask(Task):
             # The limit read off the subscription under test — the chart's
             # reference line (otherwise the scenario's own token_limit config).
             traffic_entry["limit"] = limit_tokens
+        if str(self.params.get("show_limit", "true")).lower() in ("false", "0", "no"):
+            # A limit far above the traffic (a load test's deliberately
+            # unlimited subscription) would only squash the chart flat.
+            traffic_entry["limit"] = None
         ctx.shared_state.setdefault("_traffic", {})[result_key] = {
             **traffic_entry,
             "task": self.name,
@@ -482,6 +564,7 @@ class SendRequestsTask(Task):
             nonlocal first_rate_limited_at_tokens, requests_before_first_429
             nonlocal seconds_to_first_429, successes_after_first_429, skipped
             nonlocal first_429_at, concurrency_at_first_429, max_tokens_per_request
+            nonlocal final_http_failures
             async with sem:
                 if (stop_after_429s and rate_limited_count >= stop_after_429s) or stop_reason:
                     skipped += 1
@@ -489,6 +572,7 @@ class SendRequestsTask(Task):
                 t0 = time.monotonic()
                 my_stage = stage_idx
                 status_class = "ok"
+                error_message: str | None = None
                 effective_model = (key_models[client_idx] if key_models else None) or model
                 try:
                     response = await clients[client_idx].chat.completions.create(
@@ -514,6 +598,7 @@ class SendRequestsTask(Task):
                         completion_tokens_sent += int(completion_tokens)
                 except APIStatusError as exc:
                     fail += 1
+                    final_http_failures += 1
                     status_class = _status_class(exc.status_code)
                     if exc.status_code == 429:
                         rate_limited_count += 1
@@ -534,8 +619,8 @@ class SendRequestsTask(Task):
                     # Error reasons are for genuine failures; throttling has its
                     # own counters (and is often the expected outcome).
                     if exc.status_code != 429:
-                        message = _error_message(exc)
-                        error_counts[message] = error_counts.get(message, 0) + 1
+                        error_message = _error_message(exc)
+                        error_counts[error_message] = error_counts.get(error_message, 0) + 1
                     print(
                         f"[send_requests] request failed: status={exc.status_code} {exc}",
                         flush=True,
@@ -544,12 +629,14 @@ class SendRequestsTask(Task):
                     fail += 1
                     other_error_count += 1
                     status_class = "error"
-                    message = _error_message(exc)
-                    error_counts[message] = error_counts.get(message, 0) + 1
-                    print(f"[send_requests] request failed: {message}", flush=True)
+                    error_message = _error_message(exc)
+                    error_counts[error_message] = error_counts.get(error_message, 0) + 1
+                    print(f"[send_requests] request failed: {error_message}", flush=True)
 
                 latency_ms = (time.monotonic() - t0) * 1000
                 latencies.append(latency_ms)
+                if error_message is not None:
+                    error_latencies.setdefault(error_message, []).append(latency_ms)
                 if stage_levels:
                     acc = stage_acc[my_stage]
                     acc["latencies"].append(latency_ms)
@@ -570,6 +657,14 @@ class SendRequestsTask(Task):
                 result_data = {
                     "total_requests": total,
                     "http_attempts": http_attempts,
+                    "failed_attempts": sum(len(v) for v in attempt_failures.values()),
+                    "retried_failed_attempts": max(
+                        0, sum(len(v) for v in attempt_failures.values()) - final_http_failures
+                    ),
+                    "attempt_error_samples": [
+                        {"message": m, "count": len(v), **_latency_spread(v)}
+                        for m, v in sorted(attempt_failures.items(), key=lambda kv: -len(kv[1]))[:3]
+                    ],
                     "success_count": success,
                     "fail_count": fail,
                     "rate_limited_count": rate_limited_count,
@@ -579,7 +674,7 @@ class SendRequestsTask(Task):
                     "other_error_count": other_error_count,
                     # The three most common failure reasons, for the run page.
                     "error_samples": [
-                        {"message": m, "count": c}
+                        {"message": m, "count": c, **_latency_spread(error_latencies.get(m) or [])}
                         for m, c in sorted(error_counts.items(), key=lambda kv: -kv[1])[:3]
                     ],
                     "error_rate_pct": (fail / total * 100) if total > 0 else 0.0,
@@ -741,8 +836,9 @@ class SendRequestsTask(Task):
         result = ctx.shared_state.get(result_key)
         if stage_levels and result is not None:
             stages_out = []
-            for level, acc in zip(stage_levels, stage_acc, strict=True):
+            for i, (level, acc) in enumerate(zip(stage_levels, stage_acc, strict=True)):
                 n = len(acc["latencies"])
+                attempts, failed_attempts = stage_attempts.get(i, [0, 0])
                 pct = _percentiles(acc["latencies"])
                 stages_out.append({
                     "concurrency": level,
@@ -754,6 +850,10 @@ class SendRequestsTask(Task):
                     "p99_latency_ms": round(pct["p99_latency_ms"], 1),
                     "error_rate_pct": round(acc["errors"] / n * 100, 2) if n else 0.0,
                     "throttled_pct": round(acc["throttled"] / n * 100, 2) if n else 0.0,
+                    # Every HTTP attempt in the step, SDK retries included — a
+                    # gateway can start failing a step before callers notice.
+                    "http_attempts": attempts,
+                    "failed_attempts_pct": round(failed_attempts / attempts * 100, 2) if attempts else 0.0,
                 })
             result["stages"] = stages_out
             # Pass/fail is judged at the heaviest step — the load being tested.
@@ -762,6 +862,9 @@ class SendRequestsTask(Task):
             result["final_stage_error_rate_pct"] = final["error_rate_pct"]
             result["final_stage_throttled_pct"] = final["throttled_pct"]
             best = max(stages_out, key=lambda st: st["requests_per_s"])
+            note = _errors_note(result)
+            if note:
+                ctx.shared_state["_verdict_note"] = note
             ctx.shared_state["task_summary"] = (
                 f"{len(stages_out)} steps up to {final['concurrency']} in flight · peak "
                 f"{best['requests_per_s']:g} req/s at {best['concurrency']} · p95 at the top step "

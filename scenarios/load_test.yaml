@@ -15,7 +15,9 @@ description: >-
   genuine errors — with unlimited quota, any 429 points at a limit somewhere
   else (e.g. another policy on the gateway). Pass/fail is judged at the
   heaviest step. The model needs an auth policy that admits authenticated
-  users (most do); if not, requests are denied and the error reasons say so.
+  users (most do); if not, requests are denied and the error reasons say so. Requests use the
+  OpenAI SDK's normal automatic retries, as a real client would; failed
+  attempts it retried are counted and shown separately, with what they got back.
 category: "Performance"
 kind: explore
 mutates: [api_keys, subscriptions]
@@ -74,9 +76,9 @@ config:
   subscription_namespace: "models-as-a-service"
 verdict:
   pass: >-
-    MaaS held up through every step without throttling: at the heaviest step, p99 was
+    Within the targets at the heaviest step: p99
     ${harness.inference_results.final_stage_p99_latency_ms} ms with
-    ${harness.inference_results.final_stage_error_rate_pct}% errors.
+    ${harness.inference_results.final_stage_error_rate_pct}% errors, and no throttling.
   fail: >-
     At the heaviest step MaaS missed the targets — p99
     ${harness.inference_results.final_stage_p99_latency_ms} ms,
@@ -102,6 +104,7 @@ tasks:
       prompt: "${config.prompt}"
       model: "${config.target_model_namespace}/${config.target_model_name}"
       key_pool: true
+      show_limit: false
     assertions:
       final_stage_error_rate_pct:
         label: "Error rate at the heaviest step (excluding throttling)"

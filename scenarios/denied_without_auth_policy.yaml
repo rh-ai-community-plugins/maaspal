@@ -26,7 +26,7 @@ inputs:
   request_count: {label: "Requests"}
   model_namespace:
     label: "Namespace for the throwaway model"
-    help: "Must carry the maas.opendatahub.io/gateway-access label (e.g. llm)."
+    help: "Must carry the maas.opendatahub.io/gateway-access label (make deploy labels maaspal)."
   token_limit:
     advanced: true
     help: "Deliberately generous — rate limiting must not be why requests fail here."
@@ -55,9 +55,9 @@ config:
   new_subscription_name: "maaspal-fail-closed-test"
   subscription_namespace: "models-as-a-service"
   model_name_prefix: "maaspal-fail-closed-model"
-  # Confirmed-live reconciliation namespace (the cluster's simulator model
-  # lives here) — NOT "maaspal" (deploy_simulated_model's own default).
-  model_namespace: "llm"
+  # MaaS:PAL's own namespace (make deploy gives it the gateway-access label),
+  # so throwaway models never land among the cluster's real ones.
+  model_namespace: "maaspal"
   model_ready_timeout: 120
   token_limit: 1000000
   request_count: 20

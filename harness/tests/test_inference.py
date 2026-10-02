@@ -1057,3 +1057,102 @@ async def test_bursts_carry_their_chart_group_label_and_start_time() -> None:
     entry = state["_traffic"]["inference_results"]
     assert (entry["chart_group"], entry["label"]) == ("recovery", "Before the wait")
     assert entry["t0"] > 0
+
+
+async def test_error_samples_carry_how_long_each_failure_took() -> None:
+    state = await _run_sequence([_usage_response(), _api_status_error(500), _api_status_error(500)])
+    sample = state["inference_results"]["error_samples"][0]
+    assert sample["count"] == 2
+    assert {"median_ms", "p10_ms", "p90_ms"} <= sample.keys()
+
+
+def test_errors_note_flags_a_constant_failure_time_as_a_timeout() -> None:
+    from harness.tasks.inference import _errors_note
+
+    result = {
+        "fail_count": 77, "rate_limited_count": 0,
+        "error_samples": [{"message": "HTTP 500 Internal Server Error", "count": 77,
+                           "median_ms": 202.0, "p10_ms": 200.5, "p90_ms": 215.0}],
+    }
+    note = _errors_note(result)
+    assert note is not None and note.startswith("77 requests failed")
+    assert "about 202 ms" in note and "timeout" in note
+    # Spread-out failure times are reported without the timeout reading.
+    result["error_samples"][0].update(p10_ms=50.0, p90_ms=900.0)
+    assert "timeout" not in (_errors_note(result) or "")
+    # Throttling alone isn't a failure worth a note.
+    assert _errors_note({"fail_count": 3, "rate_limited_count": 3, "error_samples": []}) is None
+    # Failures the SDK retried away are reported too, even with no visible failure.
+    retried = _errors_note({
+        "fail_count": 0, "rate_limited_count": 0, "retried_failed_attempts": 1381,
+        "attempt_error_samples": [{"message": "HTTP 500 Internal Server Error", "count": 1381,
+                                   "median_ms": 202.0, "p10_ms": 200.0, "p90_ms": 220.0}],
+    })
+    assert retried is not None and retried.startswith("The SDK also retried 1,381 failed attempts")
+    assert "timeout" in retried
+
+
+async def test_step_load_with_failures_adds_a_verdict_note() -> None:
+    calls = {"n": 0}
+
+    async def create(**_):
+        calls["n"] += 1
+        await asyncio.sleep(0.005)  # a real call yields; lets the step timer run
+        if calls["n"] % 4 == 0:
+            raise _api_status_error(500)
+        return _usage_response()
+
+    with patch("harness.tasks.inference.AsyncOpenAI") as mock_cls:
+        m = MagicMock()
+        m.chat.completions.create = create
+        mock_cls.return_value = m
+        ctx = _make_ctx()
+        await SendRequestsTask(
+            "send_requests",
+            {"url": "http://m.test", "token": "sk-t", "stages": "1", "stage_duration_s": "0.2"},
+        ).run(ctx)
+    assert "failed, most often" in ctx.shared_state["_verdict_note"]
+
+
+async def test_show_limit_false_hides_the_chart_limit_line() -> None:
+    state = await _run_sequence([_usage_response()], show_limit="false", limit="1000")
+    assert state["_traffic"]["inference_results"]["limit"] is None
+
+
+async def test_failed_attempts_the_sdk_retried_are_counted_and_described() -> None:
+    """Retries stay on (the real client experience); the attempts they hid
+    are still counted, with what they got back. Drives a real httpx
+    transport so the SDK's own retry loop runs."""
+    # The OpenAI SDK's client is built on httpx2 (an httpx fork), so the
+    # mock transport has to come from there too.
+    httpx2 = pytest.importorskip("httpx2")
+    calls = {"n": 0}
+
+    def handler(request):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] % 2 == 1:
+            return httpx2.Response(500, text="Internal Server Error")
+        return httpx2.Response(200, json={
+            "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "hi"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+        })
+
+    from openai import DefaultAsyncHttpxClient
+
+    def client_with_mock_transport(**kwargs):
+        return DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler), **kwargs)
+
+    with patch("harness.tasks.inference.DefaultAsyncHttpxClient", client_with_mock_transport), \
+         patch("openai._base_client.AsyncAPIClient._calculate_retry_timeout", return_value=0.0):
+        ctx = _make_ctx()
+        await SendRequestsTask(
+            "send_requests", {"url": "http://m.test/v1", "token": "sk-t", "count": "3", "concurrency": "1"}
+        ).run(ctx)
+    r = ctx.shared_state["inference_results"]
+    assert r["success_count"] == 3 and r["fail_count"] == 0
+    assert r["http_attempts"] == 6
+    assert r["retried_failed_attempts"] == 3
+    assert r["attempt_error_samples"][0]["message"] == "HTTP 500 Internal Server Error"
+    assert r["attempt_error_samples"][0]["count"] == 3

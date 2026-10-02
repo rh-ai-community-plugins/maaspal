@@ -263,6 +263,34 @@ test('step load shows a row per step and charts throughput and p95 by step', () 
   expect(screen.getByRole('img', { name: 'p95 latency by concurrency step' })).toBeInTheDocument();
 });
 
+test('step load keeps the tokens-over-time chart and shows what retried attempts got back', () => {
+  render(
+    <TrafficPanel
+      burst={{
+        task: 'send_requests', result_key: 'l', limit: null,
+        summary: {
+          total_requests: 100, http_attempts: 130, success_count: 99,
+          error_samples: [{ message: 'HTTP 500 Internal Server Error', count: 1, median_ms: 202, p10_ms: 200, p90_ms: 210 }],
+          failed_attempts: 31, retried_failed_attempts: 30,
+          attempt_error_samples: [{ message: 'HTTP 500 Internal Server Error', count: 31, median_ms: 203 }],
+          stages: [{
+            concurrency: 5, requests: 100, requests_per_s: 3, tokens_per_s: 75, p50_latency_ms: 50,
+            p95_latency_ms: 90, p99_latency_ms: 99, error_rate_pct: 1, throttled_pct: 0,
+            http_attempts: 130, failed_attempts_pct: 23.85,
+          }],
+        },
+        timeline: [[0.1, 25, 'ok', 50], [0.2, 50, 'error', 202]],
+      }}
+    />,
+  );
+  expect(screen.getByRole('img', { name: /2 requests over/ })).toBeInTheDocument();
+  expect(screen.getByText(/The SDK retried 30 failed attempts/)).toBeInTheDocument();
+  expect(screen.getByRole('list', { name: 'Failed attempts the SDK retried' })).toHaveTextContent('31×');
+  expect(screen.getByText(/after 202 ms/)).toBeInTheDocument();
+  expect(screen.getByRole('columnheader', { name: 'Failed attempts' })).toBeInTheDocument();
+  expect(screen.getByText('23.85%')).toBeInTheDocument();
+});
+
 
 test('any burst can switch between its one-line summary and the full chart', () => {
   render(<TrafficPanel burst={{ ...burst, chart: false }} />);

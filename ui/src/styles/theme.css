@@ -816,6 +816,16 @@
   gap: 0.2rem;
 }
 
+.maaspal-error-samples__timing {
+  color: #6a6e73;
+}
+
+.maaspal-stages__retries {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  color: #6a6e73;
+}
+
 .maaspal-traffic-line__error {
   flex-basis: 100%;
   color: #c62828;

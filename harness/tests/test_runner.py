@@ -1519,3 +1519,12 @@ def test_interruptible_sleep_yields_even_when_already_stopped() -> None:
         return ticks
 
     assert asyncio.run(_go()) == 1
+
+
+def test_verdict_note_is_appended_to_a_passing_verdict() -> None:
+    from harness.runner import _render_verdict
+
+    v = _render_verdict({"pass": "Within the targets."}, "PASS", {"_verdict_note": "3 requests failed."}, [])
+    assert v["text"] == "Within the targets. 3 requests failed."
+    stopped = _render_verdict({}, "CANCELLED", {"_verdict_note": "3 requests failed."}, [])
+    assert "failed" not in stopped["text"]

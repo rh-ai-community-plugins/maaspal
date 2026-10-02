@@ -177,7 +177,11 @@ export interface TrafficSummary {
   successes_after_first_429?: number;
   not_found_count?: number;
   // The most common failure reasons, e.g. "HTTP 404 Not Found".
-  error_samples?: { message: string; count: number }[];
+  error_samples?: ErrorSample[];
+  // Every failed HTTP attempt, incl. ones the SDK retried and callers never saw.
+  failed_attempts?: number;
+  retried_failed_attempts?: number;
+  attempt_error_samples?: ErrorSample[];
   // Rate-limit bursts sent "until throttled".
   allowed_overshoot?: number;
   concurrency_at_first_429?: number;
@@ -187,6 +191,14 @@ export interface TrafficSummary {
   not_throttled_bound?: string;
   // Step load: one entry per concurrency step.
   stages?: LoadStage[];
+}
+
+export interface ErrorSample {
+  message: string;
+  count: number;
+  median_ms?: number;
+  p10_ms?: number;
+  p90_ms?: number;
 }
 
 export interface LoadStage {
@@ -199,6 +211,9 @@ export interface LoadStage {
   p99_latency_ms: number;
   error_rate_pct: number;
   throttled_pct: number;
+  // SDK retries included.
+  http_attempts?: number;
+  failed_attempts_pct?: number;
 }
 
 export interface TrafficBurst {

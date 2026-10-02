@@ -15,6 +15,8 @@ Tests are composed of atomic **tasks** (e.g., provision API key, send inference 
                   - Live assertion status panel (2s poll, independent of logs)
                   - Task progress pipeline (2s poll)
                   - Results history + per-run detail view; URL hash routing (#run/<id>)
+                  - Run page narration: verdict/finding, steps with per-resource
+                    cleanup status, traffic and metrics charts, collapsible logs
                           |
                   FastAPI Backend (Deployment)
                   - Serve UI static files
@@ -22,6 +24,8 @@ Tests are composed of atomic **tasks** (e.g., provision API key, send inference 
                   - POST /api/runs  (accepts config_overrides)
                   - GET  /api/runs, /api/runs/{id}
                   - POST /api/runs/{id}/stop                  (graceful stop, see below)
+                  - POST /api/runs/{id}/auto-cleanup, /cleanup (toggle; manual "Clean Up Now")
+                  - GET  /api/maas/*                         (read-only MaaS Setup tab, ADR-017)
                   - GET  /api/runs/{id}/logs/lines?offset=N  (REST poll)
                   - GET  /api/runs/{id}/assertions            (reads PVC file)
                   - GET  /api/runs/{id}/progress              (reads PVC file)
@@ -54,98 +58,101 @@ Tests are composed of atomic **tasks** (e.g., provision API key, send inference 
 ```
 maaspal/
 ├── harness/                    # Test runner (K8s Job entrypoint)
-│   ├── __init__.py
-│   ├── main.py                 # Job entrypoint: loads kube client config (ADR-009 update — required for every CR-based task), registers SIGTERM handler, run scenario, cleanup
-│   ├── runner.py               # ScenarioRunner: executes tasks, records results, handles graceful stop
-│   ├── result.py               # RunResult/TaskResult dataclasses (status incl. CANCELLED, duration_ms) + assertion evaluation
-│   ├── config.py               # Config loader: merges global ConfigMap + scenario YAML
-│   ├── metrics_client.py       # fetch_metrics: shared Thanos Querier client (background poller + check_maas_metrics both use this)
-│   ├── durations.py            # parse_duration_s: "30s"/"1m"/"24h" window strings → seconds
+│   ├── main.py                 # Job entrypoint: loads kube client config (ADR-009 update), SIGTERM handler, runs the scenario, writes /data/results/<id>.json
+│   ├── runner.py               # ScenarioRunner: task loop, assertions, metrics polling, graceful stop, cleanup; writes progress/assertions/config files (incl. the run page's narration, traffic, resources, tables, findings, verdict)
+│   ├── result.py               # RunResult/TaskResult dataclasses + assertion evaluation (simple, match, promql; between/label/unit/target; live ${harness.x} bounds)
+│   ├── config.py               # Config loader: global ConfigMap + scenario YAML + launch overrides; task `when:` filtering
+│   ├── cleanup_state.py        # Auto-cleanup flag, persisted shared_state, cleanup status, per-resource cleanup marking (shared with api/cleanup.py)
+│   ├── metrics_client.py       # fetch_metrics: Thanos Querier client
+│   ├── durations.py            # parse_duration_s: "30s"/"1m"/"24h" → seconds
 │   └── tasks/
-│       ├── __init__.py
-│       ├── base.py             # Task ABC: run(ctx) -> TaskResult, cleanup(ctx) -> None
-│       ├── auth.py             # provision_api_key, revoke_api_keys, verify_api_key_search — all REST-only (uses SA token -> MaaS API)
-│       ├── identity.py         # create_user, provision_keys_for_users (ADR-023): mint throwaway ServiceAccount identities + per-user API keys
-│       ├── inference.py        # send_requests: concurrent OpenAI-compat load (url/token/key_index overridable, result_key namespacing)
-│       ├── metrics.py          # check_maas_metrics: read MaaS metrics (total_requests, total_tokens, etc.), log summary, store in shared_state
-│       ├── subscription.py     # apply_rate_limit_subscription, apply_priority_test_subscriptions (ADR-021): create/patch MaaSSubscription CR(s)
-│       ├── access_policy.py    # apply_auth_policy: create/patch MaaSAuthPolicy CR (gateway-access half of the two-layer access model, ADR-018)
-│       ├── platform_health.py  # check_platform_health (REST smoke) + check_model_health (ADR-022/025): read-only model wiring checks, one or all models
+│       ├── base.py             # Task ABC, TaskContext, record_created()
+│       ├── registry.py         # task name → class (incl. aliases)
+│       ├── auth.py             # provision_api_key, revoke_api_keys, verify_api_key_search, provision_keys_distributed (REST-only)
+│       ├── identity.py         # create_user, provision_keys_for_users (ADR-023)
+│       ├── inference.py        # send_requests: fixed bursts, until_throttled ramp, step load (stages)
+│       ├── subscription.py     # apply_rate_limit_subscription, apply_priority_test_subscriptions, provision_subscriptions_distributed
 │       ├── subscription_check.py # read_subscription_limits, discover_subscription_models, send_requests_to_each_model (ADR-025)
-│       ├── analysis.py         # classify_rate_limit_pooling (ADR-025): turns two users' bursts into a per-user/shared finding
-│       └── registry.py         # task name -> class mapping for YAML resolution
+│       ├── access_policy.py    # apply_auth_policy (ADR-018)
+│       ├── model.py            # deploy_simulated_model (ADR-024), expose_model_route + probe_direct_endpoint (gateway_overhead)
+│       ├── platform_health.py  # check_platform_health (REST smoke), check_model_health (read-only model wiring, one or all models)
+│       ├── analysis.py         # classify_rate_limit_pooling: two users' bursts → per-user/shared finding
+│       ├── metrics.py          # check_maas_metrics (optional explicit metrics task; not used by built-in scenarios)
+│       └── stubs.py            # pause (production: waits out rate-limit windows), stub_pass/stub_fail (tests)
 │
-├── scenarios/                  # YAML scenario definitions (mounted as ConfigMap) — question-first titles/metadata, ADR-025
-│   ├── smoke_test.yaml                       # Quick check: is MaaS working end to end?
-│   ├── verify_subscription.yaml              # Quick check: does my subscription work for every model it covers?
-│   ├── verify_subscription_rate_limit.yaml   # Rate limits: existing or temporary subscription (`mode`)
-│   ├── keys_share_user_budget.yaml           # Rate limits: do all of one user's keys share one budget?
-│   ├── rate_limit_window_recovery.yaml       # Rate limits: does access come back after the window?
-│   ├── subscription_auto_selection.yaml      # Rate limits: priority-based auto-selection (ADR-021)
-│   ├── rate_limit_per_user_or_shared.yaml    # Rate limits: per-user vs pooled, user states expectation (ADR-023)
-│   ├── denied_without_auth_policy.yaml       # Access control: fail-closed without a MaaSAuthPolicy (ADR-018)
-│   ├── api_key_lifecycle.yaml                # API keys (ADR-019)
-│   ├── usage_metrics_accuracy.yaml           # Usage metrics: MaaS counters vs harness (ADR-014/015)
-│   ├── load_test.yaml                        # Performance: 1..N keys
-│   ├── gateway_overhead.yaml                 # Performance: direct vs through-MaaS latency
-│   ├── multi_model_load.yaml                 # Performance: N models / M subscriptions / K keys (ADR-024)
-│   └── model_config_health.yaml              # Diagnostics: read-only model wiring checks, one or all models (ADR-022)
+├── scenarios/                  # Scenario YAMLs (mounted as a ConfigMap) — see "Scenarios" below
+│   ├── smoke_test.yaml, verify_subscription.yaml                         # Quick check
+│   ├── verify_subscription_rate_limit.yaml, keys_share_user_budget.yaml,
+│   │   rate_limit_window_recovery.yaml, subscription_auto_selection.yaml,
+│   │   rate_limit_per_user_or_shared.yaml                                # Rate limits
+│   ├── denied_without_auth_policy.yaml                                   # Access control
+│   ├── api_key_lifecycle.yaml                                            # API keys
+│   ├── usage_metrics_accuracy.yaml                                       # Usage metrics
+│   ├── load_test.yaml, gateway_overhead.yaml, multi_model_load.yaml      # Performance
+│   ├── model_config_health.yaml                                          # Diagnostics
+│   └── stub.yaml, stub_failing.yaml                                      # test fixtures, hidden from the UI
 │
 ├── api/                        # FastAPI backend
-│   ├── __init__.py
-│   ├── main.py                 # FastAPI app, mounts static UI
-│   ├── db.py                   # SQLite setup (aiosqlite)
-│   ├── k8s.py                  # Create Jobs; stop_run() deletes a run's pod with a grace period; background thread log capture to PVC; REST log reading
+│   ├── main.py                 # App, static UI, background poller that finalizes runs (incl. runs whose harness died without a result)
+│   ├── db.py                   # SQLite (aiosqlite)
+│   ├── k8s.py                  # create_job (backoffLimit 0), stop_run (suspends the Job), run_job_state, delete_stopped_job, log capture to PVC
+│   ├── cleanup.py              # Manual "Clean Up Now": re-runs task cleanup() from persisted state
+│   ├── maas_client.py          # Read-only MaaS domain model for the MaaS Setup tab (also reused by harness tasks — same image)
 │   └── routes/
-│       ├── scenarios.py        # GET /api/scenarios (includes config defaults from YAML)
-│       ├── runs.py             # POST /api/runs (config_overrides), GET /api/runs, GET /api/runs/{id}, POST /api/runs/{id}/stop
-│       ├── logs.py             # GET /api/runs/{id}/logs/lines?offset=N  (REST poll, no SSE)
-│       ├── assertions.py       # GET /api/runs/{id}/assertions  (reads /data/results/<id>-assertions.json)
-│       ├── progress.py         # GET /api/runs/{id}/progress    (reads /data/results/<id>-progress.json)
-│       └── config.py           # GET /api/runs/{id}/config      (reads /data/results/<id>-config.json, serves as YAML text)
+│       ├── scenarios.py        # GET /api/scenarios (config defaults + display/launch metadata)
+│       ├── runs.py             # POST /api/runs, GET /api/runs[/{id}], POST /api/runs/{id}/stop|auto-cleanup|cleanup
+│       ├── logs.py             # GET /api/runs/{id}/logs/lines?offset=N
+│       ├── assertions.py       # GET /api/runs/{id}/assertions
+│       ├── progress.py         # GET /api/runs/{id}/progress
+│       ├── config.py           # GET /api/runs/{id}/config (YAML text)
+│       └── maas.py             # GET /api/maas/{status,subscriptions,models,access,auth-policies,rate-limit-policies,limitador,gateways,http-routes,platform}
 │
-├── ui/                         # Frontend (React + TypeScript + PatternFly 5; built to ui/dist/)
-│   ├── src/
-│   │   ├── App.tsx             # Top-level: URL hash routing (#run/<id>), pushState/popstate, MaaS:PAL masthead
-│   │   ├── monacoSetup.ts      # Self-hosted Monaco config (no CDN) + trimmed to YAML-only — see RunSettingsModal below
-│   │   ├── api/client.ts       # Typed fetch wrappers for all backend API routes
-│   │   ├── styles/theme.css    # MaaS:PAL/God of War dark theme: dark header, red accents, card styles
-│   │   └── components/
-│   │       ├── ScenarioList.tsx    # Compact scenario cards with Run button; error/retry state
-│   │       ├── RunTrigger.tsx      # Config override editor (pre-filled from YAML defaults) + launch modal
-│   │       ├── LogStream.tsx       # REST poll consumer (1s interval), smart scroll, "N new lines" badge
-│   │       ├── AssertionPanel.tsx  # Live assertion cards (Passing/Failing/Pending) with value + expression
-│   │       ├── TaskProgress.tsx    # Horizontal task pipeline chips (PENDING/RUNNING/DONE/FAIL/CANCELLED) with progress bars + live/frozen duration
-│   │       ├── RunHistory.tsx      # PatternFly Table of past runs; color-coded status badges; Duration column; Stop action; 3s poll while active
-│   │       ├── RunDetail.tsx       # Per-run detail page: metadata bar (live elapsed time, View Settings, Stop), task pipeline, logs + assertions grid
-│   │       └── RunSettingsModal.tsx # Read-only Monaco YAML view of a run's settings (GET /api/runs/{id}/config) — mirrors OpenShift console's own "View YAML"; lazy-loaded (React.lazy)
-│   ├── package.json
-│   └── tsconfig.json
+├── ui/                         # React + TypeScript + PatternFly 5, built to ui/dist/
+│   └── src/
+│       ├── App.tsx             # Hash routing (#run/<id>, #maas); one <Page> with the masthead as its header (single scrollbar)
+│       ├── api/client.ts       # Typed fetch wrappers + types for every route
+│       ├── launchForm.ts       # Launch-form helpers: autofill, show_if, required gating, plan sentence
+│       ├── scenarioTitles.ts   # Scenario id → title (incl. previous_names), name formatting
+│       ├── monacoSetup.ts      # Self-hosted, YAML-only Monaco (see Frontend Monaco Setup)
+│       ├── styles/theme.css    # Light UI, dark masthead, red accents
+│       └── components/
+│           ├── ScenarioList.tsx      # Scenario cards by category, with badges
+│           ├── RunTrigger.tsx        # Launch modal: labelled inputs, ⓘ help, Advanced section, autofill, "What this run will do"
+│           ├── RunHistory.tsx        # Past runs (titles via scenarioTitles)
+│           ├── RunDetail.tsx         # Run page: metadata bar, verdict/finding, chips, steps, traffic, tables, checks, logs panel
+│           ├── TaskProgress.tsx      # Live task chips (progress bars incl. token/step progress, durations)
+│           ├── RunInsights.tsx       # Verdict, findings, "What happened" steps (with per-resource cleanup), traffic panels, step-load results, tables
+│           ├── TrafficChart.tsx      # Tokens over time, one or several bursts on one timeline, limit line, waits shaded
+│           ├── MetricsComparisonChart.tsx # MaaS-reported vs sent over time
+│           ├── AssertionPanel.tsx    # Check cards (label, value, target, details)
+│           ├── LogStream.tsx         # 1 s log polling, smart scroll
+│           ├── RunSettingsModal.tsx, RawYamlModal.tsx # Read-only Monaco YAML views (run settings; CRs in the MaaS Setup tab)
+│           └── maas/                 # MaaS Setup tab (ADR-017): Models, Subscriptions, Authorization Policies, Access Control, Access Simulator, Rate Limiting, Networking, Platform Config
 │
-├── deploy/                     # OpenShift/K8s manifests
-│   ├── serviceaccount.yaml     # SA with rhoai-admin + job/pod + maassubscriptions RBAC
-│   ├── rbac.yaml               # Role + RoleBinding
-│   ├── rbac-monitoring.yaml    # ClusterRoleBinding: SA -> cluster-monitoring-view (Thanos Querier access)
-│   ├── rbac-user-provisioning.yaml  # ADR-023: create/delete ServiceAccounts + mint serviceaccounts/token, maaspal namespace only — more sensitive than any other grant
-│   ├── pvc.yaml                # PVC for SQLite DB + run results
-│   ├── configmap-global.yaml   # Global cluster config (MAAS_API_URL, etc.)
-│   ├── deployment.yaml         # API server Deployment
-│   ├── service.yaml            # ClusterIP Service
-│   └── route.yaml              # OpenShift Route (TLS edge termination)
+├── deploy/                     # OpenShift manifests (all applied by `oc apply -k .`)
+│   ├── serviceaccount.yaml     # maaspal SA
+│   ├── rbac.yaml               # Role: jobs (incl. patch, for Stop), pods, pods/log in maaspal
+│   ├── rbac-maas-readonly.yaml # ClusterRole: read MaaS/Kuadrant/Gateway API/KServe resources + get on Secrets (ADR-017)
+│   ├── rbac-maas-subscription-write.yaml # ClusterRole: write maassubscriptions + maasauthpolicies
+│   ├── rbac-model-write.yaml   # ClusterRole: write llminferenceservices, maasmodelrefs, routes (throwaway models)
+│   ├── rbac-monitoring.yaml    # cluster-monitoring-view (Thanos)
+│   ├── rbac-user-provisioning.yaml # Role: create ServiceAccounts + mint tokens in maaspal (ADR-023) — the most sensitive grant
+│   ├── pvc.yaml, configmap-global.yaml, deployment.yaml, service.yaml, route.yaml
 │
 ├── docs/
 │   ├── architecture/
-│   │   ├── adrs/                          # Architecture Decision Records (ADR-001 to ADR-022)
-│   │   ├── maas-metrics-reference.md      # Full catalog of MaaS/RHOAI metrics found during live-cluster research (maas-api, Limitador, vLLM, Istio, Authorino) — not just the two MaaS:PAL uses
-│   │   └── empirical-verification-checklist.md  # Living catalog of UI/CR claims worth checking against real gateway behavior — Verified/Partial/Gap per area, ADR-018
+│   │   ├── adrs/                          # Architecture Decision Records (ADR-001 to ADR-025)
+│   │   ├── maas-domain-reference.md       # MaaS governance objects (subscriptions, models, policies, Kuadrant, gateway) as found live
+│   │   ├── maas-metrics-reference.md      # Every MaaS/RHOAI metric found live, not just the ones MaaS:PAL uses
+│   │   └── empirical-verification-checklist.md  # Which claims are verified against a live cluster (Verified/Partial/Gap)
 │   └── project/
-│       └── implementation-plan.md  # Phased implementation plan
+│       └── implementation-plan.md  # Original phased plan (historical)
 │
 ├── Dockerfile                  # Multi-stage: Node (UI build) → Python (API + harness)
 ├── Makefile                    # build, push, deploy, dev, test, lint
-├── kustomization.yaml          # oc apply -k . — deploy/ resources + generates maaspal-scenarios ConfigMap from scenarios/*.yaml (configMapGenerator; root-level so kustomize's file-load restriction allows referencing both deploy/ and scenarios/)
-├── pyproject.toml              # Python deps: fastapi, uvicorn, kubernetes, aiosqlite, httpx, openai
-└── README.md
+├── kustomization.yaml          # oc apply -k . — deploy/ + the maaspal-scenarios ConfigMap (configMapGenerator; scenario files listed by hand, checked by test_kustomization_scenarios_configmap_matches_directory)
+├── pyproject.toml
+└── README.md                   # Overview, deploy, permissions, develop
 ```
 
 ## Key Design Decisions
@@ -191,27 +198,78 @@ class Task(ABC):
    `harness/config.py` reads this via `json.loads(os.environ.get("MAASPAL_CONFIG_OVERRIDES", "{}"))`. The UI pre-fills the editor with YAML `config:` defaults so users see reasonable starting values.
 
 ### Scenario YAML Format
+A trimmed version of `scenarios/rate_limit_window_recovery.yaml`:
 ```yaml
-name: load_test
-description: "Baseline load test — one key, N requests through MaaS"
-category: "Load Testing"  # optional (ADR-020) — omit it and the scenario lands in the UI's "Custom" bucket
-config:
-  request_count: 100
-  concurrency: 5
-  prompt: "Hello, world!"
+name: rate_limit_window_recovery
+title: "Does access come back after the rate-limit window?"   # what the UI shows
+summary: "Uses up a small token budget, waits for its window to pass, and checks requests succeed again."
+description: >-                     # shown under "More details" in the launch form
+  Creates a temporary subscription with a small limit over a short window...
+category: "Rate limits"             # optional — omitted or unknown lands in "Custom"
+kind: explore                       # verify = uses your setup (API keys only); explore = creates temporary resources
+mutates: [api_keys, subscriptions]
+requires: [target_model_name, target_model_namespace]   # gates Launch
+plan_template: >-
+  Create a temporary subscription allowing ${config.token_limit} tokens per ${config.token_window}
+  on ${model}, send until throttled, wait, then send ${config.recovery_requests} more.
+inputs:                             # per-config-key launch-form metadata
+  target_model_name: {label: "Model"}
+  token_window: {label: "Window", help: "How long a token budget lasts before it refills."}
+  token_limit: {advanced: true, help: "Small, so it's used up in seconds."}
+config:                             # flat defaults; the launch form overrides them
+  target_model_name: ""
+  target_model_namespace: ""
+  token_window: "1m"
+  token_limit: 50
+  recovery_requests: 3
+verdict:
+  pass: "Throttled after ${harness.inference_results.tokens_before_first_429} tokens, and access came back."
+  fail: "Access did not come back after the ${config.token_window} window."
 tasks:
-  - name: provision_api_key
+  - name: apply_rate_limit_subscription
     params:
-      key_name: "maaspal-load-key"
+      new_subscription_name: "maaspal-window-recovery-test"
+      namespace: "models-as-a-service"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.token_limit}"
+      token_window: "${config.token_window}"
+  - name: provision_api_key
+    params: {key_name: "maaspal-recovery-key", subscription: "maaspal-window-recovery-test"}
   - name: send_requests
     params:
-      count: "${config.request_count}"
-      concurrency: "${config.concurrency}"
-      prompt: "${config.prompt}"
+      model: "${config.target_model_namespace}/${config.target_model_name}"
       key_pool: true
-assertions:
-  error_rate_pct: "< 5"
-  p99_latency_ms: "< 10000"
+      retries: 0
+      until_throttled: true
+      limit: "${config.token_limit}"
+      window: "${config.token_window}"
+      chart: true
+      chart_group: "recovery"
+      label: "Before the wait"
+    assertions:                     # per-task checks, evaluated when the task finishes
+      throttled_at_all:
+        label: "Budget used up (throttled)"
+        unit: "429s"
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "> 0"
+  - name: pause
+    params: {duration_s: "${config.token_window}", buffer_s: 5, reason: "waiting for the window to reset"}
+  - name: send_requests_after_window
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      count: "${config.recovery_requests}"
+      key_pool: true
+      retries: 0
+      result_key: "inference_results_after_window"
+      chart: true
+      chart_group: "recovery"
+      label: "After the wait"
+    assertions:
+      recovered_success_count:
+        label: "Requests that succeeded after the wait"
+        promql: "${harness.inference_results_after_window.success_count}"
+        expect: "> 0"
 cleanup: automatic
 ```
 `check_maas_metrics` is no longer a task step — MaaS metrics are polled continuously in the background by `ScenarioRunner` (see below).
@@ -245,10 +303,10 @@ cleanup: automatic
   ```
   `${baseline.<name>}` resolves once (right after the pre-run baseline snapshot) to a value from the scenario's `metrics_queries:` block (see Background Metrics Polling below). `${harness.<namespace>.<key>}` resolves fresh on every poll tick from live `shared_state` (e.g. `inference_results.total_requests`) — if that value isn't populated yet, that tick's query is skipped and the assertion stays PENDING. Either `expect: "<op> <value>"` (same grammar as the simple form) or `compare_to`/`tolerance_pct` (same tolerance-band math as the match form) reads the already-fetched result; the query itself is fired by the runner, `harness/result.py` stays a pure synchronous evaluator. `compare`/`to` (match form) remains fully supported — `promql` is additive, not a replacement.
   **Does not solve run-scoping**: `${baseline.x}`/`${harness.x}` are numeric literal substitutions, not Prometheus labels — a `promql` assertion still can't distinguish this run's traffic from a concurrent run/caller hitting the same model route any better than the match form can (see the scoping caveat under Background Metrics Polling below).
-- Available metrics from `send_requests` (via `shared_state["inference_results"]`): `error_rate_pct`, `p50/p95/p99_latency_ms`, `throughput_rps`, `total_requests`, `success_count`, `fail_count`, `rate_limited_count` (429s), `unauthorized_count` (401/403s — both caught via `openai.APIStatusError.status_code`, ADR-018, so a scenario can assert on *why* requests failed, not just whether), `total_tokens_sent`, `prompt_tokens_sent`, `completion_tokens_sent`, `first_rate_limited_at_tokens` (ADR-024 — cumulative `total_tokens_sent` at the moment of the *first* 429; **absent**, not `0`, until a 429 actually happens, so a referencing assertion stays honestly PENDING instead of reading a false zero — see `verify_subscription_rate_limit.yaml`/`rate_limit_per_user_or_shared.yaml`)
+- Available metrics from `send_requests` (via `shared_state["inference_results"]`): `error_rate_pct`, `p50/p95/p99_latency_ms`, `throughput_rps`, `total_requests`, `success_count`, `fail_count`, `rate_limited_count` (429s), `unauthorized_count` (401/403s — both caught via `openai.APIStatusError.status_code`, ADR-018, so a scenario can assert on *why* requests failed, not just whether), `total_tokens_sent`, `prompt_tokens_sent`, `completion_tokens_sent`, `first_rate_limited_at_tokens` (ADR-024 — cumulative `total_tokens_sent` at the moment of the *first* 429; **absent**, not `0`, until a 429 actually happens, so a referencing assertion stays honestly PENDING instead of reading a false zero — see `verify_subscription_rate_limit.yaml`/`rate_limit_per_user_or_shared.yaml`) Since ADR-025 also: `http_attempts` (incl. SDK retries), `server_error_count`, `not_found_count`, `other_error_count`, `non_throttle_error_rate_pct`, `error_samples`, `successes_after_first_429` (requests *started* after the first 429), and once throttled `tokens_before_first_429`/`requests_before_first_429`/`seconds_to_first_429`/`concurrency_at_first_429`/`allowed_overshoot`; `until_throttled` bursts add `peak_concurrency`/`required_tokens_per_s`/`limit_reached`/`not_throttled_bound`/`ramp`; step load adds `stages` and `final_stage_{p99_latency_ms,error_rate_pct,throttled_pct}`.
 - Available metrics from background MaaS metrics poller (via `shared_state["metrics"]`): raw values as reported by the scenario's `metrics_queries:` block (e.g. `total_requests`, `total_tokens`), plus `{name}_delta` for each (value minus the run's baseline snapshot — see Background Metrics Polling below), plus one entry per `promql`-form assertion (keyed by assertion name). Requires `MAAS_METRICS_URL` in the global ConfigMap and at least one of `metrics_queries:`/a `promql`-form assertion in the scenario.
 - Available metrics from `provision_api_key`/`verify_api_key_search` (ADR-019, ADR-021): `shared_state["key_provision_checks"]` (`total_keys`, `name_echo_match_count`, `subscription_checked_count`, `subscription_echo_match_count`, `expected_subscription_checked_count`, `expected_subscription_match_count`, `expires_at_present_count`) and `shared_state["search_check"]` (`found_count`, `expected_count`) — referenced the same way as `inference_results`/`metrics`, e.g. `${harness.key_provision_checks.name_echo_match_count}`. These are entirely REST-derived (no Prometheus/CR involved) but still routed through the `promql` pass-through form for the same parsing-path-coverage reason as every other harness-side-only metric in this codebase.
-- Available metrics from `check_platform_health` (ADR-022): `shared_state["rate_limit_policy_status"]` (`found`, `accepted`, `enforced`), `["gateway_status"]` (`programmed`), `["http_route_status"]` (`found`, `owner_ref_matches`) — same referencing convention, e.g. `${harness.gateway_status.programmed}`. Read-only CR-derived flags, not Prometheus metrics.
+- Available metrics from `check_platform_health` (REST smoke): `shared_state["platform_health"]` (`model_count`, `api_reachable`). From `check_model_health` (ADR-022/025): `shared_state["model_health"]` counts across the models checked (`models_checked`, `ready_count`, `has_subscription_count`, `has_auth_policy_count`, `gateway_access_label_count`, `rate_limit_enforced_count`, `route_owner_ok_count`, `healthy_count` — the governance counts are omitted, so their checks stay PENDING, if the MaaS catalog can't be read), `["gateway_status"]` (`programmed`), and for a single model `["rate_limit_policy_status"]`/`["http_route_status"]` flags. Also: `shared_state["subscription_limits"]` (`read_subscription_limits`), `["subscription_check"]` (`verify_subscription` tasks), `["pooling"]` (`classify_rate_limit_pooling`), `["direct_probe"]` (`probe_direct_endpoint`).
 - **Display fields (ADR-025)** on any dict-form assertion: `label`, `description`, `unit` (shown on the card instead of the raw name/expression — the substituted PromQL moves behind a "Details" toggle), plus a computed human-readable `target` ("100 – 200", "< 5"). `between: [lo, hi]` is a range form for promql-form assertions so a card shows the real value (e.g. 115 tokens) rather than a derived difference; bounds may be simple arithmetic left over from `${config.x}` substitution (`"${config.token_limit} + 100"`), parsed by an AST walker in `harness/result.py`, never `eval`.
 - A PENDING assertion never fails a run, so a check whose value only appears on some outcome (e.g. `tokens_before_first_429` never appears if nothing was throttled) is always paired with an always-populated guard (e.g. `rate_limited_count > 0`).
 - Run is PASS only if all assertions pass (or no assertions defined)
@@ -257,7 +315,7 @@ cleanup: automatic
 - SQLite on PVC at `/data/maaspal.db` (tables: `runs`, `task_results`; `runs` has `config_overrides TEXT` and `duration_ms REAL` columns — `task_results` is unused dead schema, per-task data lives in the progress JSON instead)
 - Run results JSON: `/data/results/<run-id>.json` — includes `RunResult.duration_ms` (total run time, `time.monotonic()`-based) and each task's `duration_ms`; `status` can be `PASS`/`FAIL`/`CANCELLED`
 - Live assertion state: `/data/results/<run-id>-assertions.json` — written by `emit_assertion_state()`, served by `GET /api/runs/{id}/assertions`
-- Live task progress: `/data/results/<run-id>-progress.json` — written by `_write_progress()` at task start/end and on each `emit()`, served by `GET /api/runs/{id}/progress`. Also carries the run page's narration (ADR-025): `findings` (a scenario's conclusion, shown first when present), `metrics_charts` (MaaS-reported vs harness-sent series sampled every metrics poll, declared by a scenario's `metrics_charts:` block), per-task `summary` (tasks set `shared_state["task_summary"]`), `traffic` (one entry per `send_requests`-family `result_key`: summary counters, a timeline downsampled to ≤600 points that always keeps status transitions, and the scenario's `token_limit` as the chart's reference line), `resources` (what the run created — names only, never key values or tokens), `tables` (rows a task publishes via `shared_state["_tables"][title]`), and the final `verdict`. Includes a top-level `run_started_at` (wall-clock ISO timestamp) and, per task, `duration_ms` once completed or `started_at` while `RUNNING` — the frontend computes/ticks elapsed time client-side from these rather than the backend pushing a live-updating number.
+- Live task progress: `/data/results/<run-id>-progress.json` — written by `_write_progress()` at task start/end and on each `emit()`, served by `GET /api/runs/{id}/progress`. Also carries the run page's narration (ADR-025): `findings` (a scenario's conclusion, shown first when present), `metrics_charts` (MaaS-reported vs harness-sent series sampled every metrics poll, declared by a scenario's `metrics_charts:` block), per-task `summary` (tasks set `shared_state["task_summary"]`), `traffic` (one entry per `send_requests`-family `result_key`: summary counters, a timeline downsampled to ≤600 points that always keeps status transitions, the chart's limit line — the limit read off the subscription under test, else the scenario's `token_limit` — and `chart`/`chart_group`/`label`/`t0` for how the run page draws it), `resources` (what the run created — names only, never key values or tokens), `tables` (rows a task publishes via `shared_state["_tables"][title]`), and the final `verdict`. Includes a top-level `run_started_at` (wall-clock ISO timestamp) and, per task, `duration_ms` once completed or `started_at` while `RUNNING` — the frontend computes/ticks elapsed time client-side from these rather than the backend pushing a live-updating number.
 - Run config snapshot: `/data/results/<run-id>-config.json` — a **scenario-YAML-shaped** snapshot (`name`/`description`/`config`/`metrics_queries`/`tasks`/`assertions`/`cleanup`, built by `_scenario_settings_snapshot()`), meant to be pasted directly into a new `scenarios/*.yaml` file to reproduce the run exactly, not just inspected. `config:` merges the scenario's own declared keys (defaults + any launch-time overrides actually applied) with a small curated set of cluster-level settings (`MAAS_API_URL`, `MAAS_METRICS_URL`, `DEFAULT_MODEL`, `DEFAULT_SUBSCRIPTION`) — deliberately narrower than the raw `_resolved_config` (which is a merge of the *entire* process environment, per `harness/config.py:load_scenario`) so container plumbing (`PATH`, `HOSTNAME`, `KUBERNETES_*`, ...) never shows up. Any dict key matching `(^|_)(token|secret|password)($|_)` at *any* nesting depth (top-level config, or inside a task's resolved `params`) is redacted to `***REDACTED***` — deliberately excludes "key" as a bare substring, since this app's whole domain is provisioning MaaS API *keys* and that false-positived hard on entirely non-sensitive fields (`key_name`, `key_pool`, `total_tokens`, `maas_tokens_match` — the last one being a whole assertion, not just a leaf value, confirmed live). `token_limit`/`token_window` (ADR-024) are a narrower false positive of the same shape — "token" is a complete word in them too, but they're an LLM token budget/time window, not a credential — fixed via an exact-name exception set rather than a pattern change (unlike "key", "token" can't be excluded as a blanket substring without also un-redacting real credentials like `target_token`/`sa_token`). Written once, before the task loop starts (`ScenarioRunner.run()`), so it's viewable from the moment a run begins — served as YAML text (`sort_keys=False`, preserving scenario-file key order) by `GET /api/runs/{id}/config`. Rendered in the UI (`RunSettingsModal.tsx`) via PatternFly's `CodeEditor` (Monaco) in read-only mode — the same component family OpenShift console itself uses for "View YAML" — with built-in copy/download buttons, YAML syntax highlighting, and line numbers, so the output can be copied straight into a new scenario file. See Frontend Monaco Setup below for why it's self-hosted rather than CDN-loaded.
 - Pod logs: `/data/logs/<run-id>.log` (final) or `.log.tmp` (in-progress) — see Log Streaming below
 
@@ -278,7 +336,7 @@ Current approach:
 - Cleanup failures are logged but do not mark the run as failed
 - No per-run K8s Secrets needed — SA token is auto-mounted; MaaS API keys are created and deleted by harness tasks themselves
 - **Metrics pipeline data is not cleaned up.** MaaS metrics polling is read-only; any request traces or counters written to the RHOAI metrics pipeline during a run are intentionally left in place. Cleaning up historical metrics data is deferred to future work.
-- Primary cleanup targets: MaaS API keys (bulk-revoked via `/maas-api/v1/api-keys/bulk-revoke`) and `MaaSSubscription` CRs (restored or deleted via Kubernetes API)
+- What gets cleaned up: MaaS API keys (individual `DELETE /maas-api/v1/api-keys/{id}`), `MaaSSubscription`s and `MaaSAuthPolicy`s (deleted, or restored if they existed before), throwaway models (`MaaSModelRef` + `LLMInferenceService`), their direct Routes, and minted ServiceAccounts. Each created object is tracked with `record_created()` and shown on the run page with its own cleanup status.
 
 ### Stopping a Run (graceful)
 
@@ -294,12 +352,14 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
 - **A harness that dies without reporting** (cleanup overruns the grace period and is SIGKILLed, OOMKill) used to leave its run `RUNNING` forever. `api/main.py:_sync_completed_runs` now finalizes such a run: when its Job is suspended (→ `CANCELLED`) or failed (→ `FAIL`), its pod is gone, and no result file exists on two consecutive polls. The cleanup status comes from `-cleanup-status.json`. Also fixed: a live hang where, after a Stop, `_metrics_bg` spun forever without yielding (`_interruptible_sleep` returned instantly once the stop event was set, and there was nothing to query). The run never wrote its result and the pod lingered until SIGKILL. `_interruptible_sleep` now always yields, and the poller exits on stop (regression test `test_stop_with_unresolvable_metrics_checks_still_finishes`).
 
 ### SA Permissions Required
-- `rhoai-admin` ClusterRole (or equivalent) — to call MaaS API
+- Enough to call the MaaS API with the SA token (the SA must be an owner of the subscriptions scenarios pin keys to — `system:authenticated` on most installs)
 - `create`, `get`, `list`, `watch`, `delete`, `patch` on `jobs` in the harness namespace — `patch` is for Stop (suspending the Job, see above)
-- `get`, `list`, `watch`, `delete` on `pods` — `delete` is for `POST /api/runs/{id}/stop` (`api/k8s.py:stop_run`, deletes the run's *pod* with a grace period rather than the Job, so `_capture_logs`/`_sync_completed_runs`'s existing pod-phase-based completion detection keeps working unchanged)
+- `get`, `list`, `watch`, `delete` on `pods` — `delete` is only the fallback Stop uses when it can't patch the Job
 - `get` on `pods/log`
-- `get`, `create`, `patch`, `delete` on `maassubscriptions` and `maasauthpolicies` (`maas.opendatahub.io/v1alpha1`) — `maassubscriptions` for every rate-limiting/multi-model scenario, `maasauthpolicies` for `subscription_without_authpolicy` (ADR-018) and `multi_model_full_load` (ADR-024 — a freshly-deployed model has no gateway access at all until a matching policy exists, regardless of subscription/quota)
-- `get`, `list`, `watch` on `tokenratelimitpolicies` (`kuadrant.io`, `deploy/rbac-maas-readonly.yaml`) — for `check_platform_health`/`check_model_health` (ADR-022) and `provision_subscriptions_distributed`'s post-create readiness wait (ADR-024)
+- `get`, `list`, `create`, `patch`, `delete` on `maassubscriptions` and `maasauthpolicies` (`maas.opendatahub.io/v1alpha1`, `deploy/rbac-maas-subscription-write.yaml`) — for every scenario that creates temporary subscriptions or auth policies
+- `get`, `list`, `create`, `patch`, `delete` on `llminferenceservices`/`maasmodelrefs`, and `get`/`create`/`delete` on `routes` (`deploy/rbac-model-write.yaml`) — for scenarios that deploy throwaway models (`denied_without_auth_policy`, `gateway_overhead`, `multi_model_load`)
+- Cluster-wide read of MaaS/Kuadrant/Gateway API/KServe resources plus `get` on Secrets (`deploy/rbac-maas-readonly.yaml`, ADR-017) — the MaaS Setup tab, `check_model_health`, `read_subscription_limits`, `discover_subscription_models`
+- (`tokenratelimitpolicies` read, part of the read-only grant above, is also what `check_model_health` and `provision_subscriptions_distributed`'s readiness wait use)
 - `cluster-monitoring-view` ClusterRole binding (`deploy/rbac-monitoring.yaml`, cluster-scoped — the only cluster-scoped grant the SA needs beyond its own namespace) — for querying Thanos Querier (background MaaS metrics polling)
 - `create`, `delete`, `get`, `list` on `serviceaccounts` and `create` on `serviceaccounts/token`, scoped to the `maaspal` namespace (`deploy/rbac-user-provisioning.yaml`) — for `create_user`/`provision_keys_for_users` (ADR-023). **Meaningfully more sensitive than any other grant this harness holds** — minting a ServiceAccount token is a real elevated capability; review deliberately before applying, not as routine.
 
@@ -307,13 +367,13 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
 
 - **`provision_api_key`**: Calls `POST /maas-api/v1/api-keys` with the SA token. Stores each created key's full record (`id`, `key`, `name`, `subscription`, `expiresAt`) in `shared_state["api_keys"]`. Supports `count` param to create N keys in a loop; sets `shared_state["task_progress"]` after each key so the UI progress chip updates. **REST-only lifecycle checks** (ADR-019): after each key, compares the response against what was requested and tallies plain-numeric counters into `shared_state["key_provision_checks"]` — `total_keys`, `name_echo_match_count`, `subscription_checked_count`/`subscription_echo_match_count` (only counted when a `subscription` param was actually passed), `expires_at_present_count` — assertable the same way any other metric is. `expect_subscription` (ADR-021, distinct from `subscription` — never sent in the request body) checks auto-selection's *outcome* without forcing it, into `expected_subscription_checked_count`/`expected_subscription_match_count`. Cleanup calls a shared `_revoke_keys()` helper (individual `DELETE /maas-api/v1/api-keys/{id}` per key).
 
-- **`revoke_api_keys`** (ADR-019): Revokes the current key pool (`shared_state["api_keys"]`) immediately, mid-scenario — not at cleanup time — via the same `_revoke_keys()` helper `provision_api_key`'s cleanup uses. Stores `shared_state["revoked_count"]`. Lets a later task confirm inference is denied right away, not after some caching delay. The scenario's own final cleanup still runs afterward and harmlessly re-attempts DELETE on these already-gone keys.
+- **`revoke_api_keys`** (ADR-019): Revokes keys from `shared_state["api_keys"]` immediately, mid-scenario, via the same `_revoke_keys()` helper `provision_api_key`'s cleanup uses. `count` revokes only the first N (e.g. 1 of 3, so a later step can check the others still work); revoked keys are flagged `revoked` and their run-page resource marked "revoked". Stores `shared_state["revoked_count"]`. Final cleanup harmlessly re-attempts DELETE (404 = already gone).
 
-- **`verify_api_key_search`** (ADR-019): Calls `POST /maas-api/v1/api-keys/search` with `{"name_prefix": ...}`, stores `shared_state["search_check"] = {"found_count", "expected_count"}`. REST-only; can prove the created keys are findable and that `name_prefix` filters correctly, not that a *different* caller's keys are excluded (needs a second identity, which the harness doesn't have — see `docs/architecture/empirical-verification-checklist.md`).
+- **`verify_api_key_search`** (ADR-019): Calls `POST /maas-api/v1/api-keys/search` with `{"name_prefix": ...}` and counts **active** keys with that prefix into `shared_state["search_check"] = {"found_count", "expected_count"}`. Also registered as `verify_revoked_key_not_searchable`. REST-only; proves this run's keys are findable and filtered correctly, not that a *different* caller's keys are excluded (see the checklist).
 
-- **`send_requests`**: Sends concurrent OpenAI-compatible inference requests. Resolves `url` and `token` via a three-level priority chain: (1) explicit YAML `params`, (2) `shared_state`, (3) `TaskContext` defaults (MaaS model discovery + SA token). Model discovery (`_discover_model`) matches a `model:` param/`DEFAULT_MODEL` against `/v1/models`' `id`, `modelDetails.displayName`, **or `owned_by`** (`"<namespace>/<MaaSModelRef name>"`, confirmed live — the one field that reliably matches a scenario's own `target_model_namespace`/`target_model_name` config; `id`/`displayName` are cosmetic and don't need to resemble the CR name at all). Falling through to "first available" with no match is a real risk once more than one model is registered — confirmed live: an unrelated `ExternalModel` sorting first in the discovery response silently hijacked `rate_limit_validation`, which had a target model configured for its subscription but never passed it to `send_requests` at all. Every CR-targeted scenario now passes an explicit `model:` rather than relying on the fallback — `rate_limit_validation`/`rate_limit_priority_precedence` via a static `"${config.target_model_namespace}/${config.target_model_name}"`.
+- **`send_requests`**: Sends concurrent OpenAI-compatible inference requests. Resolves `url` and `token` via a three-level priority chain: (1) explicit YAML `params`, (2) `shared_state`, (3) `TaskContext` defaults (MaaS model discovery + SA token). Model discovery (`_discover_model`) matches a `model:` param/`DEFAULT_MODEL` against `/v1/models`' `id`, `modelDetails.displayName`, **or `owned_by`** (`"<namespace>/<MaaSModelRef name>"`, confirmed live — the one field that reliably matches a scenario's own `target_model_namespace`/`target_model_name` config; `id`/`displayName` are cosmetic and don't need to resemble the CR name at all). Falling through to "first available" with no match is a real risk once more than one model is registered — confirmed live: an unrelated `ExternalModel` sorting first in the discovery response silently hijacked `rate_limit_validation` (now `verify_subscription_rate_limit`), which had a target model configured for its subscription but never passed it to `send_requests` at all. Every scenario that targets a specific model now passes an explicit `model:` (`"${config.target_model_namespace}/${config.target_model_name}"`, filled by the launch form's model picker) rather than relying on the fallback.
 
-  **Targeting a model `deploy_simulated_model` just created this run (ADR-024)**: confirmed live that such a model is never listed in `/v1/models` — that requires full governance pairing (a `MaaSSubscription` *and* a `MaaSAuthPolicy`), not just `RuntimeReady` — so generic discovery can never resolve it and silently falls back to a *different*, wrong model. `model_from_shared_state` (single target, e.g. `subscription_without_authpolicy`) sets both `params["model"]` (the model's **bare** name) and `params["url"]` directly to that model's own dedicated per-model route (`{MAAS_API_URL}/{namespace}/{name}/v1/...` — auto-created by the LLMInferenceService controller, reachable as soon as `RuntimeReady`, and still enforced by the same gateway `AuthPolicy` as the generic route) before URL/model/token resolution runs — same self-mutating-params style as `key_index` below. For a key pool spanning *multiple* dynamically-deployed models (`multi_model_full_load`), each key's own `target_model` field (set by `provision_keys_distributed`, `"<namespace>/<name>"` format) gets its own dedicated-path client instead of one shared URL. A third, related case — a key pool with **no** explicit model and **no** per-key `target_model` (auto-selected subscription against an auto-discovered model, e.g. `single_key_load`/`multi_key_load` with both left blank) — is handled by `_resolve_models_by_subscription`: cross-references each key's own bound `subscription` against `/v1/models`' per-model `subscriptions: [{name}]` list, so an auto-selected subscription and an independently-discovered model can't end up mismatched.
+  **Targeting a model `deploy_simulated_model` just created this run (ADR-024)**: confirmed live that such a model is never listed in `/v1/models` — that requires full governance pairing (a `MaaSSubscription` *and* a `MaaSAuthPolicy`), not just `RuntimeReady` — so generic discovery can never resolve it and silently falls back to a *different*, wrong model. `model_from_shared_state` (single target, e.g. `denied_without_auth_policy`, `gateway_overhead`) sets both `params["model"]` (the model's **bare** name) and `params["url"]` directly to that model's own dedicated per-model route (`{MAAS_API_URL}/{namespace}/{name}/v1/...` — auto-created by the LLMInferenceService controller, reachable as soon as `RuntimeReady`, and still enforced by the same gateway `AuthPolicy` as the generic route) before URL/model/token resolution runs — same self-mutating-params style as `key_index` below. For a key pool spanning *multiple* dynamically-deployed models (`multi_model_load`), each key's own `target_model` field (set by `provision_keys_distributed`, `"<namespace>/<name>"` format) gets its own dedicated-path client instead of one shared URL. A third, related case — a key pool with **no** explicit model and **no** per-key `target_model` (auto-selected subscription against an auto-discovered model, e.g. a key pool with no model chosen) — is handled by `_resolve_models_by_subscription`: cross-references each key's own bound `subscription` against `/v1/models`' per-model `subscriptions: [{name}]` list, so an auto-selected subscription and an independently-discovered model can't end up mismatched.
 
   When `key_pool: true` is set, uses keys from `shared_state["api_keys"]` and distributes requests evenly across the pool (floor(M/N) per key, remainder to first). A `key_index` param (ADR-023) instead targets exactly ONE key from `shared_state["api_keys"]` by position as the task's single dedicated token — bypassing both `key_pool` (whole pool) and a static YAML `token` (can't reference a runtime-created key) — for scenarios needing to run one specific dynamically-created key at a time (e.g. one per user, see `rate_limit_per_user_or_shared.yaml`). A `result_key` param (ADR-023, default `"inference_results"`) writes results to a named `shared_state` slot instead of the one fixed key every `send_requests`-family task has always shared, so two sequential invocations can each keep independent results to compare afterward. After every completed request, updates `shared_state[result_key]` (latency, error/rate-limited/unauthorized counts, throughput, `first_rate_limited_at_tokens` once a 429 happens — ADR-024) and `shared_state["task_progress"]`, then calls `emit_assertion_state()`. Cleanup is a no-op. Also registered under `verify_revoked_key_denied` (`REGISTRY["verify_revoked_key_denied"] = SendRequestsTask`, ADR-019) and `send_requests_as_second_user` (ADR-023) — same class, second/third name, used when a scenario needs another "send some requests" step (e.g. after revoking the key pool, or targeting a second user's key) without colliding with an earlier `send_requests` step's UI chip/progress state (both are keyed by task name — see Task Progress UI below).
 
@@ -325,7 +385,9 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
 
 - **`apply_auth_policy`** (ADR-018): Uses `kubernetes.client.CustomObjectsApi` to create or patch a `MaaSAuthPolicy` CR (`maas.opendatahub.io/v1alpha1`) — the gateway-access half of the two-layer access model (a `MaaSSubscription` alone only grants quota). Same create-or-patch/restore-or-delete shape as `apply_rate_limit_subscription`, `shared_state["original_auth_policy"]`/`"_policy_created"` instead. `denied_without_auth_policy.yaml` uses this task's *absence* to test fail-closed. `model_refs_from_shared_state` covers every model `deploy_simulated_model` created this run in one policy (`multi_model_load.yaml` — confirmed live that a freshly-deployed model has no gateway access at all until a matching policy exists, regardless of subscription/quota), instead of requiring the literal `model_name`/`model_namespace` params.
 
-- **`check_platform_health`** (ADR-022): Read-only, no cleanup needed. Reads a `TokenRateLimitPolicy` and an `HTTPRoute` for the target model — both found by **label selector** (`maas.opendatahub.io/model=<name>`, `app.kubernetes.io/name=<name>`), not an assumed generated resource name — plus a named `Gateway` (defaults to the confirmed-live `maas-default-gateway`/`openshift-ingress`, overridable). Stores `shared_state["rate_limit_policy_status"]` (`found`/`accepted`/`enforced`), `["gateway_status"]` (`programmed`), `["http_route_status"]` (`found`/`owner_ref_matches`) as 0/1 flags — missing resources default to 0 rather than raising, so an absent CR fails its assertion honestly instead of hanging PENDING.
+- **`check_platform_health`**: REST-only smoke check — `GET /v1/models` with the SA token; stores `shared_state["platform_health"]` (`model_count`, `api_reachable`). Used by `smoke_test`.
+
+- **`check_model_health`** (ADR-022/025): Read-only, no cleanup. For one model, or every internally hosted model when `model_name` is blank: reuses `api/maas_client.list_models()` (same image, same SA) for MaaSModelRef Ready / subscriptions / auth policy / namespace gateway-access label, and reads the model's `TokenRateLimitPolicy` and `HTTPRoute` by **label selector** (`maas.opendatahub.io/model=<name>`, `app.kubernetes.io/name=<name>`), plus a named `Gateway` (default `maas-default-gateway`/`openshift-ingress`). Writes `shared_state["model_health"]` counts and a per-model "Model health" table; missing resources count as unhealthy rather than raising. Used by `model_config_health`.
 
 - **`create_user`** (ADR-023): Mints `count` throwaway `ServiceAccount`s in the harness's own namespace, then a `TokenRequest`-issued token for each (`CoreV1Api.create_namespaced_service_account`/`create_namespaced_service_account_token`) — the only caller-identity-minting mechanism buildable from this harness's RBAC without IdP integration. Appends `{name, namespace, username, token}` per user to `shared_state["users"]`, where `username` is the fully-qualified `system:serviceaccount:<ns>:<name>` string confirmed live (ADR-018's Update) to be directly matchable against a `MaaSSubscription`'s `spec.owner.users[]`. Cleanup best-effort deletes each created ServiceAccount, logged, never raises.
 
@@ -345,7 +407,13 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
 
 - **`pause`**: Waits `duration_s` (seconds or a window string like `"1m"`) + `buffer_s`, capped at `max_s` (default 900; capped waits are called out). Reports per-second progress. A graceful stop interrupts it like any task.
 
-- **`send_requests` additions (ADR-025)**: `retries` (OpenAI SDK `max_retries`, default 2), `stop_after_429s`, `until_throttled` (send until throttled, up to an internal 500-request cap; with `limit_from_shared_state: "ns.key"` it gives up early and honestly — "Inconclusive: limit too large to use up" via `_verdict_text` — when the limit clearly can't be reached, and its progress bar tracks tokens toward the limit), `chart` (draw this burst's traffic chart on the run page; otherwise it's a one-line summary), `url_from_shared_state` + `insecure_tls` (call a just-deployed model's in-cluster address directly — `deploy_simulated_model` records `internal_url`), `key_pool_filter: active|revoked`, round-robin key-pool ordering. Counters: `http_attempts`, `server_error_count`, `other_error_count`, `non_throttle_error_rate_pct`, `successes_after_first_429`, and after a 429 `tokens_before_first_429`/`requests_before_first_429`/`seconds_to_first_429`. `revoke_api_keys` takes `count` (revoke only the first N). Aliases: `send_requests_after_window`, `send_requests_via_maas`, `verify_other_keys_still_work`; `verify_revoked_key_not_searchable` aliases `verify_api_key_search`. **Round 3:** `until_throttled` now ramps concurrency (1 → 2 → 4 …, every 2 s, up to `max_concurrency`, default 128) while the measured token rate is below `limit ÷ window`, bounded by `max_duration_s` (default one window, at most 600 s) and `max_requests` (default 20,000). If it's never throttled, `_diagnose_unthrottled` names the bottleneck (`response`: more concurrency stopped helping; `send`: still scaling at the ceiling; `time`/`requests`: a budget ran out) as a finding with the numbers. `allowed_overshoot` = concurrency at the first 429 × max tokens per request bounds "throttled at the limit". `successes_after_first_429` counts only requests *started* after the first 429. `stages` + `stage_duration_s` run a step load with per-step req/s, tokens/s, p50/p95/p99, error and throttled %, plus `final_stage_*` for checks. `chart_group`/`label` (with a wall-clock `t0`) put several bursts on one chart. `error_samples` holds the top 3 non-429 failure reasons, including the cause the SDK hides behind "Connection error.". 404 is its own outcome (`not_found_count`). `skip_unless: "ns.key"` skips a burst whose precondition failed. `url_from_shared_state` reads a model's `direct_url`.
+- **`send_requests` additions (ADR-025)**:
+  - **Bursts**: `retries` (OpenAI SDK `max_retries`, default 2; rate-limit scenarios use 0 so a hidden retry can't mask or land past a 429), `stop_after_429s`, `key_pool_filter: active|revoked`, round-robin key-pool ordering, `skip_unless: "ns.key"` (skip when an earlier precondition failed).
+  - **`until_throttled`**: send until MaaS throttles, ramping concurrency (1 → 2 → 4 …, every 2 s, up to `max_concurrency`, default 128) while the measured token rate is below `limit ÷ window` (a fixed window resets otherwise). The limit and window come from `limit`/`window` params or `limit_from_shared_state`/`window_from_shared_state`; bounds are `max_duration_s` (default one window, at most 600 s) and `max_requests` (default 20,000) — scenario settings, not constants. If never throttled, `_diagnose_unthrottled` names the bottleneck (`response`: more concurrency stopped helping; `send`: still scaling at the ceiling; `time`/`requests`: a budget ran out) as a finding and verdict with the numbers. Progress tracks tokens toward the limit. `allowed_overshoot` = concurrency at the first 429 × max tokens per request bounds "throttled at the limit".
+  - **Step load** (`stages: "5,10,25,50"` + `stage_duration_s`): continuous traffic at each concurrency level, reported per step (req/s, tokens/s, p50/p95/p99, error and throttled %), plus `final_stage_*` for checks; progress shows the step.
+  - **Run page**: `show_limit: false` (no limit line — for a load test's deliberately unlimited subscription, which would flatten the chart), `chart` (open as a chart rather than a one-line summary), `chart_group`/`label` (several bursts on one timeline, placed by a wall-clock `t0`), `error_samples` (top 3 non-429 failure reasons, incl. the cause the SDK hides behind "Connection error.", each with its `median_ms`/`p10_ms`/`p90_ms` — a tight cluster is a timeout's signature). `failed_attempts`/`retried_failed_attempts`/`attempt_error_samples` count every failed HTTP attempt via an httpx event hook, including ones the SDK retried away (per step too: `http_attempts`, `failed_attempts_pct`). In step-load mode, any non-429 failure — visible or retried — also sets `shared_state["_verdict_note"]`, which `_render_verdict` appends even to a passing verdict, 404 as its own outcome.
+  - **Direct calls**: `url_from_shared_state` reads a deployed model's `direct_url` (set by `expose_model_route`); `insecure_tls` for its self-signed certificate.
+  - Aliases: `send_requests_after_window`, `send_requests_via_maas`, `verify_other_keys_still_work`, `verify_revoked_key_denied`, `send_requests_as_second_user`.
 
 - **`expose_model_route` / `probe_direct_endpoint`** (`harness/tasks/model.py`): a passthrough-TLS OpenShift Route straight to a just-deployed model's workload Service (`<name>-kserve-workload-svc`, port `https`), so a latency comparison enters through cluster ingress both ways. `LLMInferenceService.status.addresses` only ever lists MaaS gateway URLs (confirmed live). The probe checks the route answers before timing, records `direct_probe.reachable`, and never fails the run. If unreachable it records a finding, and the MaaS leg still runs. Needs `routes` in `deploy/rbac-model-write.yaml`.
 
@@ -353,7 +421,7 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
 
 ### Background Metrics Polling
 
-MaaS/RHOAI metrics are read from Prometheus/Thanos Querier's instant-query API (`GET {MAAS_METRICS_URL}?query=<promql>`), not a MaaS-specific REST endpoint — see ADR-014 for why, and the SA RBAC (`deploy/rbac-monitoring.yaml`, `cluster-monitoring-view`) this requires. A scenario's `metrics_queries:` block (a dict of `{name: promql}` resolved for `${config.x}` like `assertions:`/task `params:`, see `scenarios/usage_metrics_accuracy.yaml`) names which named PromQL queries to run — moved here from the global ConfigMap's `MAAS_METRICS_QUERIES` in ADR-015 so the query text lives next to the assertions that use it; `MAAS_METRICS_URL` itself stays global (cluster wiring). Confirmed and wired for the cluster this repo targets (`cluster-rkmhx.rkmhx.sandbox1230.opentlc.com`): Kuadrant/Limitador's gateway counters `authorized_calls` (total_requests) and `authorized_hits` (total_tokens — weighted per-token via the model's `TokenRateLimitPolicy`), both scoped by the `limitador_namespace` label (the target model's HTTPRoute name). See `docs/architecture/maas-metrics-reference.md` for the full catalog of every metric-emitting component found (not just these two) and ADR-014 for the decision. If deploying to a different cluster/model, re-verify these against a live `/api/v1/series` query rather than assuming — metric names/labels are confirmed to vary across Limitador deployments.
+MaaS/RHOAI metrics are read from Prometheus/Thanos Querier's instant-query API (`GET {MAAS_METRICS_URL}?query=<promql>`), not a MaaS-specific REST endpoint — see ADR-014 for why, and the SA RBAC (`deploy/rbac-monitoring.yaml`, `cluster-monitoring-view`) this requires. A scenario's `metrics_queries:` block (a dict of `{name: promql}` resolved for `${config.x}` like `assertions:`/task `params:`, see `scenarios/usage_metrics_accuracy.yaml`) names which named PromQL queries to run — moved here from the global ConfigMap's `MAAS_METRICS_QUERIES` in ADR-015 so the query text lives next to the assertions that use it; `MAAS_METRICS_URL` itself stays global (cluster wiring). Originally confirmed on `cluster-rkmhx.rkmhx.sandbox1230.opentlc.com`; `deploy/configmap-global.yaml` now targets `cluster-2ppnp.2ppnp.sandbox449.opentlc.com`, where `limited_calls` was re-confirmed live on 2026-10-02. Kuadrant/Limitador's gateway counters `authorized_calls` (total_requests) and `authorized_hits` (total_tokens — weighted per-token via the model's `TokenRateLimitPolicy`), both scoped by the `limitador_namespace` label (the target model's HTTPRoute name). See `docs/architecture/maas-metrics-reference.md` for the full catalog of every metric-emitting component found (not just these two) and ADR-014 for the decision. If deploying to a different cluster/model, re-verify these against a live `/api/v1/series` query rather than assuming — metric names/labels are confirmed to vary across Limitador deployments.
 
 **Scoping caveat that applies to every form of MaaS-side assertion** (match form and PromQL form alike, ADR-014/ADR-015): no metric in the catalog carries a run-id or caller-id label — the finest grain confirmed live is `limitador_namespace`, shared by every caller of that model route. `authorized_calls`/`authorized_hits` aggregate *all* traffic on that route, not just this run's. Isolation is achieved purely by time-windowing (the baseline-delta subtraction below), never by a Prometheus label filter — a `promql`-form assertion's `${baseline.x}`/`${harness.x}` template variables are numeric literal substitutions, not labels, so they don't change this. Low risk on a dedicated single-model test sandbox; would need a caller-scoped label (if a deployed Limitador ever exposes one) on a busier shared cluster.
 
@@ -393,7 +461,15 @@ The run detail page shows a horizontal **task pipeline** above the logs. Each ch
 
 Chip background colours: grey (PENDING), blue tint (RUNNING), green (DONE), red (FAIL), amber (CANCELLED).
 
-The `TaskProgress` component polls `GET /api/runs/{id}/progress` every 2 s, managing its own interval independently of logs and assertions. Below the chips, a "What happened" list (`RunSteps`) shows each task's one-line `summary` with the objects that task created and each one's cleanup status, plus a final Cleanup row. Chips accept open-ended progress (`total: null`) and a `unit` ("57 / 100 tokens"). The masthead is the `<Page header>` so the page has a single scrollbar. `RunDetail.tsx` also renders, from the same progress file (`components/RunInsights.tsx`): a verdict banner, a traffic panel per burst (requests by outcome, tokens, where throttling started, successes after the first 429, latency, hidden SDK retries) with `TrafficChart.tsx` (cumulative tokens over time, non-OK requests marked by shape + reserved status colour, dashed configured-limit line, crosshair tooltip, data-table view), per-task detail tables, and a "This run created" panel.
+The `TaskProgress` component polls `GET /api/runs/{id}/progress` every 2 s, independently of logs and assertions. Chips also accept open-ended progress (`total: null`) and a `unit` ("57 / 100 tokens", "step 2 / 4").
+
+Below the chips, `RunDetail.tsx` renders the rest of the page from the same progress file (`components/RunInsights.tsx`):
+- **Verdict banner**, or a **Finding** card instead when the scenario found something out rather than checked an expectation.
+- **"What happened"** (`RunSteps`): each task's one-line `summary` with the objects that task created and each one's cleanup status. Five or more objects of one kind collapse into a count-per-status row with "Show all". It ends with a Cleanup row, and the whole panel can be collapsed.
+- **Traffic**: per burst, a one-line summary or the full panel (stats, error reasons, `TrafficChart.tsx`), switchable either way ("Show chart" / "Show summary"). Bursts in one `chart_group` share a timeline with the waits between them shaded. Step-load bursts show a per-step table plus throughput and p95-by-step charts. `MetricsComparisonChart.tsx` plots MaaS-reported vs sent counts.
+- **Tables** tasks publish, the **checks** (`AssertionPanel.tsx`) on the right, and a **Logs** panel at the bottom: line count, last-line preview, a Show/Hide button, open automatically on failure.
+
+The masthead is the `<Page header>`, so the page has a single scrollbar.
 
 ### Scenario Categories (ADR-020, regrouped by ADR-025)
 
@@ -409,22 +485,22 @@ The `TaskProgress` component polls `GET /api/runs/{id}/progress` every 2 s, mana
 
 ## Scenarios
 
-Every scenario answers one question of the form "is my MaaS behaving the way I expect, given what I set up?" (ADR-025). `kind: verify` scenarios use the cluster's existing setup and create nothing but API keys; `kind: explore` scenarios build temporary models/subscriptions/identities to probe how MaaS itself behaves. Every `send_requests`-family assertion goes through the `promql` pass-through form (ADR-015), even pure harness-side numbers — that exercises the real Thanos query path on every run, it doesn't make those checks more meaningful. Rate-limit scenarios send one request at a time with `retries: 0` and `stop_after_429s`, so a hidden SDK retry can't mask a denial and the run stops once the answer is in.
+Every scenario answers one question of the form "is my MaaS behaving the way I expect, given what I set up?" (ADR-025). `kind: verify` scenarios use the cluster's existing setup and create nothing but API keys; `kind: explore` scenarios build temporary models/subscriptions/identities to probe how MaaS itself behaves. Every `send_requests`-family assertion goes through the `promql` pass-through form (ADR-015), even pure harness-side numbers — that exercises the real Thanos query path on every run, it doesn't make those checks more meaningful. Rate-limit scenarios send with `retries: 0` and `until_throttled`, ramping concurrency only as far as needed to use the limit up within one window.
 
 | Scenario (Category, kind) | Question | Key checks | Notes |
 |---|---|---|---|
 | `smoke_test` (Quick check, verify) | Is MaaS working end to end? | models listed ≥ 1; key created; error rate < 5% | REST + gateway only. Revocation/search moved to `api_key_lifecycle`. Formerly `platform_health_check`. |
 | `verify_subscription` (Quick check, verify) | Does my subscription work for every model it covers? | covers ≥ 1 model; key bound to it; models that didn't answer == 0 | Visible steps: `discover_subscription_models` → `provision_api_key` (pinned) → `send_requests_to_each_model`. Reachability only — limits are the Rate limits scenarios' job. |
-| `verify_subscription_rate_limit` (Rate limits, verify) | Is my subscription's rate limit enforced? | throttled at all; `tokens_before_first_429` between the subscription's own limit and limit + spillover (`${harness.subscription_limits.token_limit}` bounds); successes after first 429 == 0; Limitador `limited_calls` delta > 0 | Existing subscription only. `read_subscription_limits` reads the real limit; `until_throttled` sends until throttled (no request-count input), stopping early as "inconclusive" if the limit is too large to use up. Merged from `rate_limit_validation` + `_existing_subscription`. |
-| `keys_share_user_budget` (Rate limits, explore) | Do all my keys share one budget? | combined tokens before first 429 within [limit, limit + spillover]; no key succeeds after the first 429 | Own temporary subscription (100 tokens / 24h), N keys round-robin, until throttled. |
-| `rate_limit_window_recovery` (Rate limits, explore) | Does access come back after the window? | throttled before the wait; successes after the wait > 0 | Own temporary subscription (50 tokens / 1m), `pause` for the window + buffer. |
+| `verify_subscription_rate_limit` (Rate limits, verify) | Is my subscription's rate limit enforced? | throttled at all; `tokens_before_first_429` between the subscription's own limit and limit + `allowed_overshoot`; successes after first 429 == 0; Limitador `limited_calls` delta > 0 | Existing subscription only. `read_subscription_limits` reads the real limit and window; `until_throttled` ramps concurrency to use it up within one window. Max concurrency / duration / requests are advanced settings; if the limit can't be reached, a finding names the bottleneck. **Confirmed live 2026-10-02** on `simulator-premium` (100,000 / 1m): throttled at 100,009 tokens at concurrency 4. Merged from `rate_limit_validation` + `_existing_subscription`. |
+| `keys_share_user_budget` (Rate limits, explore) | Do all my keys share one budget? | combined tokens before first 429 within [limit, limit + `allowed_overshoot`]; no key succeeds after the first 429 | Own temporary subscription (100 tokens / 24h), N keys round-robin, until throttled. Not yet run live. |
+| `rate_limit_window_recovery` (Rate limits, explore) | Does access come back after the window? | throttled before the wait; successes after the wait > 0 | Own temporary subscription (50 tokens / 1m), `pause` for the window + buffer; both bursts on one chart. Not yet run live. |
 | `subscription_auto_selection` (Rate limits, explore) | Which subscription do my keys get? | auto-selected key bound to the higher-priority subscription; tokens sent > low limit; 429s == 0 | Two temporary subscriptions (priority 50/10 tokens vs 200/1M). Formerly `rate_limit_priority_precedence` (ADR-021). |
 | `rate_limit_per_user_or_shared` (Rate limits, explore) | Are limits per user or shared? | result conclusive | Reports a **finding** (per user / shared / inconclusive) via `classify_rate_limit_pooling` — no expectation input. Two minted ServiceAccounts on one temporary 50-token subscription, both bursts `until_throttled`. Needs `deploy/rbac-user-provisioning.yaml`. |
 | `denied_without_auth_policy` (Access control, explore) | No auth policy → access denied? | > 90% rejected; 401/403 > 0; 429 == 0 | Throwaway model + identity + quota-only subscription. Formerly `subscription_without_authpolicy` (ADR-018). |
 | `api_key_lifecycle` (API keys, verify) | Do API keys behave correctly? | name echo / expiry / search finds all; error rate < 5%; revoke 1 key → it's denied, the others still work (< 5% errors), search lists key_count − 1 active | REST-only (ADR-019). |
 | `usage_metrics_accuracy` (Usage metrics, verify) | Do MaaS usage metrics match real traffic? | `authorized_calls`/`authorized_hits` baseline-deltas match requests/tokens sent within tolerance | `limitador_namespace` autofilled from the model's HTTPRoute. Formerly `metrics_fill` (ADR-014/015). Run page plots MaaS-reported vs sent (`metrics_charts:`). |
-| `load_test` (Performance, explore) | How does MaaS hold up under load? | error rate (excluding 429s), throttled % (should be 0) and p99 at the heaviest step | Creates its own temporary subscription for the chosen model (1,000,000,000 tokens per 1 s, so quota never throttles it), then a step load: concurrency `5, 10, 25, 50` × 30 s by default (editable); per-step table plus throughput and p95-by-step charts. Merged from `single_key_load` + `multi_key_load`. |
-| `gateway_overhead` (Performance, explore) | How much latency does the gateway add? | error rates; median via MaaS − median direct < `max_overhead_ms` | Deploys its own simulated model with an auth policy and subscription, plus a passthrough Route straight to it (`expose_model_route`). `probe_direct_endpoint` checks the route answers, then the same burst runs both ways. No endpoint inputs. Formerly `direct_inference`. |
+| `load_test` (Performance, explore) | How does MaaS hold up under load? | error rate (excluding 429s), throttled % (should be 0) and p99 at the heaviest step | Creates its own temporary subscription for the chosen model (1,000,000,000 tokens per 1 s, so quota never throttles it), then a step load: concurrency `5, 10, 25, 50` × 30 s by default (editable); per-step table plus throughput and p95-by-step charts. Merged from `single_key_load` + `multi_key_load`. Keeps the SDK's normal retries (part of the real client experience) but reports what they hid: retried failed attempts with what they got back, and a per-step "Failed attempts" column (live 2026-10-02: under load the MaaS gateway's 200 ms Authorino timeout returned 1,458 500s, of which callers saw only 77 — see the checklist's Networking section). No limit line on its chart. |
+| `gateway_overhead` (Performance, explore) | How much latency does the gateway add? | error rates; median via MaaS − median direct < `max_overhead_ms` | Deploys its own simulated model with an auth policy and subscription, plus a passthrough Route straight to it (`expose_model_route`). `probe_direct_endpoint` checks the route answers, then the same burst runs both ways. No endpoint inputs. **Confirmed live 2026-10-02**: median 7 ms direct vs 48 ms through MaaS. Formerly `direct_inference`. |
 | `multi_model_load` (Performance, explore) | Does MaaS hold up with many models and subscriptions? | error rate excluding 429s < 5% | `request_count: 0` (+ auto cleanup off) just builds the environment. Merged from `multi_model_full_load` + `multi_model_subscription_spread` (ADR-024). |
 | `model_config_health` (Diagnostics, verify) | Are my models wired up correctly? | gateway Programmed; models missing Ready / subscription / auth policy / namespace gateway label / enforced TRLP / route ownership == 0 | Read-only; blank model = every internal model. Reuses `api/maas_client.list_models()`. Formerly `model_health_check` (ADR-022). |
 
@@ -457,21 +533,35 @@ See [`docs/project/implementation-plan.md`](docs/project/implementation-plan.md)
 
 ## Verification
 
-**Note on CR-based scenarios specifically**: every scenario using `kubernetes.client.CustomObjectsApi()` (`verify_subscription_rate_limit`, `denied_without_auth_policy`, `subscription_auto_selection`, `model_config_health`) was, until the ADR-009 update above, broken on every real live run — the harness Job process never configured the Kubernetes client at all, so every such task failed immediately with `urllib3.exceptions.LocationValueError: No host specified`, regardless of anything else being correct. This was only caught once `model_config_health` was actually triggered live for the first time. Fixed in `harness/main.py:_load_kube_config()` and **confirmed live**: `model_config_health`, `subscription_auto_selection`, `verify_subscription_rate_limit`, and `denied_without_auth_policy` all now pass end-to-end on a real cluster (the latter two needed further fixes beyond this one — see ADR-024 and Verification item 8 below).
+### Development
+1. **Unit tests**: `make test` — pytest (harness + API, mocked HTTP/K8s) and Jest (UI). `make lint` — ruff, mypy, eslint.
+2. **Scenario files**: `harness/tests/test_scenarios.py` checks every scenario loads and resolves (in every `when:` mode), uses registered tasks, a known category, display metadata, `inputs`/`requires`/`show_if` that reference real config keys, unique `previous_names`, and that `kustomization.yaml` lists every scenario file.
+3. **Local dev**: `make dev` — FastAPI + Vite dev servers. **Local harness**: `python -m harness.main --scenario scenarios/smoke_test.yaml --run-id test-123` (needs real cluster env vars).
+4. **Seeded run pages**: to check the run page without a cluster, run `ScenarioRunner` on a real scenario with only the cluster edges faked (key creation, model responses, Thanos), point `DATA_DIR`/`DB_PATH` at a scratch dir, serve with `uvicorn api.main:app`, and screenshot with headless Chrome. This caught several layout and wording bugs that tests didn't.
+5. **Deploy**: `make push IMAGE=…` then `make deploy`. Changes reach the cluster only through a new image.
 
-1. **Unit tests**: `make test` — runs `pytest harness/tests/` (mocked HTTP) + Jest (UI components)
-2. **Local harness**: `python -m harness.main --scenario load_test --run-id test-123` (needs real MaaS cluster env vars)
-3. **Local dev**: `make dev` — starts FastAPI dev server + Vite dev server; open browser, verify scenario list loads and assertion panel renders
-4. **Build**: `make build` — multi-stage Docker build (Node UI build → Python image)
-5. **End-to-end**: `make deploy` (`oc apply -k .`) → open Route URL → pick scenario → edit config overrides in modal → start run → confirm task pipeline chips appear within ~2 s and update (RUNNING with progress bar → DONE green) → confirm logs stream and scroll smartly (scroll up to see "N new lines" badge) → confirm assertion panel updates independently → navigate away and back (browser back button should work via URL hash) → verify results in history → verify no leftover `maaspal-*` MaaS API keys → verify `MaaSSubscription` CR state restored after `verify_subscription_rate_limit`
-6. **MaaS metrics cross-check specifically**: run `usage_metrics_accuracy` (needs `MAAS_METRICS_URL` set and `deploy/rbac-monitoring.yaml` applied — the scenario's own `metrics_queries:` block supplies the PromQL) → confirm `maas_requests_match`/`maas_tokens_match` go PASSING, not just `error_rate_pct` — these only appear on `usage_metrics_accuracy`'s run page, not on other scenarios' (they aren't in those scenarios' `assertions:` blocks) — while settling, `send_requests`'s progress bar should stay visible the whole time rather than disappearing and popping back at the end. The `clamp_min(vector(...), 1)` fix has been confirmed valid against a live Thanos Querier directly (`cluster-rkmhx.rkmhx.sandbox1230.opentlc.com`) but not yet re-verified via an actual end-to-end scenario run.
-7. **Runtime display / view settings / stop, specifically**: start a `load_test` run with a large `request_count` → confirm total and per-task elapsed time visibly tick up once a second in the UI while `RUNNING`, and freeze to a sensible final value once the run completes (matching `RunHistory`'s Duration column) → click "View Settings" mid-run and confirm the YAML shown matches what was actually configured, including any launch-modal edits, with no raw secrets/tokens visible (should show `***REDACTED***`) → click "Stop" mid-run on a scenario that provisions API keys (e.g. `load_test` with `key_count: 5`) → confirm the run reaches `CANCELLED` (not stuck `RUNNING`, not `FAIL`) within `_STOP_GRACE_PERIOD_S`, and verify via the MaaS API / `oc` that no `maaspal-*` keys were left behind (needs `deploy/rbac.yaml`'s `delete` verb on `pods` applied).
-8. **Enforcement cross-checks specifically (ADR-018, ADR-024)**: run `verify_subscription_rate_limit` → confirm `first_rate_limit_reaches_budget`/`first_rate_limit_within_spillover`/`maas_denied_by_rate_limit` all go PASSING and `oc get limitador`/the MaaS Setup Rate Limiting tab shows `limited_calls` actually incremented, not just the pre-existing harness-side assertions. Run `denied_without_auth_policy` → confirm `deploy_simulated_model` creates and readies its own throwaway `LLMInferenceService`/`MaaSModelRef` in `llm`, then confirm the run reaches PASS (meaning requests were genuinely denied for auth reasons, `unauthorized_count > 0` and `rate_limited_count == 0`) → confirm cleanup leaves no orphaned `MaaSSubscription`, no orphaned `maaspal-fail-closed-user-*` ServiceAccount (needs `deploy/rbac-user-provisioning.yaml` applied), and no orphaned `maaspal-fail-closed-model-*` `LLMInferenceService`/`MaaSModelRef` (`oc get llminferenceservice,maasmodelref -n llm`). **Both confirmed passing live.** Getting here took three rounds of fixes beyond ADR-018's original third Update: (1) the dedicated-per-model-route mechanism (ADR-024 §1), since a freshly-deployed model is never listed in `/v1/models` regardless of readiness; (2) replacing `verify_subscription_rate_limit`'s throughput/error-rate assertions with the precise `first_rate_limited_at_tokens`-based ones (ADR-024 §4) plus a long `token_window` (ADR-024 §5), since a tight window and aggregate-rate assertions were both actively self-contradicting against this scenario's own goal of *triggering* the limit; (3) the `token_limit`/`token_window` redaction exception (ADR-024 §6) so these values are actually visible in Run Settings while debugging. See `docs/architecture/empirical-verification-checklist.md` for the full backlog of what else is worth checking this way.
-9. **Multi-model load/routing (ADR-024)**: run `multi_model_full_load` → confirm it reaches PASS (`error_rate_pct < 5`) with every request actually landing on its intended model, not a mismatched/first-available one → confirm cleanup leaves no orphaned `maaspal-sim-*` models, `maaspal-dist-sub-*` subscriptions, the `maaspal-dist-policy` `MaaSAuthPolicy`, or `maaspal-dist-key-*` keys. **Confirmed passing live.** If it regresses, suspect the per-model dedicated-route assumption first (ADR-024's Negative consequences) — it's confirmed on one cluster only, not derived from the LLMInferenceService controller's source.
-10. **REST-only API key lifecycle (ADR-019), not yet run against a live cluster**: run `api_key_lifecycle` → confirm all 5 assertion groups go PASSING → in the UI's task pipeline, confirm `verify_revoked_key_denied` renders as its own distinct chip after `revoke_api_keys`, not overlapping/replacing the earlier `send_requests` chip (validates the registry-alias fix for the task-name collision documented in ADR-019) → confirm via `POST /maas-api/v1/api-keys/search` by hand that no `maaspal-lifecycle-key*` keys remain afterward.
-11. **Scenario categories (ADR-020)**: open the scenario list in the UI → confirm 6 populated category sections (Load Testing, Rate Limiting, Access Control, Metrics Validation, API Key Lifecycle, Platform Health) in that order, plus a visible, empty "Custom" section with its placeholder text → drop a scenario YAML with no `category:` field into `scenarios/` and confirm it appears under Custom without any code change.
-12. **Rate-limit priority precedence (ADR-021), not yet run against a live cluster**: run `subscription_auto_selection` → confirm `expected_subscription_match_count == 1` (the auto-selected key actually bound to the higher-priority subscription) → confirm via `oc get maassubscriptions -n models-as-a-service` that both `maaspal-priority-*` subscriptions are gone after the run. If the assertion instead shows a mismatch, don't assume the harness code is wrong first — re-verify live whether `system:authenticated` eligibility and pure-integer-priority-wins are both still accurate for this cluster's MaaS version (see ADR-021's Negative consequences).
-13. **Platform health checks (ADR-022), not yet run against a live cluster**: run `model_config_health` → confirm all 4 assertions PASS → cross-check by hand (`oc get tokenratelimitpolicy/gateway/httproute`) that the flags match reality → confirm it fails honestly (not PENDING) if pointed at a model/gateway/namespace combination where one of the three resources doesn't exist.
-14. **Multi-user rate-limit sharing (ADR-023, ADR-024)**: apply `deploy/rbac-user-provisioning.yaml` first (review its sensitivity before applying) → run `rate_limit_per_user_or_shared` → confirm two `ServiceAccount`s are minted and both keys land on the one shared `MaaSSubscription` (`subscription_echo_match_count == 2`) → confirm `first_rate_limit_reaches_budget_user_a` PASSES (user A's solo burst genuinely exhausts the full 50-token shared budget — the necessary precondition for user B's result to mean anything) → read whichever way `first_rate_limit_reaches_budget_user_b` lands: PASS suggests per-user independent allowances (user B's own untouched budget exhausts at roughly the same token count user A's did), FAIL suggests a shared pool (user B gets denied far below `token_limit`, since user A's burst already spent it) — **either is a valid, useful result**, treat a FAIL as the finding, not a bug report, per ADR-023 → confirm cleanup leaves no orphaned ServiceAccounts (`oc get sa -n maaspal | grep maaspal-pool-user`) and no orphaned `MaaSSubscription` (`oc get maassubscriptions -n models-as-a-service`). Uses the same `token_limit: 50`/`token_window: "24h"`/`concurrency: 1` defaults as `verify_subscription_rate_limit` (ADR-024), for the same reasons. **Confirmed passing live** (user A's precondition assertion; user B's result is the empirical answer either way, not a pass/fail bar on its own).
+### Live checks per scenario
+Run from the UI (or `POST /api/runs`) against a cluster with `deploy/` applied. "Confirmed" means the current scenario passed live; "earlier form" means an older version passed live but the scenario has changed since (ADR-025).
 
-15. **Question-first UX (ADR-025)**: open the scenario list → confirm question titles with badges → launch `verify_subscription_rate_limit` with a small-limit subscription (e.g. `simulator-free`, 100/1m) and its model → confirm there are no limit/request-count inputs, ⓘ popovers explain the advanced settings, and "What this run will do" has "More details" → run it → confirm a single page scrollbar, the verdict, the chip's "N / 100 tokens" progress, the traffic chart's cut-off at the dashed limit line, real-value check cards, and "What happened" listing the API key as removed ✓ after cleanup. Point it at a subscription with a huge limit and confirm it stops early as "Inconclusive". Run `rate_limit_per_user_or_shared` (finding shown first), `usage_metrics_accuracy` (MaaS vs sent charts converge), and `gateway_overhead` — **check its log for the in-cluster address it used**; that address format is unverified. Turn auto cleanup off on one run and confirm resources show "left in place", then "removed ✓" after Clean Up Now.
+| Scenario | Check live | Status |
+|---|---|---|
+| `smoke_test` | models listed, key created, inference < 5% errors | earlier form (as `platform_health_check`) |
+| `verify_subscription` | pick a subscription: table lists its models, each answers | not run live |
+| `verify_subscription_rate_limit` | throttled within [limit, limit + overshoot], 0 successes after, Limitador denials = harness 429s; on a huge limit, an "Inconclusive" finding naming the bottleneck | **confirmed 2026-10-02** (`simulator-premium`, 100k/1m: 100,009 tokens, concurrency 4, 6 denials = 6 429s) |
+| `keys_share_user_budget` | combined tokens at first 429 ≈ one limit; no key gets through after | not run live |
+| `rate_limit_window_recovery` | throttled, wait, access back; one chart with the wait shaded | not run live |
+| `subscription_auto_selection` | key auto-bound to the high-priority subscription; no throttling past the low limit | earlier form (as `rate_limit_priority_precedence`) |
+| `rate_limit_per_user_or_shared` | needs `rbac-user-provisioning.yaml`; a conclusive finding (per user or shared) | earlier form (expectation-based) |
+| `denied_without_auth_policy` | > 90% denied as 401/403, 0 throttled; no orphaned model/SA/subscription (`oc get llminferenceservice,maasmodelref -n maaspal`) | earlier form (as `subscription_without_authpolicy`) |
+| `api_key_lifecycle` | revoke 1 of 3 → it's denied, the other 2 still work, search lists 2 active | not run live in this form |
+| `usage_metrics_accuracy` | `maas_requests_match`/`maas_tokens_match` pass; the MaaS-vs-sent charts converge after a scrape | not run live end to end since the `clamp_min(vector(...))` fix |
+| `load_test` | own unlimited subscription; step table and charts; 0 throttled at the top step | **partly confirmed 2026-10-02** (stopped mid-run by design: 6,434 requests, 0 throttled) |
+| `gateway_overhead` | route probe passes; direct vs MaaS latency compared; route and model removed | **confirmed 2026-10-02** (7 ms direct vs 48 ms via MaaS) |
+| `multi_model_load` | every request lands on its intended model; nothing orphaned | earlier form (as `multi_model_full_load`) |
+| `model_config_health` | all models checked; flags match `oc get tokenratelimitpolicy,gateway,httproute`; fails honestly when a resource is missing | earlier form (as `platform_health_check` with 4 flags) |
+
+### Cross-cutting live checks
+- **Stop** (**confirmed 2026-10-02** on `load_test`): the pod is gone within seconds, the run shows `CANCELLED` and stays there, the Job is deleted after finalization, and temporary resources are removed. Needs `patch` on Jobs (`deploy/rbac.yaml`). A run whose harness dies without a result is finalized by the API backstop (confirmed: it finalized a previously stuck run).
+- **Cleanup**: run page lists every created object as removed/restored; with auto cleanup off they show "left in place", then "removed ✓" after Clean Up Now. Spot-check with `oc get maassubscriptions -n models-as-a-service` and the MaaS key search.
+- **UI**: single page scrollbar; launch form shows ⓘ help, an Advanced section, "What this run will do" with "More details", autofilled limit/window/route from the pickers; run history shows titles, including for runs of renamed scenarios.
+- **CR-based scenarios** need `harness/main.py:_load_kube_config()` (ADR-009 update) — without it every `CustomObjectsApi` call fails with `LocationValueError: No host specified`. Fixed and confirmed live; if CR tasks start failing that way again, check this first.

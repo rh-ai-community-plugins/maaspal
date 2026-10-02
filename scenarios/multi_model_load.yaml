@@ -126,6 +126,7 @@ tasks:
       concurrency: "${config.concurrency}"
       prompt: "${config.prompt}"
       key_pool: true
+      show_limit: false
     assertions:
       non_throttle_error_rate_pct:
         label: "Error rate (excluding throttling)"

@@ -360,6 +360,10 @@ def _render_verdict(
         text = f"{passed} of {total} checks passed."
     else:
         text = "Run completed — this scenario defines no checks."
+    if status != "CANCELLED" and shared_state.get("_verdict_note"):
+        # Something worth knowing even when the checks passed — e.g. a load
+        # test that stayed under its error budget but still had failures.
+        text = f"{text} {shared_state['_verdict_note']}"
     return {"status": status, "text": text, "checks_passed": passed, "checks_total": total}
 
 

@@ -36,7 +36,7 @@ inputs:
     advanced: true
     help: >-
       Where to deploy the test model. Must carry the maas.opendatahub.io/gateway-access
-      label so MaaS's gateway accepts its route (e.g. llm).
+      label so MaaS's gateway accepts its route (make deploy labels maaspal).
   model_ready_timeout:
     advanced: true
     help: "How long to wait for the test model to start, in seconds."
@@ -50,7 +50,7 @@ config:
   request_count: 50
   max_overhead_ms: 500
   concurrency: 5
-  model_namespace: "llm"
+  model_namespace: "maaspal"
   model_ready_timeout: 180
   subscription_namespace: "models-as-a-service"
   prompt: "Hello, world!"
