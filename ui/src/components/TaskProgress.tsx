@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { TaskProgressEntry } from '../api/client';
+import { formatTaskName } from '../scenarioTitles';
 
 interface Props {
   tasks: TaskProgressEntry[];
@@ -45,9 +46,6 @@ const ASSERTION_BADGE_COLOR: Record<string, string> = {
   PENDING: '#9e9e9e',
 };
 
-export function formatTaskName(name: string): string {
-  return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-}
 
 export function TaskProgress({ tasks }: Props) {
   useTick(tasks.some((t) => t.status === 'RUNNING' && !!t.started_at));
@@ -55,16 +53,27 @@ export function TaskProgress({ tasks }: Props) {
   if (tasks.length === 0) return null;
 
   return (
+    <>
     <div className="maaspal-task-pipeline">
       {tasks.map((task, i) => {
         const color = STATUS_COLOR[task.status];
         const isRunning = task.status === 'RUNNING';
+        const total = task.progress?.total ?? null;
+        // A DONE task's bar is full only when its total was the plan (N of N
+        // requests) — a "tokens toward the limit" bar shows where it really
+        // ended up.
         const pct =
-          task.progress && task.progress.total > 0
-            ? task.status === 'DONE'
+          task.progress && total && total > 0
+            ? task.status === 'DONE' && !task.progress.unit
               ? 100
-              : Math.round((task.progress.current / task.progress.total) * 100)
+              : Math.min(100, Math.round((task.progress.current / total) * 100))
             : null;
+        const unit = task.progress?.unit ? ` ${task.progress.unit}` : '';
+        const progressLabel = task.progress
+          ? total
+            ? `${task.progress.current.toLocaleString()} / ${total.toLocaleString()}${unit}`
+            : `${task.progress.current.toLocaleString()}${unit || ' sent'}`
+          : null;
         const badgeColor = task.assertions_status
           ? ASSERTION_BADGE_COLOR[task.assertions_status]
           : null;
@@ -81,6 +90,7 @@ export function TaskProgress({ tasks }: Props) {
             <div
               className={`maaspal-task-chip maaspal-task-chip--${task.status.toLowerCase()}`}
               style={{ '--task-color': color } as React.CSSProperties}
+              title={task.summary}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                 {isRunning ? (
@@ -100,17 +110,17 @@ export function TaskProgress({ tasks }: Props) {
                   />
                 )}
               </div>
-              {pct !== null && (
+              {progressLabel && (
                 <div className="maaspal-task-chip__progress-wrap">
-                  <div className="maaspal-task-chip__progress-bar">
-                    <div
-                      className="maaspal-task-chip__progress-fill"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <span className="maaspal-task-chip__progress-label">
-                    {task.progress!.current} / {task.progress!.total}
-                  </span>
+                  {pct !== null && (
+                    <div className="maaspal-task-chip__progress-bar">
+                      <div
+                        className="maaspal-task-chip__progress-fill"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  )}
+                  <span className="maaspal-task-chip__progress-label">{progressLabel}</span>
                 </div>
               )}
             </div>
@@ -118,5 +128,6 @@ export function TaskProgress({ tasks }: Props) {
         );
       })}
     </div>
+    </>
   );
 }

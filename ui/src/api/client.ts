@@ -1,10 +1,53 @@
+// Per-config-key launch-form metadata (scenario YAML `inputs:`, ADR-025).
+// Every field is optional; a config key with no entry renders as a plain
+// labelled input exactly as before.
+export interface ScenarioInput {
+  label?: string;
+  help?: string;
+  // Collapsed into the launch form's "Advanced" section.
+  advanced?: boolean;
+  // Rendered as a select instead of a free-text input.
+  choices?: string[];
+  // The blank option's text on the model/subscription pickers, e.g. "All
+  // models" when leaving it blank means "every model".
+  placeholder?: string;
+  // Only shown while every listed config key currently has the given value.
+  show_if?: Record<string, string>;
+  // Filled automatically when the user picks a subscription: the first
+  // tokenRateLimits entry of the selected model (or the subscription's
+  // first model) — "limit" or "window".
+  from_subscription?: 'limit' | 'window';
+  // Filled automatically when the user picks a model.
+  from_model?: 'http_route';
+}
+
+// Fields after `category` are optional so the UI degrades gracefully against
+// an older backend — api/routes/scenarios.py always sends them today.
 export interface Scenario {
   name: string;
+  // Plain-language question this scenario answers — what the UI shows.
+  title?: string;
+  summary?: string;
   description: string;
   config: Record<string, string | number | boolean>;
   // Always present — the backend defaults a scenario with no `category:`
   // field to "Custom" (api/routes/scenarios.py).
   category: string;
+  kind?: 'verify' | 'explore';
+  // What kinds of cluster objects a run creates/changes.
+  mutates?: string[];
+  // Config keys that must be non-empty before the run can launch.
+  requires?: string[];
+  needs_rbac?: string[];
+  est_duration?: string;
+  // Position within its category (lower first).
+  order?: number;
+  inputs?: Record<string, ScenarioInput>;
+  // "What this run will do" sentence, ${config.x}-substituted live.
+  plan_template?: string;
+  // Older ids of this scenario, so history rows from before a rename still
+  // resolve to its current title.
+  previous_names?: string[];
 }
 
 export type CleanupStatus = 'pending' | 'cleaning' | 'skipped' | 'done' | 'failed';
@@ -28,6 +71,12 @@ export interface AssertionState {
   value: number | null;
   expected_value?: number | null;
   expression?: string;
+  // Display-only metadata from the scenario YAML (ADR-025).
+  label?: string | null;
+  description?: string | null;
+  unit?: string | null;
+  // Human-readable rendering of the check ("50 – 150", "< 5").
+  target?: string | null;
 }
 
 export interface CreateRunResponse {
@@ -92,15 +141,152 @@ export async function stopRun(runId: string): Promise<void> {
 export interface TaskProgressEntry {
   name: string;
   status: 'PENDING' | 'RUNNING' | 'DONE' | 'FAIL' | 'CANCELLED';
-  progress?: { current: number; total: number };
+  // total null = open-ended (e.g. "send until throttled"); unit labels it
+  // ("tokens" when the bar tracks progress toward a rate limit).
+  progress?: { current: number; total: number | null; unit?: string };
   assertions_status?: 'PASSING' | 'FAILING' | 'PENDING';
   started_at?: string;
   duration_ms?: number;
+  // One-line plain-language narration of what the task did/is doing.
+  summary?: string;
+}
+
+// Timeline point: [seconds since burst start, cumulative tokens, outcome, latency ms]
+export type TrafficOutcome = 'ok' | 'throttled' | 'denied' | 'not_found' | 'server_error' | 'error';
+export type TrafficPoint = [number, number, TrafficOutcome, number];
+
+export interface TrafficSummary {
+  total_requests?: number;
+  http_attempts?: number;
+  success_count?: number;
+  rate_limited_count?: number;
+  unauthorized_count?: number;
+  server_error_count?: number;
+  other_error_count?: number;
+  total_tokens_sent?: number;
+  prompt_tokens_sent?: number;
+  completion_tokens_sent?: number;
+  p50_latency_ms?: number;
+  p95_latency_ms?: number;
+  p99_latency_ms?: number;
+  throughput_rps?: number;
+  token_throughput_per_sec?: number;
+  tokens_before_first_429?: number;
+  requests_before_first_429?: number;
+  seconds_to_first_429?: number;
+  successes_after_first_429?: number;
+  not_found_count?: number;
+  // The most common failure reasons, e.g. "HTTP 404 Not Found".
+  error_samples?: ErrorSample[];
+  // Every failed HTTP attempt, incl. ones the SDK retried and callers never saw.
+  failed_attempts?: number;
+  retried_failed_attempts?: number;
+  attempt_error_samples?: ErrorSample[];
+  // Rate-limit bursts sent "until throttled".
+  allowed_overshoot?: number;
+  concurrency_at_first_429?: number;
+  peak_concurrency?: number;
+  required_tokens_per_s?: number;
+  limit_reached?: 0 | 1;
+  not_throttled_bound?: string;
+  // Step load: one entry per concurrency step.
+  stages?: LoadStage[];
+}
+
+export interface ErrorSample {
+  message: string;
+  count: number;
+  median_ms?: number;
+  p10_ms?: number;
+  p90_ms?: number;
+}
+
+export interface LoadStage {
+  concurrency: number;
+  requests: number;
+  requests_per_s: number;
+  tokens_per_s: number;
+  p50_latency_ms: number;
+  p95_latency_ms: number;
+  p99_latency_ms: number;
+  error_rate_pct: number;
+  throttled_pct: number;
+  // SDK retries included.
+  http_attempts?: number;
+  failed_attempts_pct?: number;
+}
+
+export interface TrafficBurst {
+  task: string;
+  result_key: string;
+  label?: string;
+  // The configured token limit, drawn as the chart's reference line.
+  limit?: number | null;
+  // Whether this burst's shape over time answers the scenario's question —
+  // otherwise it's shown as a one-line summary, no chart.
+  chart?: boolean;
+  // Bursts sharing a group are drawn on one timeline, placed by start time.
+  chart_group?: string | null;
+  // Wall-clock start, seconds since the epoch.
+  t0?: number;
+  planned?: number;
+  summary: TrafficSummary;
+  timeline: TrafficPoint[];
+}
+
+export type ResourceStatus = 'active' | 'removed' | 'restored' | 'revoked' | 'cleanup failed' | 'left in place';
+
+export interface RunResource {
+  kind: string;
+  name: string;
+  // The task that created it — its step on the run page.
+  task?: string;
+  // "patched" = an object that already existed, changed for the run.
+  action?: 'created' | 'patched';
+  status?: ResourceStatus;
+  subscription?: string;
+  owner?: string;
+}
+
+export interface RunFinding {
+  title: string;
+  text: string;
+  outcome?: string;
+}
+
+// [seconds since run start, value reported by MaaS, value counted by the harness]
+export type MetricsPoint = [number, number, number];
+
+export interface MetricsChart {
+  title: string;
+  unit: string;
+  maas_label: string;
+  harness_label: string;
+  points: MetricsPoint[];
+}
+
+export interface RunTable {
+  title: string;
+  columns: string[];
+  rows: string[][];
+}
+
+export interface RunVerdict {
+  status: 'PASS' | 'FAIL' | 'CANCELLED';
+  text: string;
+  checks_passed: number;
+  checks_total: number;
 }
 
 export interface ProgressResponse {
   tasks: TaskProgressEntry[];
   run_started_at?: string;
+  traffic?: TrafficBurst[];
+  resources?: RunResource[];
+  tables?: RunTable[];
+  findings?: RunFinding[];
+  metrics_charts?: MetricsChart[];
+  verdict?: RunVerdict;
 }
 
 export async function getProgress(runId: string): Promise<ProgressResponse> {
@@ -108,7 +294,7 @@ export async function getProgress(runId: string): Promise<ProgressResponse> {
     const r = await fetch(`/api/runs/${runId}/progress`);
     if (!r.ok) return { tasks: [] };
     const data = (await r.json()) as ProgressResponse;
-    return { tasks: data.tasks ?? [], run_started_at: data.run_started_at };
+    return { ...data, tasks: data.tasks ?? [] };
   } catch {
     return { tasks: [] };
   }
@@ -221,6 +407,8 @@ export interface MaasModel {
   phase: string | null;
   ready: boolean;
   endpoint: string | null;
+  // "<namespace>/<HTTPRoute name>" — Limitador's limitador_namespace label.
+  http_route?: string | null;
   subscriptions: MaasModelSubscriptionRef[];
   // null means "couldn't tell" (RBAC/read failure) — never collapse into false.
   has_auth_policy: boolean | null;

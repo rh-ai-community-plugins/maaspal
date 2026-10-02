@@ -2,10 +2,11 @@ import asyncio
 import time
 import traceback
 
+import httpx
 from kubernetes import client as k8s_client
 
 from harness.result import TaskResult
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 _ISVC_GROUP = "serving.kserve.io"
@@ -262,7 +263,13 @@ class DeploySimulatedModelTask(Task):
             ready_count += 1
             ctx.shared_state["task_progress"] = {"current": ready_count, "total": count}
             await ctx.emit_assertion_state()
-            return {"name": isvc_name, "namespace": namespace, "isvc_created": not isvc_existed, "ref_created": not ref_existed, "ready": ref_ready}
+            return {
+                "name": isvc_name,
+                "namespace": namespace,
+                "isvc_created": not isvc_existed,
+                "ref_created": not ref_existed,
+                "ready": ref_ready,
+            }
 
         if parallel:
             results = await asyncio.gather(*[_deploy_one(i) for i in range(count)])
@@ -271,8 +278,17 @@ class DeploySimulatedModelTask(Task):
             for i in range(count):
                 results.append(await _deploy_one(i))
         deployed.extend(results)
+        for r in results:
+            record_created(
+                ctx, self.name, "Model", f"{r['namespace']}/{r['name']}", existed=not r["isvc_created"]
+            )
 
         not_ready = [r["name"] for r in results if not r["ready"]]
+        ctx.shared_state["task_summary"] = (
+            f"Deployed {len(results)} throwaway simulated model(s) in {namespace}: "
+            f"{len(results) - len(not_ready)} ready"
+            + (f", not ready: {', '.join(not_ready)}" if not_ready else "")
+        )
         if not_ready:
             print(
                 f"[deploy_simulated_model] WARNING: {len(not_ready)} model(s) did not become Ready "
@@ -315,4 +331,153 @@ class DeploySimulatedModelTask(Task):
                         print(f"[deploy_simulated_model] cleanup LLMInferenceService {name} FAILED\n{traceback.format_exc()}", flush=True)
 
 
+_ROUTE_GROUP = "route.openshift.io"
+_ROUTE_VERSION = "v1"
+_ROUTE_PLURAL = "routes"
+_DEFAULT_ROUTE_READY_MAX_WAIT_S = 60.0
+_DEFAULT_PROBE_MAX_WAIT_S = 60.0
+
+
+def _workload_service(model_name: str) -> str:
+    """The Service the LLMInferenceService controller creates in front of the
+    model's own pods (confirmed live: "<name>-kserve-workload-svc", HTTPS on
+    port 8000, labelled app.kubernetes.io/name=<name>). Every URL in the
+    LLMInferenceService's status.addresses is a MaaS *gateway* address, never
+    this — so a direct path has to be built from it."""
+    return f"{model_name}-kserve-workload-svc"
+
+
+class ExposeModelRouteTask(Task):
+    """Creates an OpenShift Route straight to a just-deployed model's workload
+    Service — a way in that skips the MaaS gateway but, like MaaS's own route,
+    still enters through the cluster's ingress, so a latency comparison
+    measures the gateway and nothing else (scenarios/gateway_overhead.yaml).
+    TLS passthrough, since the model serves HTTPS itself. Writes `direct_url`
+    onto the model's shared_state["deployed_models"] record."""
+
+    async def run(self, ctx: TaskContext) -> TaskResult:
+        start = time.monotonic()
+        models_key = str(self.params.get("models_from_shared_state", "deployed_models"))
+        max_wait_s = float(self.params.get("ready_max_wait_s", _DEFAULT_ROUTE_READY_MAX_WAIT_S))
+        models = ctx.shared_state.get(models_key) or []
+        if not models:
+            raise RuntimeError(f"No deployed model in shared_state[{models_key!r}] — run deploy_simulated_model first")
+        model = models[0]
+        name, namespace = model["name"], model["namespace"]
+        route_name = f"{name}-direct"
+        api = k8s_client.CustomObjectsApi()
+        body = {
+            "apiVersion": f"{_ROUTE_GROUP}/{_ROUTE_VERSION}",
+            "kind": "Route",
+            "metadata": {
+                "name": route_name,
+                "namespace": namespace,
+                "labels": {"app.kubernetes.io/managed-by": "maaspal"},
+            },
+            "spec": {
+                "to": {"kind": "Service", "name": _workload_service(name)},
+                "port": {"targetPort": "https"},
+                "tls": {"termination": "passthrough", "insecureEdgeTerminationPolicy": "Redirect"},
+            },
+        }
+        api.create_namespaced_custom_object(
+            group=_ROUTE_GROUP, version=_ROUTE_VERSION, namespace=namespace, plural=_ROUTE_PLURAL, body=body
+        )
+        ctx.shared_state.setdefault("_exposed_routes", []).append({"name": route_name, "namespace": namespace})
+        record_created(ctx, self.name, "Route", f"{namespace}/{route_name}")
+
+        host = None
+        waited = 0.0
+        while waited <= max_wait_s:
+            obj = api.get_namespaced_custom_object(
+                group=_ROUTE_GROUP, version=_ROUTE_VERSION, namespace=namespace, plural=_ROUTE_PLURAL, name=route_name
+            )
+            for ingress in (obj.get("status") or {}).get("ingress") or []:
+                if any(c.get("type") == "Admitted" and c.get("status") == "True" for c in ingress.get("conditions") or []):
+                    host = ingress.get("host") or (obj.get("spec") or {}).get("host")
+            if host:
+                break
+            await asyncio.sleep(2)
+            waited += 2
+        if not host:
+            raise RuntimeError(f"Route {namespace}/{route_name} wasn't admitted by the router within {max_wait_s:g}s")
+
+        model["direct_url"] = f"https://{host}/v1"
+        print(f"[expose_model_route] {namespace}/{route_name} → {model['direct_url']}", flush=True)
+        ctx.shared_state["task_summary"] = (
+            f"Exposed {namespace}/{name} directly (no MaaS gateway) at https://{host}"
+        )
+        await ctx.emit_assertion_state()
+        return TaskResult(task_name=self.name, status="PASS", duration_ms=(time.monotonic() - start) * 1000)
+
+    async def cleanup(self, ctx: TaskContext) -> None:
+        api = k8s_client.CustomObjectsApi()
+        for route in ctx.shared_state.get("_exposed_routes") or []:
+            try:
+                api.delete_namespaced_custom_object(
+                    group=_ROUTE_GROUP, version=_ROUTE_VERSION, namespace=route["namespace"],
+                    plural=_ROUTE_PLURAL, name=route["name"],
+                )
+                print(f"[expose_model_route] deleted Route {route['namespace']}/{route['name']}", flush=True)
+            except k8s_client.ApiException as exc:
+                if exc.status != 404:
+                    raise
+
+
+class ProbeDirectEndpointTask(Task):
+    """Before timing anything, checks the direct route actually reaches the
+    model: one chat request, retried while the router picks the new Route up.
+    Never fails the run — if the model can't be reached directly, it records
+    why (shared_state["direct_probe"], a finding and the verdict) so the
+    through-MaaS measurement still runs and the reason is visible."""
+
+    async def run(self, ctx: TaskContext) -> TaskResult:
+        start = time.monotonic()
+        models_key = str(self.params.get("models_from_shared_state", "deployed_models"))
+        max_wait_s = float(self.params.get("max_wait_s", _DEFAULT_PROBE_MAX_WAIT_S))
+        models = ctx.shared_state.get(models_key) or []
+        model = models[0] if models else {}
+        url = model.get("direct_url")
+        last_error = "no direct URL recorded — run expose_model_route first"
+        reachable = False
+        waited = 0.0
+        if url:
+            async with httpx.AsyncClient(verify=False, timeout=15) as client:
+                while waited <= max_wait_s:
+                    try:
+                        resp = await client.post(
+                            f"{url}/chat/completions",
+                            json={"model": model["name"], "messages": [{"role": "user", "content": "ping"}]},
+                        )
+                        if resp.status_code == 200:
+                            reachable = True
+                            break
+                        last_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                    except httpx.HTTPError as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                    await asyncio.sleep(3)
+                    waited += 3
+
+        ctx.shared_state["direct_probe"] = {"reachable": int(reachable)}
+        if reachable:
+            ctx.shared_state["task_summary"] = f"Model answers directly at {url}"
+        else:
+            reason = f"{url or 'no URL'} — {last_error}"
+            ctx.shared_state["task_summary"] = f"Couldn't reach the model directly: {reason}"
+            ctx.shared_state.setdefault("_findings", []).append({
+                "title": "Couldn't reach the model directly",
+                "text": f"The direct route didn't answer ({reason}), so there's nothing to compare MaaS against. "
+                        "The through-MaaS numbers below are still measured.",
+                "outcome": "inconclusive",
+            })
+            ctx.shared_state["_verdict_text"] = f"Couldn't compare: the model wasn't reachable directly ({reason})."
+        await ctx.emit_assertion_state()
+        return TaskResult(task_name=self.name, status="PASS", duration_ms=(time.monotonic() - start) * 1000)
+
+    async def cleanup(self, ctx: TaskContext) -> None:
+        pass
+
+
 REGISTRY["deploy_simulated_model"] = DeploySimulatedModelTask
+REGISTRY["expose_model_route"] = ExposeModelRouteTask
+REGISTRY["probe_direct_endpoint"] = ProbeDirectEndpointTask

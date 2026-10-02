@@ -62,6 +62,8 @@ _MODELREF = {
         "phase": "Ready",
         "conditions": [{"type": "Ready", "status": "True"}],
         "endpoint": "https://maas.example.com/llm/facebook-opt-125m-simulated",
+        "httpRouteName": "facebook-opt-125m-simulated-kserve-route",
+        "httpRouteNamespace": "llm",
     },
 }
 
@@ -360,6 +362,9 @@ def test_list_models_merges_modelref_llmisvc_and_rest(monkeypatch) -> None:
     ]
     assert model["gateway_access_label"] is True
     core_api.read_namespace.assert_called_once_with("llm")
+    # Same format as Limitador's limitador_namespace label — the run launcher
+    # autofills scenario config from it.
+    assert model["http_route"] == "llm/facebook-opt-125m-simulated-kserve-route"
 
 
 def test_list_models_auth_policies_empty_when_none_match() -> None:

@@ -1,8 +1,15 @@
-"""Integration test for the multi_key_load scenario."""
+"""Integration test for the load_test scenario with several keys (formerly multi_key_load)."""
 import os
 import uuid
+from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _five_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAASPAL_CONFIG_OVERRIDES", '{"key_count": 5, "concurrency_steps": "5", "step_duration_s": 10}')
+
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("MAAS_API_URL"),
@@ -14,11 +21,11 @@ async def test_multi_key_load_passes() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/multi_key_load.yaml", run_id)
+    runner = ScenarioRunner("scenarios/load_test.yaml", run_id)
     result = await runner.run()
 
     assert result.status == "PASS", (
-        f"multi_key_load returned {result.status}. "
+        f"load_test returned {result.status}. "
         f"Task results: {result.tasks}. "
         f"Assertions: {result.assertions}"
     )
@@ -30,7 +37,7 @@ async def test_multi_key_load_all_keys_revoked() -> None:
 
     maas_url = os.environ["MAAS_API_URL"]
     sa_token = (
-        open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
         if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
         else os.environ.get("SA_TOKEN", "")
     )
@@ -38,7 +45,7 @@ async def test_multi_key_load_all_keys_revoked() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/multi_key_load.yaml", run_id)
+    runner = ScenarioRunner("scenarios/load_test.yaml", run_id)
     await runner.run()
 
     async with httpx.AsyncClient() as client:

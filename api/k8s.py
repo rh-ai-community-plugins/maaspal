@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import threading
@@ -22,7 +23,8 @@ _threads_lock = threading.Lock()
 
 
 def _kube():
-    from kubernetes import client as k8s, config as k8s_cfg
+    from kubernetes import client as k8s
+    from kubernetes import config as k8s_cfg
 
     try:
         k8s_cfg.load_incluster_config()
@@ -103,9 +105,14 @@ def create_job(scenario: str, run_id: str, config_overrides: dict | None = None)
     job_name = f"maaspal-{safe_scenario}-{run_id[:6]}"
 
     job = k8s.V1Job(
-        metadata=k8s.V1ObjectMeta(name=job_name),
+        metadata=k8s.V1ObjectMeta(name=job_name, labels={"maaspal-run-id": run_id}),
         spec=k8s.V1JobSpec(
             ttl_seconds_after_finished=3600,
+            # Never re-run a scenario: the Job controller would otherwise
+            # replace a failed — or stopped — pod with a fresh one under the
+            # same run id, re-running every task and re-creating keys,
+            # subscriptions and models (confirmed live: default backoffLimit 6).
+            backoff_limit=0,
             template=k8s.V1PodTemplateSpec(
                 metadata=k8s.V1ObjectMeta(labels={"maaspal-run-id": run_id}),
                 spec=pod_spec,
@@ -120,17 +127,22 @@ def create_job(scenario: str, run_id: str, config_overrides: dict | None = None)
 
 
 def stop_run(run_id: str) -> bool:
-    """Ask a run's pod to stop gracefully. Returns False if no pod exists yet
-    (e.g. the run is still PENDING) — caller should finalize the DB row directly
-    in that case, since there's no harness process that will ever self-report.
+    """Ask a run to stop gracefully. Returns False if no pod exists yet (e.g.
+    the run is still PENDING) — caller should finalize the DB row directly in
+    that case, since there's no harness process that will ever self-report.
 
-    Deletes the *pod* (with a grace period), not the Job — deleting the Job
-    instead was considered and rejected: it would race the pod's own graceful
-    shutdown and confuse both _capture_logs and _sync_completed_runs, which key
-    off the pod's phase, not the Job's. grace_period_seconds is exactly what
-    `kubectl delete pod --grace-period=N` uses: kubelet sends SIGTERM immediately
-    and SIGKILLs after N seconds if the container hasn't exited by then — see
-    harness/main.py's SIGTERM handler, which is what actually makes this graceful.
+    Suspends the run's *Job* (spec.suspend=true). Kubernetes then deletes the
+    Job's pod with its own terminationGracePeriodSeconds — SIGTERM now, SIGKILL
+    after _STOP_GRACE_PERIOD_S — so harness/main.py's SIGTERM handler still
+    runs task cleanup, exactly as before. Unlike deleting the pod directly
+    (the previous approach, ADR-016), a suspended Job never starts a
+    replacement pod: confirmed live, deleting the pod made the Job controller
+    re-run the whole scenario under the same run id.
+
+    The Job is found via the pod's ownerReference, so this works for Jobs
+    created before they carried the maaspal-run-id label too. Without the
+    `patch jobs` RBAC grant (deploy/rbac.yaml), falls back to deleting the pod
+    — and warns, since the Job may then re-run it.
     """
     k8s = _kube()
     core = k8s.CoreV1Api()
@@ -139,12 +151,69 @@ def stop_run(run_id: str) -> bool:
     )
     if not pods.items:
         return False
+    pod = pods.items[0]
+    job_name = next(
+        (ref.name for ref in pod.metadata.owner_references or [] if ref.kind == "Job"), None
+    )
+    if job_name:
+        try:
+            k8s.BatchV1Api().patch_namespaced_job(
+                name=job_name, namespace=NAMESPACE, body={"spec": {"suspend": True}}
+            )
+            print(f"[api] stop {run_id}: suspended Job {job_name}", flush=True)
+            return True
+        except k8s.ApiException as exc:
+            print(
+                f"[api] stop {run_id}: could not suspend Job {job_name} ({exc.status} {exc.reason}) — "
+                "falling back to deleting the pod, which the Job may replace. Apply "
+                "deploy/rbac.yaml (patch on jobs) to fix.",
+                flush=True,
+            )
     core.delete_namespaced_pod(
-        name=pods.items[0].metadata.name,
+        name=pod.metadata.name,
         namespace=NAMESPACE,
         grace_period_seconds=_STOP_GRACE_PERIOD_S,
     )
     return True
+
+
+def run_job_state(run_id: str) -> tuple[str | None, bool]:
+    """(job state, pod still exists) for a run — state is "suspended" (Stop),
+    "failed", "active", or None when no Job carries the run's label. Used to
+    finalize a run whose harness died without writing a result."""
+    k8s = _kube()
+    selector = f"maaspal-run-id={run_id}"
+    jobs = k8s.BatchV1Api().list_namespaced_job(namespace=NAMESPACE, label_selector=selector).items
+    pods = k8s.CoreV1Api().list_namespaced_pod(namespace=NAMESPACE, label_selector=selector).items
+    if not jobs:
+        return None, bool(pods)
+    job = jobs[0]
+    if job.spec.suspend:
+        state = "suspended"
+    elif (job.status.failed or 0) > 0:
+        state = "failed"
+    else:
+        state = "active"
+    return state, bool(pods)
+
+
+def delete_stopped_job(run_id: str) -> None:
+    """Remove a run's suspended Job once the run is final — a suspended Job
+    never completes, so ttlSecondsAfterFinished would never clean it up.
+    Best-effort: a missing Job or missing RBAC is just logged."""
+    try:
+        k8s = _kube()
+        batch = k8s.BatchV1Api()
+        for job in batch.list_namespaced_job(
+            namespace=NAMESPACE, label_selector=f"maaspal-run-id={run_id}"
+        ).items:
+            if job.spec.suspend:
+                batch.delete_namespaced_job(
+                    name=job.metadata.name, namespace=NAMESPACE, propagation_policy="Background"
+                )
+                print(f"[api] deleted stopped Job {job.metadata.name}", flush=True)
+    except Exception as exc:
+        print(f"[api] could not delete stopped Job for {run_id}: {exc}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +296,8 @@ def _capture_logs(run_id: str) -> None:
     finally:
         # Atomically promote tmp → final log file.
         if tmp_file.exists():
-            try:
+            with contextlib.suppress(OSError):
                 tmp_file.rename(log_file)
-            except OSError:
-                pass
 
 
 def ensure_log_capture(run_id: str) -> None:
@@ -262,7 +329,7 @@ def get_log_lines(run_id: str, offset: int) -> tuple[list[str], bool]:
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
-            all_lines = [l for l in text.splitlines() if l]
+            all_lines = [line for line in text.splitlines() if line]
             return all_lines[offset:], done
         except OSError:
             continue

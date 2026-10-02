@@ -5,8 +5,28 @@ import os
 import re
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+from harness.cleanup_state import (
+    mark_left_in_place,
+    mark_task_cleanup,
+    read_auto_cleanup_flag,
+    resources_from_state,
+    write_cleanup_state,
+    write_cleanup_status,
+)
+from harness.config import load_scenario
+from harness.metrics_client import fetch_metrics
+from harness.result import (
+    AssertionResult,
+    RunResult,
+    TaskResult,
+    compute_run_status,
+    evaluate_all_assertions,
+)
+from harness.tasks.base import Task, TaskContext
+from harness.tasks.registry import REGISTRY
 
 _SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -105,23 +125,6 @@ def _redact_sensitive_config(value):
     if isinstance(value, list):
         return [_redact_sensitive_config(v) for v in value]
     return value
-
-from harness.cleanup_state import (
-    read_auto_cleanup_flag,
-    write_cleanup_state,
-    write_cleanup_status,
-)
-from harness.config import load_scenario
-from harness.metrics_client import fetch_metrics
-from harness.result import (
-    AssertionResult,
-    RunResult,
-    TaskResult,
-    compute_run_status,
-    evaluate_all_assertions,
-)
-from harness.tasks.base import Task, TaskContext
-from harness.tasks.registry import REGISTRY
 
 _EMIT_DEBOUNCE_S = 0.1
 # Default cap for settling a metrics-dependent assertion (see _settle_and_evaluate).
@@ -265,6 +268,105 @@ def _substitute_harness_vars(template: str, shared_state: dict) -> str | None:
     return None if missing else resolved
 
 
+# The traffic chart only needs enough points to draw the shape of a burst —
+# keep the progress JSON small however many requests a run sends.
+_TIMELINE_MAX_POINTS = 600
+
+
+def _downsample_timeline(timeline: list[list]) -> list[list]:
+    """Thin a send_requests timeline to at most _TIMELINE_MAX_POINTS entries,
+    always keeping the first and last points and every point where the
+    outcome changes (e.g. the very first 429) so the chart never hides the
+    moment throttling started."""
+    if len(timeline) <= _TIMELINE_MAX_POINTS:
+        return list(timeline)
+    stride = len(timeline) / _TIMELINE_MAX_POINTS
+    keep = {int(i * stride) for i in range(_TIMELINE_MAX_POINTS)}
+    keep.update({0, len(timeline) - 1})
+    keep.update(i for i in range(1, len(timeline)) if timeline[i][2] != timeline[i - 1][2])
+    return [timeline[i] for i in sorted(keep)]
+
+
+def _traffic_snapshot(shared_state: dict, default_limit: object = None) -> list[dict]:
+    """One entry per send_requests-family invocation (keyed by result_key),
+    for the run page's traffic summary card and chart. `limit` draws the
+    chart's token-limit reference line: a burst's own (e.g. one model's limit
+    in verify_subscription_models), else the scenario's `token_limit` config."""
+    out = []
+    for result_key, info in (shared_state.get("_traffic") or {}).items():
+        limit = info.get("limit", default_limit)
+        try:
+            limit = float(limit) if limit not in (None, "") else None
+        except (TypeError, ValueError):
+            limit = None
+        out.append(
+            {
+                "task": info.get("task"),
+                "result_key": result_key,
+                "label": info.get("label"),
+                "limit": limit,
+                "planned": info.get("planned"),
+                "summary": shared_state.get(result_key) or {},
+                "timeline": _downsample_timeline(info.get("timeline") or []),
+                "chart": bool(info.get("chart")),
+                "chart_group": info.get("chart_group"),
+                "t0": info.get("t0"),
+            }
+        )
+    return out
+
+
+def _tables_snapshot(shared_state: dict) -> list[dict]:
+    """Per-row detail tables a task publishes for the run page (e.g. one row
+    per model checked), via shared_state["_tables"][title] = {columns, rows}."""
+    return [
+        {"title": title, "columns": t.get("columns", []), "rows": t.get("rows", [])}
+        for title, t in (shared_state.get("_tables") or {}).items()
+    ]
+
+
+def _format_number(value: float) -> str:
+    # Whole numbers from 100 up — "163 ms", not a falsely precise "163.30 ms".
+    if float(value).is_integer() or abs(value) >= 100:
+        return f"{round(value):,}"
+    return f"{value:,.2f}"
+
+
+def _render_verdict(
+    verdict: dict, status: str, shared_state: dict, assertion_results: list[AssertionResult]
+) -> dict:
+    """One plain-language sentence for the top of the run page. Uses the
+    scenario's own `verdict: {pass: ..., fail: ...}` templates when present
+    (${harness.<ns>.<key>} filled from final shared_state, "—" if absent),
+    otherwise a generic "N of M checks passed"."""
+    passed = sum(1 for a in assertion_results if a.status == "PASSING")
+    total = len(assertion_results)
+    template = (verdict or {}).get("pass" if status == "PASS" else "fail")
+    if status == "CANCELLED":
+        text = "Run was stopped before it finished — results below are partial."
+    elif shared_state.get("_verdict_text"):
+        # A task's own conclusion beats a static template — e.g. a rate-limit
+        # burst that found the limit too large to use up ("Inconclusive: …"),
+        # or a classification task's finding.
+        text = str(shared_state["_verdict_text"])
+    elif template:
+        def _sub(m: re.Match) -> str:
+            ns = shared_state.get(m.group(1), {})
+            value = ns.get(m.group(2)) if isinstance(ns, dict) else None
+            return _format_number(float(value)) if isinstance(value, (int, float)) else "—"
+
+        text = _HARNESS_VAR_RE.sub(_sub, str(template)).strip()
+    elif total:
+        text = f"{passed} of {total} checks passed."
+    else:
+        text = "Run completed — this scenario defines no checks."
+    if status != "CANCELLED" and shared_state.get("_verdict_note"):
+        # Something worth knowing even when the checks passed — e.g. a load
+        # test that stayed under its error budget but still had failures.
+        text = f"{text} {shared_state['_verdict_note']}"
+    return {"status": status, "text": text, "checks_passed": passed, "checks_total": total}
+
+
 class ScenarioRunner:
     def __init__(
         self, scenario_path: str, run_id: str, stop_event: asyncio.Event | None = None
@@ -280,9 +382,19 @@ class ScenarioRunner:
         self._stop_event = stop_event
 
     async def _interruptible_sleep(self, seconds: float) -> None:
-        """Like asyncio.sleep, but wakes immediately if a stop is requested."""
+        """Like asyncio.sleep, but wakes immediately if a stop is requested.
+
+        Always yields to the event loop. Waiting on an already-set Event
+        completes without suspending, so without the explicit sleep(0) a loop
+        calling this after a stop could spin forever, starving every other
+        task — including the cancellation meant to end it (confirmed live:
+        a stopped run hung after cleanup until SIGKILL, never writing its
+        result)."""
         if not self._stop_event:
             await asyncio.sleep(seconds)
+            return
+        if self._stop_event.is_set():
+            await asyncio.sleep(0)
             return
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
@@ -329,7 +441,7 @@ class ScenarioRunner:
 
     async def run(self) -> RunResult:
         run_start = time.monotonic()
-        run_started_at = datetime.now(timezone.utc).isoformat()
+        run_started_at = datetime.now(UTC).isoformat()
         scenario = load_scenario(self.scenario_path)
         scenario_name: str = scenario["name"]
         config: dict = scenario.get("_resolved_config", {})
@@ -350,14 +462,18 @@ class ScenarioRunner:
         except OSError as exc:
             print(f"[runner] could not write config snapshot: {exc}", flush=True)
 
-        def _assertion_dict(r: object, task_name: str | None) -> dict:
+        def _assertion_dict(r: AssertionResult, task_name: str | None) -> dict:
             return {
                 "task": task_name,
-                "name": r.name,  # type: ignore[attr-defined]
-                "status": r.status,  # type: ignore[attr-defined]
-                "value": r.current_value,  # type: ignore[attr-defined]
-                "expected_value": r.expected_value,  # type: ignore[attr-defined]
-                "expression": r.expression,  # type: ignore[attr-defined]
+                "name": r.name,
+                "status": r.status,
+                "value": r.current_value,
+                "expected_value": r.expected_value,
+                "expression": r.expression,
+                "label": r.label,
+                "description": r.description,
+                "unit": r.unit,
+                "target": r.target,
             }
 
         def _write_assertions(
@@ -381,6 +497,24 @@ class ScenarioRunner:
                 print(f"[runner] could not write assertions: {exc}", flush=True)
 
         task_completed_progress: dict[str, dict] = {}
+        task_completed_summary: dict[str, str] = {}
+        # The traffic chart's limit line: this run's effective token_limit, but
+        # only for scenarios that declare one (not a stray env var of that name).
+        chart_token_limit = (
+            config.get("token_limit") if "token_limit" in (scenario.get("config") or {}) else None
+        )
+        # Set once the run finishes (see the end of this method).
+        verdict_payload: dict | None = None
+
+        def _freeze_task_state(task_name: str) -> None:
+            """Move the just-finished task's live progress/narration out of
+            shared_state into its frozen per-task snapshot."""
+            tp = shared_state.pop("task_progress", None)
+            if tp:
+                task_completed_progress[task_name] = tp
+            summary = shared_state.pop("task_summary", None)
+            if summary:
+                task_completed_summary[task_name] = summary
 
         def _write_progress(current_idx: int, completed: list[TaskResult]) -> None:
             """Write current task progress to the dedicated PVC file."""
@@ -396,6 +530,9 @@ class ScenarioRunner:
                     cp = task_completed_progress.get(task.name)
                     if cp:
                         entry["progress"] = cp
+                    summary = task_completed_summary.get(task.name)
+                    if summary:
+                        entry["summary"] = summary
                     task_assertions = completed[i].assertions
                     if task_assertions:
                         if any(a.status == "FAILING" for a in task_assertions):
@@ -406,20 +543,33 @@ class ScenarioRunner:
                             entry["assertions_status"] = "PENDING"
                     task_list.append(entry)
                 elif i == current_idx:
-                    entry: dict = {"name": task.name, "status": "RUNNING"}
+                    entry = {"name": task.name, "status": "RUNNING"}
                     if current_task_started_at:
                         entry["started_at"] = current_task_started_at
                     tp = shared_state.get("task_progress")
                     if tp:
                         entry["progress"] = tp
+                    summary = shared_state.get("task_summary")
+                    if summary:
+                        entry["summary"] = summary
                     task_list.append(entry)
                 else:
                     task_list.append({"name": task.name, "status": "PENDING"})
             try:
                 _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+                payload: dict = {
+                    "tasks": task_list,
+                    "run_started_at": run_started_at,
+                    "traffic": _traffic_snapshot(shared_state, chart_token_limit),
+                    "resources": resources_from_state(shared_state),
+                    "findings": list(shared_state.get("_findings") or []),
+                    "tables": _tables_snapshot(shared_state),
+                    "metrics_charts": _metrics_charts_snapshot(),
+                }
+                if verdict_payload:
+                    payload["verdict"] = verdict_payload
                 (_RESULTS_DIR / f"{self.run_id}-progress.json").write_text(
-                    json.dumps({"tasks": task_list, "run_started_at": run_started_at}),
-                    encoding="utf-8",
+                    json.dumps(payload, default=str), encoding="utf-8"
                 )
             except OSError as exc:
                 print(f"[runner] could not write progress: {exc}", flush=True)
@@ -443,6 +593,39 @@ class ScenarioRunner:
         sa_token = _read_sa_token(config)
         metrics_url: str = config.get("MAAS_METRICS_URL", "")
         metrics_queries: dict[str, str] = scenario.get("metrics_queries") or {}
+        # `metrics_charts:` pairs a MaaS-reported value (a shared_state
+        # "metrics" key, e.g. total_tokens_delta) with the harness's own count
+        # of the same thing (e.g. inference_results.total_tokens_sent). Both are
+        # sampled on every metrics poll — including while settling after the
+        # traffic stops — so the run page can show MaaS's counter catching up
+        # with what was really sent (Prometheus scrape lag), not just whether
+        # the two matched in the end.
+        metrics_charts: list[dict] = scenario.get("metrics_charts") or []
+        metrics_chart_points: list[list[list]] = [[] for _ in metrics_charts]
+
+        def _record_metrics_chart_points() -> None:
+            t = round(time.monotonic() - run_start, 1)
+            metrics = shared_state.get("metrics") or {}
+            for chart_spec, points in zip(metrics_charts, metrics_chart_points, strict=True):
+                ns, _, key = str(chart_spec.get("harness", "")).partition(".")
+                harness_value = (shared_state.get(ns) or {}).get(key, 0)
+                maas_value = metrics.get(chart_spec.get("maas"))
+                if maas_value is None:
+                    continue
+                points.append([t, float(maas_value), float(harness_value)])
+
+        def _metrics_charts_snapshot() -> list[dict]:
+            return [
+                {
+                    "title": c.get("title", ""),
+                    "unit": c.get("unit", ""),
+                    "maas_label": c.get("maas_label", "Reported by MaaS"),
+                    "harness_label": c.get("harness_label", "Sent by this run"),
+                    "points": _downsample_timeline(points),
+                }
+                for c, points in zip(metrics_charts, metrics_chart_points, strict=True)
+                if points
+            ]
         # Promql-form assertions (see harness/result.py:_evaluate_promql_assertion)
         # each fire their own ad hoc query, in addition to the named metrics_queries
         # above. promql_after_baseline holds each template with ${baseline.x} already
@@ -483,6 +666,7 @@ class ScenarioRunner:
                 if key in baseline
             }
             shared_state["metrics"] = {**raw, **deltas}
+            _record_metrics_chart_points()
 
         async def _settle_and_evaluate(
             assertions_to_check: dict[str, str | dict], max_wait_s: float
@@ -506,7 +690,9 @@ class ScenarioRunner:
                 elapsed += _METRICS_FINAL_POLL_INTERVAL_S
 
         async def _metrics_bg() -> None:
-            while True:
+            # Nothing left to poll for once a stop is requested — the
+            # top-level settle after cleanup does its own final fetch.
+            while not (self._stop_event and self._stop_event.is_set()):
                 await _fetch_metrics_once()
                 if shared_state.get("metrics"):
                     await emit()
@@ -546,21 +732,19 @@ class ScenarioRunner:
             }
             metrics_bg = asyncio.create_task(_metrics_bg())
 
-        for i, (task, task_def) in enumerate(zip(tasks, task_defs)):
+        for i, (task, task_def) in enumerate(zip(tasks, task_defs, strict=True)):
             if self._stop_event and self._stop_event.is_set():
                 break
             current_task_idx = i
             current_task_assertions = task_def.get("assertions") or {}
-            current_task_started_at = datetime.now(timezone.utc).isoformat()
+            current_task_started_at = datetime.now(UTC).isoformat()
             _write_progress(i, task_results)
             print(f"[runner] task: {task.name}", flush=True)
             start = time.monotonic()
             try:
                 result, stopped = await self._run_task_or_stop(task, ctx, start)
                 if stopped:
-                    tp = shared_state.pop("task_progress", None)
-                    if tp:
-                        task_completed_progress[task.name] = tp
+                    _freeze_task_state(task.name)
                     task_results.append(result)
                     break
                 if current_task_assertions:
@@ -576,9 +760,7 @@ class ScenarioRunner:
                     if result.status == "PASS" and any(a.status == "FAILING" for a in task_assertion_results):
                         result.status = "FAIL"
                         result.error = "assertions failed at task completion"
-                tp = shared_state.pop("task_progress", None)
-                if tp:
-                    task_completed_progress[task.name] = tp
+                _freeze_task_state(task.name)
                 task_results.append(result)
                 if result.status == "FAIL":
                     run_failed = True
@@ -589,9 +771,7 @@ class ScenarioRunner:
                     f"[runner] task FAILED: {task.name}\n{traceback.format_exc()}",
                     flush=True,
                 )
-                tp = shared_state.pop("task_progress", None)
-                if tp:
-                    task_completed_progress[task.name] = tp
+                _freeze_task_state(task.name)
                 task_results.append(
                     TaskResult(
                         task_name=task.name,
@@ -617,16 +797,24 @@ class ScenarioRunner:
                 print(f"[runner] cleanup: {task.name}", flush=True)
                 try:
                     await task.cleanup(ctx)
+                    mark_task_cleanup(shared_state, task.name, ok=True)
                 except Exception:
                     cleanup_failed = True
+                    mark_task_cleanup(shared_state, task.name, ok=False)
                     print(
                         f"[runner] cleanup FAILED: {task.name}\n{traceback.format_exc()}",
                         flush=True,
                     )
+                # Show each resource's removal as it happens.
+                _write_progress(len(task_results), task_results)
             write_cleanup_status(_RESULTS_DIR, self.run_id, "failed" if cleanup_failed else "done")
         else:
             print("[runner] auto-cleanup disabled — skipping task cleanup", flush=True)
+            mark_left_in_place(shared_state)
             write_cleanup_status(_RESULTS_DIR, self.run_id, "skipped")
+        # Persist the per-resource statuses too, so a later manual "Clean Up
+        # Now" (api/cleanup.py) starts from them.
+        write_cleanup_state(_RESULTS_DIR, self.run_id, shared_state)
 
         # Stop the background metrics poller, then let the scenario's top-level
         # assertions settle the same way per-task ones do (_settle_and_evaluate).
@@ -645,13 +833,17 @@ class ScenarioRunner:
             current_task_assertion_results=[],
             global_assertion_results=assertion_results,
         )
-        _write_progress(len(tasks), task_results)
         stopped = bool(self._stop_event and self._stop_event.is_set())
         status = (
             "CANCELLED" if stopped
             else "FAIL" if run_failed
             else compute_run_status(task_results, assertion_results)
         )
+        all_assertion_results = [a for tr in task_results for a in tr.assertions] + assertion_results
+        verdict_payload = _render_verdict(
+            scenario.get("verdict") or {}, status, shared_state, all_assertion_results
+        )
+        _write_progress(len(tasks), task_results)
 
         return RunResult(
             run_id=self.run_id,

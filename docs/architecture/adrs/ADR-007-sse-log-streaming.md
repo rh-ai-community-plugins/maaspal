@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded — replaced by REST polling (see the Update below)
 
 ## Context
 
@@ -36,3 +36,7 @@ The UI automatically reconnects if the SSE connection drops (browser `EventSourc
 
 **Neutral:**
 - The Kubernetes client's `follow=True` log streaming and the SSE response share the same async generator pattern, making the glue code minimal.
+
+## Update: superseded by REST polling
+
+SSE was removed. OpenShift's edge-terminated Routes (HAProxy) buffer response bodies until the connection closes, so events never reached the browser live without cluster-level proxy changes. Logs are now captured to the PVC by a background thread in the API server (`api/k8s.py:_capture_logs`), and the UI polls `GET /api/runs/{id}/logs/lines?offset=N` every second. See CLAUDE.md, "Log Streaming".

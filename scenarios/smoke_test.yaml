@@ -1,0 +1,73 @@
+name: smoke_test
+previous_names: [platform_health_check]
+title: "Is MaaS working end to end?"
+summary: >-
+  The quick check: models are listed, an API key can be created, and
+  inference works with it.
+description: >-
+  Walks the basic user journey through the MaaS REST API and gateway exactly
+  as an end user would — no Kubernetes reads or writes. Lists the models MaaS
+  exposes, creates one API key (letting MaaS pick the subscription), and
+  sends a few inference requests with it. For the full API key lifecycle
+  (search, revocation), see "Do API keys behave correctly?".
+category: "Quick check"
+kind: verify
+order: 1
+mutates: [api_keys]
+est_duration: "~20 s"
+plan_template: >-
+  List MaaS's models, create 1 API key on ${subscription}, and send
+  ${config.request_count} requests to ${model}.
+inputs:
+  target_model_name:
+    label: "Model"
+    placeholder: "Cluster default model"
+    help: "Leave blank to use the cluster's default model (DEFAULT_MODEL in the MaaS:PAL config)."
+  request_count:
+    label: "Requests"
+  concurrency:
+    advanced: true
+    help: "How many requests are in flight at the same time."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  request_count: 3
+  concurrency: 1
+  prompt: "Hello, world!"
+  target_model_name: ""
+  target_model_namespace: ""
+verdict:
+  pass: "MaaS works end to end: models are listed, a key was created, and inference succeeded with it."
+  fail: "Something in the basic MaaS journey is broken — see which step failed below."
+tasks:
+  - name: check_platform_health
+    assertions:
+      model_count:
+        label: "Models visible through MaaS"
+        unit: "models"
+        promql: "${harness.platform_health.model_count}"
+        expect: ">= 1"
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-smoke-key"
+      count: 1
+    assertions:
+      expires_at_present_count:
+        label: "Key created (with an expiry date)"
+        promql: "${harness.key_provision_checks.expires_at_present_count}"
+        expect: "== 1"
+  - name: send_requests
+    params:
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      key_pool: true
+    assertions:
+      error_rate_pct:
+        label: "Inference error rate"
+        unit: "%"
+        promql: "${harness.inference_results.error_rate_pct}"
+        expect: "< 5"
+cleanup: automatic

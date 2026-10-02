@@ -1,4 +1,4 @@
-"""Integration test for the rate_limit_validation scenario."""
+"""Integration test for the denied_without_auth_policy scenario."""
 import os
 import uuid
 
@@ -10,23 +10,25 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def test_rate_limit_validation_passes() -> None:
+async def test_subscription_without_authpolicy_passes() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/rate_limit_validation.yaml", run_id)
+    runner = ScenarioRunner("scenarios/denied_without_auth_policy.yaml", run_id)
     result = await runner.run()
 
     assert result.status == "PASS", (
-        f"rate_limit_validation returned {result.status}. "
+        f"denied_without_auth_policy returned {result.status}. "
         f"Task results: {result.tasks}. "
         f"Assertions: {result.assertions}"
     )
 
 
-async def test_rate_limit_subscription_restored() -> None:
+async def test_subscription_without_authpolicy_subscription_restored() -> None:
     """MaaSSubscription CR must be restored or deleted after the run."""
-    from kubernetes import client as k8s_client, config as k8s_config
+    from kubernetes import client as k8s_client
+    from kubernetes import config as k8s_config
+
     from harness.runner import ScenarioRunner
 
     try:
@@ -35,15 +37,13 @@ async def test_rate_limit_subscription_restored() -> None:
         k8s_config.load_kube_config()
 
     api = k8s_client.CustomObjectsApi()
-    # Must match scenarios/rate_limit_validation.yaml's config defaults
-    # (subscription_namespace/subscription_name), not the harness's own
-    # NAMESPACE — a MaaSSubscription only gets reconciled when it lives in
-    # the MaaS tenant namespace, never the maaspal namespace. See ADR-009's
-    # Update section.
+    # Must match scenarios/denied_without_auth_policy.yaml's config
+    # defaults (subscription_namespace/new_subscription_name) — see ADR-009's
+    # Update section for why this must be the MaaS tenant namespace, never
+    # maaspal.
     namespace = os.environ.get("MAAS_SUBSCRIPTION_NAMESPACE", "models-as-a-service")
-    sub_name = "maaspal-rate-limit-test"
+    sub_name = "maaspal-fail-closed-test"
 
-    # Capture state before
     try:
         before = api.get_namespaced_custom_object(
             group="maas.opendatahub.io",
@@ -56,10 +56,9 @@ async def test_rate_limit_subscription_restored() -> None:
         before = None if exc.status == 404 else (_ for _ in ()).throw(exc)  # type: ignore[assignment]
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/rate_limit_validation.yaml", run_id)
+    runner = ScenarioRunner("scenarios/denied_without_auth_policy.yaml", run_id)
     await runner.run()
 
-    # Capture state after
     try:
         after = api.get_namespaced_custom_object(
             group="maas.opendatahub.io",

@@ -9,7 +9,9 @@ rules:
     verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    # patch: Stop suspends the run's Job (spec.suspend) so it can't start a
+    # replacement pod — see api/k8s.py:stop_run.
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -1,0 +1,111 @@
+name: keys_share_user_budget
+title: "Do all my keys share one budget?"
+summary: >-
+  Several API keys belonging to the same user, on the same subscription,
+  should draw from one token budget — not get the limit once per key.
+description: >-
+  MaaS counts token usage per user (the rate-limit policy it generates counts
+  by auth.identity.userid), so creating more keys shouldn't buy more quota.
+  This creates a temporary subscription with a small limit, several keys on
+  it for the same user, and sends requests round-robin across the keys, one
+  at a time, until throttled. With one shared budget, throttling starts at
+  the limit and every key is blocked from then on; if each key had its own
+  budget, requests on the other keys would keep succeeding after the first 429.
+category: "Rate limits"
+kind: explore
+mutates: [api_keys, subscriptions]
+requires: [target_model_name, target_model_namespace]
+est_duration: "~1 min"
+plan_template: >-
+  Create a temporary subscription allowing ${config.token_limit} tokens on ${model},
+  create ${config.key_count} API keys on it, then send round-robin across the keys
+  until throttled and expect one combined budget of ${config.token_limit} tokens.
+inputs:
+  target_model_name:
+    label: "Model"
+  key_count:
+    label: "API keys"
+  token_limit:
+    advanced: true
+    help: >-
+      The temporary subscription's token limit. Kept small so test traffic
+      uses it up in seconds (~10–30 tokens per request on the simulator).
+  new_subscription_name:
+    advanced: true
+    help: "Name of the temporary MaaSSubscription this run creates and deletes afterwards."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions live in on this cluster (the MaaS tenant namespace)."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  target_model_name: ""
+  target_model_namespace: ""
+  key_count: 3
+  token_limit: 100
+  new_subscription_name: "maaspal-shared-budget-test"
+  subscription_namespace: "models-as-a-service"
+  prompt: "Hello, world!"
+verdict:
+  pass: >-
+    All ${config.key_count} keys shared one budget: throttled after
+    ${harness.inference_results.tokens_before_first_429} tokens combined (limit ${config.token_limit}),
+    and no key got through afterwards.
+  fail: >-
+    The keys didn't behave like one shared budget — throttled after
+    ${harness.inference_results.tokens_before_first_429} tokens combined, and
+    ${harness.inference_results.successes_after_first_429} request(s) succeeded afterwards.
+tasks:
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.token_limit}"
+      # Far longer than the run: the budget can't refill mid-test.
+      token_window: "24h"
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-shared-budget-key"
+      count: "${config.key_count}"
+      subscription: "${config.new_subscription_name}"
+    assertions:
+      subscription_echo_match_count:
+        label: "Keys bound to the test subscription"
+        unit: "keys"
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== ${config.key_count}"
+  - name: send_requests
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      concurrency: 1
+      prompt: "${config.prompt}"
+      key_pool: true
+      retries: 0
+      until_throttled: true
+      limit: "${config.token_limit}"
+      window: "24h"
+      # Enough throttled requests to try every key at least twice afterwards.
+      stop_after_429s: 6
+      chart: true
+    assertions:
+      throttled_at_all:
+        label: "MaaS throttled the traffic"
+        unit: "429s"
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "> 0"
+      tokens_before_first_429:
+        label: "Combined tokens through before the first 429"
+        description: "One shared budget: the limit (plus whatever was in flight), not one limit per key."
+        unit: "tokens"
+        promql: "${harness.inference_results.tokens_before_first_429}"
+        between: ["${config.token_limit}", "${config.token_limit} + ${harness.inference_results.allowed_overshoot}"]
+      other_keys_blocked:
+        label: "Requests that succeeded on any key after the first 429"
+        description: "Non-zero would mean some key still had a budget of its own."
+        unit: "requests"
+        promql: "${harness.inference_results.successes_after_first_429}"
+        expect: "== 0"
+cleanup: automatic

@@ -113,7 +113,7 @@ test('scenarios without target_model_name/namespace or subscription never fetch 
     render(<RunTrigger scenario={plainScenario} onConfirm={jest.fn()} onCancel={jest.fn()} />);
   });
 
-  expect(screen.getByLabelText('request_count')).toBeInTheDocument();
+  expect(screen.getByLabelText('Request count')).toBeInTheDocument();
   expect(global.fetch).not.toHaveBeenCalledWith('/api/maas/models');
   expect(global.fetch).not.toHaveBeenCalledWith('/api/maas/subscriptions');
 });
@@ -133,13 +133,13 @@ test('renders a model picker populated from /api/maas/models', async () => {
     );
   });
 
-  await waitFor(() => screen.getByLabelText('target model'));
+  await waitFor(() => screen.getByLabelText('Model'));
 
   // Underlying raw fields are no longer shown once the picker is active.
   expect(screen.queryByLabelText('target_model_name')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('target_model_namespace')).not.toBeInTheDocument();
 
-  const select = screen.getByLabelText('target model') as HTMLSelectElement;
+  const select = screen.getByLabelText('Model') as HTMLSelectElement;
   fireEvent.change(select, { target: { value: 'llm/facebook-opt-125m-simulated' } });
   expect(select.value).toBe('llm/facebook-opt-125m-simulated');
 });
@@ -153,10 +153,10 @@ test('falls back to manual name/namespace fields when models are unavailable', a
     );
   });
 
-  await waitFor(() => screen.getByLabelText('target_model_name'));
+  await waitFor(() => screen.getByLabelText('Target model name'));
 
-  expect(screen.getByLabelText('target_model_name')).toBeInTheDocument();
-  expect(screen.getByLabelText('target_model_namespace')).toBeInTheDocument();
+  expect(screen.getByLabelText('Target model name')).toBeInTheDocument();
+  expect(screen.getByLabelText('Target model namespace')).toBeInTheDocument();
   expect(screen.getByText(/couldn't load models/i)).toBeInTheDocument();
 });
 
@@ -169,9 +169,9 @@ test('renders a subscription picker populated from /api/maas/subscriptions, with
     );
   });
 
-  await waitFor(() => screen.getByLabelText('subscription'));
+  await waitFor(() => screen.getByLabelText('Subscription'));
 
-  const select = screen.getByLabelText('subscription') as HTMLSelectElement;
+  const select = screen.getByLabelText('Subscription') as HTMLSelectElement;
   expect(select.options).toHaveLength(3); // auto-select + sub-a + sub-b
   fireEvent.change(select, { target: { value: 'sub-a' } });
   expect(select.value).toBe('sub-a');
@@ -186,9 +186,9 @@ test('falls back to manual subscription field when subscriptions are unavailable
     );
   });
 
-  await waitFor(() => screen.getByLabelText('subscription'));
+  await waitFor(() => screen.getByLabelText('Subscription'));
 
-  const field = screen.getByLabelText('subscription');
+  const field = screen.getByLabelText('Subscription');
   expect(field.tagName).toBe('INPUT');
   expect(screen.getByText(/couldn't load subscriptions/i)).toBeInTheDocument();
 });
@@ -205,9 +205,9 @@ test('subscription and model pickers cross-filter each other', async () => {
     );
   });
 
-  await waitFor(() => screen.getByLabelText('subscription'));
-  const subSelect = screen.getByLabelText('subscription') as HTMLSelectElement;
-  const modelSelect = screen.getByLabelText('target model') as HTMLSelectElement;
+  await waitFor(() => screen.getByLabelText('Subscription'));
+  const subSelect = screen.getByLabelText('Subscription') as HTMLSelectElement;
+  const modelSelect = screen.getByLabelText('Model') as HTMLSelectElement;
 
   // Before any selection, both pickers show everything.
   expect(subSelect.options).toHaveLength(3);
@@ -242,9 +242,9 @@ test('picking an incompatible model clears a subscription pin the fetched models
     );
   });
 
-  await waitFor(() => screen.getByLabelText('subscription'));
-  const subSelect = screen.getByLabelText('subscription') as HTMLSelectElement;
-  const modelSelect = screen.getByLabelText('target model') as HTMLSelectElement;
+  await waitFor(() => screen.getByLabelText('Subscription'));
+  const subSelect = screen.getByLabelText('Subscription') as HTMLSelectElement;
+  const modelSelect = screen.getByLabelText('Model') as HTMLSelectElement;
 
   fireEvent.change(subSelect, { target: { value: 'sub-c' } });
   await waitFor(() =>
@@ -288,4 +288,122 @@ test('unchecking auto cleanup sends auto_cleanup: false', async () => {
   const [, init] = (global.fetch as jest.Mock).mock.calls.find(([url]) => url === '/api/runs')!;
   const body = JSON.parse(init.body as string);
   expect(body.auto_cleanup).toBe(false);
+});
+
+const subWithLimit = {
+  ...subA,
+  model_refs: [{ ...subA.model_refs[0], token_rate_limits: [{ limit: 100, window: '1m' }] }],
+};
+const modelAWithRoute = { ...modelA, http_route: 'llm/model-a-kserve-route' };
+
+const rateLimitV2: Scenario = {
+  name: 'verify_subscription_rate_limit',
+  title: "Is my subscription's rate limit enforced?",
+  summary: 'Shows exactly when MaaS starts throttling.',
+  description: 'How it works text',
+  category: 'Rate limits',
+  kind: 'verify',
+  requires: ['target_model_name', 'target_model_namespace'],
+  plan_template: 'Send to ${model} on ${subscription}, expect throttling at ${config.token_limit} per ${config.token_window}.',
+  inputs: {
+    mode: { label: 'Subscription to test', choices: ['existing', 'temporary'] },
+    subscription: { label: 'Subscription', show_if: { mode: 'existing' } },
+    token_limit: { label: 'Token limit', from_subscription: 'limit' },
+    token_window: { label: 'Window', from_subscription: 'window' },
+    limitador_namespace: { advanced: true, from_model: 'http_route' },
+    new_subscription_name: { advanced: true, show_if: { mode: 'temporary' } },
+  },
+  config: {
+    mode: 'existing',
+    subscription: '',
+    target_model_name: '',
+    target_model_namespace: '',
+    token_limit: 50,
+    token_window: '24h',
+    limitador_namespace: '',
+    new_subscription_name: 'maaspal-rate-limit-test',
+  },
+};
+
+test('uses the scenario title, labels, and a "what this run will do" preview', async () => {
+  mockFetch({ available: true, reason: null, items: [modelAWithRoute] }, { available: true, reason: null, items: [subWithLimit] });
+
+  await act(async () => {
+    render(<RunTrigger scenario={rateLimitV2} onConfirm={jest.fn()} onCancel={jest.fn()} />);
+  });
+
+  expect(screen.getByText("Is my subscription's rate limit enforced?")).toBeInTheDocument();
+  expect(screen.getByLabelText('Token limit')).toBeInTheDocument();
+  expect(screen.getByText(/send to the default model on an auto-selected subscription, expect throttling at 50 per 24h/i)).toBeInTheDocument();
+});
+
+test('picking a subscription and model autofills the limit, window and HTTPRoute', async () => {
+  mockFetch({ available: true, reason: null, items: [modelAWithRoute] }, { available: true, reason: null, items: [subWithLimit] });
+
+  await act(async () => {
+    render(<RunTrigger scenario={rateLimitV2} onConfirm={jest.fn()} onCancel={jest.fn()} />);
+  });
+  await waitFor(() => screen.getByLabelText('Subscription'));
+
+  fireEvent.change(screen.getByLabelText('Model *'), { target: { value: 'llm/model-a' } });
+  fireEvent.change(screen.getByLabelText('Subscription'), { target: { value: 'sub-a' } });
+
+  expect((screen.getByLabelText('Token limit') as HTMLInputElement).value).toBe('100');
+  expect((screen.getByLabelText('Window') as HTMLInputElement).value).toBe('1m');
+  // Advanced field, filled even while collapsed — check what gets launched.
+  fireEvent.click(screen.getByRole('button', { name: /launch run/i }));
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/api/runs', expect.anything()));
+  const call = (global.fetch as jest.Mock).mock.calls.find((c) => c[0] === '/api/runs');
+  expect(JSON.parse(call[1].body).config_overrides).toMatchObject({
+    token_limit: 100,
+    token_window: '1m',
+    limitador_namespace: 'llm/model-a-kserve-route',
+  });
+});
+
+test('launch stays disabled until required fields are filled', async () => {
+  mockFetch({ available: true, reason: null, items: [modelAWithRoute] }, { available: true, reason: null, items: [subWithLimit] });
+
+  await act(async () => {
+    render(<RunTrigger scenario={rateLimitV2} onConfirm={jest.fn()} onCancel={jest.fn()} />);
+  });
+  await waitFor(() => screen.getByLabelText('Model *'));
+
+  expect(screen.getByRole('button', { name: /launch run/i })).toBeDisabled();
+  expect(screen.getByText(/required before launching: model/i)).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText('Model *'), { target: { value: 'llm/model-a' } });
+  expect(screen.getByRole('button', { name: /launch run/i })).toBeEnabled();
+});
+
+test('show_if hides fields that do not apply to the selected mode', async () => {
+  mockFetch({ available: true, reason: null, items: [modelAWithRoute] }, { available: true, reason: null, items: [subWithLimit] });
+
+  await act(async () => {
+    render(<RunTrigger scenario={rateLimitV2} onConfirm={jest.fn()} onCancel={jest.fn()} />);
+  });
+  await waitFor(() => screen.getByLabelText('Subscription'));
+
+  fireEvent.change(screen.getByLabelText('Subscription to test'), { target: { value: 'temporary' } });
+  expect(screen.queryByLabelText('Subscription')).not.toBeInTheDocument();
+});
+
+test('help text lives in an info popover, and the description under "More details"', async () => {
+  mockFetch({ available: true, reason: null, items: [modelAWithRoute] }, { available: true, reason: null, items: [subWithLimit] });
+  const scenario: Scenario = {
+    ...rateLimitV2,
+    inputs: { ...rateLimitV2.inputs, token_limit: { label: 'Token limit', help: 'How many tokens per window.' } },
+  };
+
+  await act(async () => {
+    render(<RunTrigger scenario={scenario} onConfirm={jest.fn()} onCancel={jest.fn()} />);
+  });
+
+  expect(screen.queryByText('How it works')).not.toBeInTheDocument();
+  expect(screen.queryByText('How many tokens per window.')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'More info about Token limit' }));
+  expect(await screen.findByText('How many tokens per window.')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'More details' }));
+  expect(screen.getByText('How it works text')).toBeInTheDocument();
 });

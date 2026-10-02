@@ -1,4 +1,4 @@
-"""Integration test for the rate_limit_priority_precedence scenario."""
+"""Integration test for the subscription_auto_selection scenario."""
 import os
 import uuid
 
@@ -14,11 +14,11 @@ async def test_rate_limit_priority_precedence_passes() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/rate_limit_priority_precedence.yaml", run_id)
+    runner = ScenarioRunner("scenarios/subscription_auto_selection.yaml", run_id)
     result = await runner.run()
 
     assert result.status == "PASS", (
-        f"rate_limit_priority_precedence returned {result.status}. "
+        f"subscription_auto_selection returned {result.status}. "
         f"Task results: {result.tasks}. "
         f"Assertions: {result.assertions}"
     )
@@ -26,7 +26,9 @@ async def test_rate_limit_priority_precedence_passes() -> None:
 
 async def test_rate_limit_priority_precedence_no_leftover_subscriptions() -> None:
     """Both temp MaaSSubscriptions must be gone after the run."""
-    from kubernetes import client as k8s_client, config as k8s_config
+    from kubernetes import client as k8s_client
+    from kubernetes import config as k8s_config
+
     from harness.runner import ScenarioRunner
 
     try:
@@ -38,7 +40,7 @@ async def test_rate_limit_priority_precedence_no_leftover_subscriptions() -> Non
     namespace = os.environ.get("MAAS_SUBSCRIPTION_NAMESPACE", "models-as-a-service")
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/rate_limit_priority_precedence.yaml", run_id)
+    runner = ScenarioRunner("scenarios/subscription_auto_selection.yaml", run_id)
     await runner.run()
 
     for sub_name in ("maaspal-priority-low", "maaspal-priority-high"):

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted — amended (see the Update below)
 
 ## Context
 
@@ -46,3 +46,7 @@ Scenario YAML params are referenced in task `params` using `${config.<key>}` int
 
 **Neutral:**
 - The global ConfigMap intentionally contains no scenario-specific values (request counts, rate limits, etc.). Those live exclusively in the scenario YAML `config:` section.
+
+## Update: a third level
+
+A third, highest-precedence level was added: `MAASPAL_CONFIG_OVERRIDES`, a JSON dict the API server injects into the Job. It carries the values the user edited in the UI's launch form before starting the run, and is applied over both the global ConfigMap and the scenario YAML (`harness/config.py:load_scenario`). See CLAUDE.md, "Tiered Config".

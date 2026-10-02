@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Page, PageSection, Tab, Tabs, TabTitleText } from '@patternfly/react-core';
+import { PageSection, Tab, Tabs, TabTitleText } from '@patternfly/react-core';
 import { AccessControlTab } from './AccessControlTab';
 import { AccessSimulatorTab } from './AccessSimulatorTab';
 import { AuthorizationPoliciesTab } from './AuthorizationPoliciesTab';
@@ -23,7 +23,7 @@ export function MaasOverviewPage() {
   const [activeTab, setActiveTab] = useState<TabKey>('subscriptions');
 
   return (
-    <Page>
+    <>
       <PageSection>
         <p className="maaspal-section-heading">MaaS Setup</p>
         <Tabs
@@ -73,6 +73,6 @@ export function MaasOverviewPage() {
           </Tab>
         </Tabs>
       </PageSection>
-    </Page>
+    </>
   );
 }

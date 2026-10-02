@@ -1,4 +1,4 @@
-"""Integration test for the platform_health_check scenario."""
+"""Integration test for the smoke_test scenario."""
 import os
 import uuid
 
@@ -14,11 +14,11 @@ async def test_platform_health_check_passes() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/platform_health_check.yaml", run_id)
+    runner = ScenarioRunner("scenarios/smoke_test.yaml", run_id)
     result = await runner.run()
 
     assert result.status == "PASS", (
-        f"platform_health_check returned {result.status}. "
+        f"smoke_test returned {result.status}. "
         f"Task results: {result.tasks}. "
         f"Assertions: {result.assertions}"
     )

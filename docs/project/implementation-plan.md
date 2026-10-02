@@ -1,5 +1,7 @@
 # MaaS:PAL — Implementation Plan
 
+> **Status (2026-10-02):** this is the original phased build plan, kept as a record. Phases 0–7 are built and running on a live cluster. Phase 8 exists as `.github/workflows/ci.yml` (lint, type check, unit tests). Phase 9's separate guides (quickstart, authoring guide, runbook) haven't been written; `README.md` and `CLAUDE.md` cover the essentials. The project has also grown well past the original five scenarios. Scenario names here are the originals: `single_key_load`/`multi_key_load` are now `load_test`; `direct_inference` is `gateway_overhead`; `rate_limit_validation` is `verify_subscription_rate_limit`; `metrics_fill` is `usage_metrics_accuracy` (ADR-025 has the full mapping). Log streaming moved from SSE to REST polling (ADR-007). For the current state of the project, see `CLAUDE.md`. For what still needs checking against a live cluster, see `docs/architecture/empirical-verification-checklist.md`.
+
 ## Overview
 
 This document breaks the MaaS:PAL project into discrete, ordered phases. Each phase has a clear scope, a set of deliverables, and a **Verification** section — the exact commands or steps that confirm the phase milestone is met before moving on.

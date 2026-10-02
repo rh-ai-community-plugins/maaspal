@@ -20,10 +20,16 @@ interface LogPollResponse {
 
 interface Props {
   runId: string;
+  /** Called whenever the captured lines change — lets a collapsed logs panel
+   * show a line count and last-line preview without rendering the log. */
+  onLines?: (lines: string[]) => void;
 }
 
-export function LogStream({ runId }: Props) {
+export function LogStream({ runId, onLines }: Props) {
   const [lines, setLines] = useState<string[]>([]);
+  useEffect(() => {
+    onLines?.(lines);
+  }, [lines, onLines]);
   const [status, setStatus] = useState<StreamStatus>('connecting');
   const [newLineCount, setNewLineCount] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);

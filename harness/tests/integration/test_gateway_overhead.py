@@ -1,6 +1,7 @@
-"""Integration test for the direct_inference scenario."""
+"""Integration test for the gateway_overhead scenario."""
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -15,23 +16,23 @@ async def test_direct_inference_passes() -> None:
 
     run_id = str(uuid.uuid4())
     # Scenario reads target_url and target_token from env via config interpolation
-    runner = ScenarioRunner("scenarios/direct_inference.yaml", run_id)
+    runner = ScenarioRunner("scenarios/gateway_overhead.yaml", run_id)
     result = await runner.run()
 
     assert result.status == "PASS", (
-        f"direct_inference returned {result.status}. "
+        f"gateway_overhead returned {result.status}. "
         f"Task results: {result.tasks}. "
         f"Assertions: {result.assertions}"
     )
 
 
 async def test_direct_inference_no_api_keys_created() -> None:
-    """direct_inference must not create or leave any MaaS API keys."""
+    """gateway_overhead must not create or leave any MaaS API keys."""
     import httpx
 
     maas_url = os.environ["MAAS_API_URL"]
     sa_token = (
-        open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
         if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
         else os.environ.get("SA_TOKEN", "")
     )
@@ -39,7 +40,7 @@ async def test_direct_inference_no_api_keys_created() -> None:
     from harness.runner import ScenarioRunner
 
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/direct_inference.yaml", run_id)
+    runner = ScenarioRunner("scenarios/gateway_overhead.yaml", run_id)
     await runner.run()
 
     async with httpx.AsyncClient() as client:
@@ -51,4 +52,4 @@ async def test_direct_inference_no_api_keys_created() -> None:
         resp.raise_for_status()
         keys = resp.json().get("items", [])
 
-    assert len(keys) == 0, f"direct_inference should create no keys; found: {keys}"
+    assert len(keys) == 0, f"gateway_overhead should create no keys; found: {keys}"

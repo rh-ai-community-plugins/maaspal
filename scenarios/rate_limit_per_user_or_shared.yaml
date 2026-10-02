@@ -1,0 +1,114 @@
+name: rate_limit_per_user_or_shared
+previous_names: [rate_limit_shared_across_users]
+title: "Are limits per user or shared?"
+summary: >-
+  Two different users on the same subscription: does each get their own
+  token budget, or do they draw from one pool? The run finds out and tells you.
+description: >-
+  Mints two throwaway identities, puts both on one temporary subscription with
+  a small limit, and gives each its own API key. User A sends until throttled,
+  using up the budget; then user B does the same. If user B still gets about a
+  full budget through, limits are per user; if B is throttled almost
+  immediately, the two share one pool. The result is reported as a finding —
+  "per user", "shared", or "inconclusive" when the traffic can't tell them
+  apart. MaaS's generated rate-limit policy counts per user
+  (auth.identity.userid), so "per user" is the documented behaviour.
+category: "Rate limits"
+kind: explore
+mutates: [api_keys, subscriptions, service_accounts]
+needs_rbac: [user-provisioning]
+requires: [target_model_name, target_model_namespace]
+est_duration: "~1 min"
+plan_template: >-
+  Mint 2 users, put both on a temporary ${config.token_limit}-token subscription for
+  ${model}, have user A use it up, then send as user B and report whether limits are
+  per user or shared.
+inputs:
+  target_model_name:
+    label: "Model"
+  token_limit:
+    advanced: true
+    help: "The temporary subscription's token limit — small, so user A's burst alone uses it all up."
+  new_subscription_name:
+    advanced: true
+    help: "Name of the temporary MaaSSubscription this run creates and deletes afterwards."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions live in on this cluster (the MaaS tenant namespace)."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  target_model_name: ""
+  target_model_namespace: ""
+  token_limit: 50
+  new_subscription_name: "maaspal-shared-pool-test"
+  subscription_namespace: "models-as-a-service"
+  prompt: "Hello, world!"
+verdict:
+  pass: "See the finding above."
+  fail: "The run couldn't reach a clear answer — see the finding and checks below."
+tasks:
+  - name: create_user
+    params:
+      count: 2
+      name_prefix: "maaspal-pool-user"
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.token_limit}"
+      # Far longer than the run, so the budget can't refill between the bursts.
+      token_window: "24h"
+      # Only the two minted users — no other caller can share this quota.
+      owner_groups: []
+      owner_users_from_shared_state: "users"
+  - name: provision_keys_for_users
+    params:
+      key_name_prefix: "maaspal-pool-key"
+      subscription: "${config.new_subscription_name}"
+    assertions:
+      subscription_echo_match_count:
+        label: "Both users' keys on the shared subscription"
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== 2"
+  - name: send_requests
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      concurrency: 1
+      prompt: "${config.prompt}"
+      key_index: 0
+      result_key: "inference_results_user_a"
+      chart_group: "users"
+      label: "User A"
+      retries: 0
+      until_throttled: true
+      limit: "${config.token_limit}"
+      window: "24h"
+      chart: true
+  - name: send_requests_as_second_user
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      concurrency: 1
+      prompt: "${config.prompt}"
+      key_index: 1
+      result_key: "inference_results_user_b"
+      chart_group: "users"
+      label: "User B"
+      retries: 0
+      until_throttled: true
+      limit: "${config.token_limit}"
+      window: "24h"
+      chart: true
+  - name: classify_rate_limit_pooling
+    params:
+      token_limit: "${config.token_limit}"
+    assertions:
+      conclusive:
+        label: "Result was conclusive"
+        description: "The two bursts clearly showed either per-user or shared limits."
+        promql: "${harness.pooling.conclusive}"
+        expect: "== 1"
+cleanup: automatic

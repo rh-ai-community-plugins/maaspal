@@ -2,7 +2,7 @@ import asyncio
 import json
 import traceback
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from api.db import get_db_path, init_db
+from api.k8s import delete_stopped_job, run_job_state
 from api.routes.assertions import router as assertions_router
 from api.routes.config import router as config_router
 from api.routes.logs import router as logs_router
@@ -22,6 +23,31 @@ from harness.cleanup_state import read_cleanup_status
 _RESULTS_DIR = Path("/data/results")
 _POLL_INTERVAL_S = 10
 
+# Runs seen once with a dead harness (Job suspended/failed, no pod, no result
+# file) — finalized only when still true on the next poll, so a result file
+# written just as the pod exits isn't raced.
+_dead_harness_seen: set[str] = set()
+
+
+def _finalize_without_result(run_id: str) -> tuple[str, str | None] | None:
+    """Safety net for a harness that died without writing its result (SIGKILL
+    after an overrun grace period, OOMKill): the run would otherwise stay
+    RUNNING forever. Returns (status, note) once it's certain, else None."""
+    try:
+        state, pod_exists = run_job_state(run_id)
+    except Exception as exc:
+        print(f"[api] could not read Job state for {run_id}: {exc}", flush=True)
+        return None
+    if pod_exists or state not in ("suspended", "failed"):
+        _dead_harness_seen.discard(run_id)
+        return None
+    if run_id not in _dead_harness_seen:
+        _dead_harness_seen.add(run_id)
+        return None
+    _dead_harness_seen.discard(run_id)
+    status = "CANCELLED" if state == "suspended" else "FAIL"
+    return status, "The run's process ended without reporting a result."
+
 
 async def _sync_completed_runs() -> None:
     async with aiosqlite.connect(get_db_path()) as db:
@@ -32,6 +58,26 @@ async def _sync_completed_runs() -> None:
     for run_id in running:
         result_path = _RESULTS_DIR / f"{run_id}.json"
         if not result_path.exists():
+            finalized = await asyncio.to_thread(_finalize_without_result, run_id)
+            if finalized is None:
+                continue
+            status, note = finalized
+            cleanup_info = read_cleanup_status(_RESULTS_DIR, run_id)
+            async with aiosqlite.connect(get_db_path()) as db:
+                await db.execute(
+                    "UPDATE runs SET status=?, updated_at=?, cleanup_status=?, cleanup_error=? WHERE id=?",
+                    (
+                        status,
+                        datetime.now(UTC).isoformat(),
+                        cleanup_info.get("status", "pending"),
+                        cleanup_info.get("error"),
+                        run_id,
+                    ),
+                )
+                await db.commit()
+            print(f"[api] run {run_id} → {status} (no result written: {note})", flush=True)
+            if status == "CANCELLED":
+                await asyncio.to_thread(delete_stopped_job, run_id)
             continue
         try:
             data = json.loads(result_path.read_text())
@@ -63,7 +109,7 @@ async def _sync_completed_runs() -> None:
                 "WHERE id=?",
                 (
                     status,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     duration_ms,
                     cleanup_status,
                     cleanup_error,
@@ -72,6 +118,8 @@ async def _sync_completed_runs() -> None:
             )
             await db.commit()
         print(f"[api] run {run_id} → {status} (cleanup: {cleanup_status})", flush=True)
+        if status == "CANCELLED":
+            await asyncio.to_thread(delete_stopped_job, run_id)
 
 
 async def _poll_job_statuses() -> None:

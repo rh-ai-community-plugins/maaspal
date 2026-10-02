@@ -1,0 +1,121 @@
+name: subscription_auto_selection
+previous_names: [rate_limit_priority_precedence]
+title: "Which subscription do my keys get?"
+summary: >-
+  When you're eligible for two subscriptions on the same model, MaaS should
+  bind new keys to the higher-priority one — and enforce its limit, not the other's.
+description: >-
+  Creates two temporary subscriptions on the same model for the same caller,
+  with different priorities and very different token limits. Creates an API
+  key WITHOUT naming a subscription, so MaaS auto-selects one, and checks it
+  picked the higher-priority subscription. Then sends more tokens than the
+  low-priority subscription allows: if the wrong limit were enforced, the
+  burst would be throttled almost immediately. Priority is resolved once, at
+  key creation — not per request (ADR-021).
+category: "Rate limits"
+kind: explore
+mutates: [api_keys, subscriptions]
+requires: [target_model_name, target_model_namespace]
+est_duration: "~1 min"
+plan_template: >-
+  Create subscriptions ${config.new_low_priority_subscription_name} (priority
+  ${config.low_priority}, ${config.low_priority_token_limit} tokens) and
+  ${config.new_high_priority_subscription_name} (priority ${config.high_priority},
+  ${config.high_priority_token_limit} tokens) on ${model}, create an
+  auto-selected key, and send ${config.request_count} requests with it.
+inputs:
+  low_priority:
+    label: "Low priority"
+    help: "Priority of the first temporary subscription. When you're eligible for several subscriptions on a model, MaaS binds new keys to the highest priority."
+  high_priority:
+    label: "High priority"
+    help: "Priority of the second temporary subscription — the one new keys should get."
+  low_priority_token_limit:
+    label: "Low-priority token limit"
+    help: "Kept tiny on purpose — the burst below blows straight through it, so being bound to this one shows up as throttling."
+  high_priority_token_limit:
+    label: "High-priority token limit"
+    help: "Generous, so the high-priority subscription never throttles this test's traffic."
+  request_count:
+    label: "Requests"
+    help: "Must send well over the low-priority limit in tokens (~10–30 tokens per request on the simulator)."
+  new_low_priority_subscription_name:
+    advanced: true
+    help: "Name of the temporary low-priority subscription."
+  new_high_priority_subscription_name:
+    advanced: true
+    help: "Name of the temporary high-priority subscription."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions (and auth policies) live in on this cluster — the MaaS tenant namespace."
+  concurrency:
+    advanced: true
+    help: "How many requests are in flight at the same time."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  target_model_name: ""       # the MaaSModelRef's own name
+  target_model_namespace: ""  # the namespace that MaaSModelRef lives in
+  # Clearly outside the 100 default used by other scenarios' temporary
+  # subscriptions (harness/tasks/subscription.py's _DEFAULT_PRIORITY), so the
+  # outcome doesn't depend on what else happens to be running.
+  low_priority: 50
+  high_priority: 200
+  low_priority_token_limit: 10
+  high_priority_token_limit: 1000000
+  request_count: 10
+  concurrency: 1
+  new_low_priority_subscription_name: "maaspal-priority-low"
+  new_high_priority_subscription_name: "maaspal-priority-high"
+  subscription_namespace: "models-as-a-service"
+  prompt: "Hello, world!"
+verdict:
+  pass: "MaaS bound the key to the higher-priority subscription and enforced its limit, not the lower one's."
+  fail: "Auto-selection or enforcement didn't follow priority — see which check failed below."
+tasks:
+  - name: apply_priority_test_subscriptions
+    params:
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      subscriptions:
+        - name: "${config.new_low_priority_subscription_name}"
+          priority: "${config.low_priority}"
+          token_limit: "${config.low_priority_token_limit}"
+        - name: "${config.new_high_priority_subscription_name}"
+          priority: "${config.high_priority}"
+          token_limit: "${config.high_priority_token_limit}"
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-priority-key"
+      # Deliberately NOT pinning `subscription` — auto-selection is what's
+      # under test. expect_subscription only checks the outcome.
+      expect_subscription: "${config.new_high_priority_subscription_name}"
+    assertions:
+      expected_subscription_match_count:
+        label: "Key auto-bound to the higher-priority subscription"
+        promql: "${harness.key_provision_checks.expected_subscription_match_count}"
+        expect: "== 1"
+  - name: send_requests
+    params:
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_pool: true
+      retries: 0
+    assertions:
+      sent_past_low_limit:
+        label: "Tokens sent (must exceed the low-priority limit)"
+        description: "Precondition — otherwise not being throttled below proves nothing."
+        unit: "tokens"
+        promql: "${harness.inference_results.total_tokens_sent}"
+        expect: "> ${config.low_priority_token_limit}"
+      not_throttled_by_low_limit:
+        label: "Requests throttled"
+        description: "Zero means the high-priority subscription's limit is the one enforced."
+        unit: "429s"
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "== 0"
+cleanup: automatic

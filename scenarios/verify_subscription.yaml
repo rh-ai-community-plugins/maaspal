@@ -1,0 +1,68 @@
+name: verify_subscription
+title: "Does my subscription work for every model it covers?"
+summary: >-
+  Pick one of your subscriptions: lists the models it covers and checks each
+  one actually answers with an API key on that subscription.
+description: >-
+  Finds every model the subscription lists (its modelRefs), creates one API
+  key pinned to the subscription, and sends a few requests to each model with
+  it. A model that doesn't answer usually has no matching auth policy for
+  this subscription's users, or isn't Ready — "Are my models wired up
+  correctly?" shows which. This only checks reachability; whether limits are
+  enforced is what the Rate limits scenarios are for.
+category: "Quick check"
+kind: verify
+mutates: [api_keys]
+requires: [subscription]
+est_duration: "~30 s"
+plan_template: >-
+  List the models ${subscription} covers, create 1 API key on it, and send
+  ${config.requests_per_model} requests to each model.
+inputs:
+  subscription:
+    label: "Subscription"
+  requests_per_model:
+    label: "Requests per model"
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  subscription: ""
+  requests_per_model: 3
+  prompt: "Hello, world!"
+verdict:
+  pass: >-
+    All ${harness.subscription_check.model_count} models this subscription covers answered with its key.
+  fail: >-
+    ${harness.subscription_check.reachable_count} of ${harness.subscription_check.model_count}
+    models answered with this subscription's key — the table shows why the others didn't.
+tasks:
+  - name: discover_subscription_models
+    params:
+      subscription: "${config.subscription}"
+    assertions:
+      covers_models:
+        label: "Models this subscription covers"
+        unit: "models"
+        promql: "${harness.subscription_check.model_count}"
+        expect: ">= 1"
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-verify-subscription-key"
+      subscription: "${config.subscription}"
+    assertions:
+      subscription_echo_match_count:
+        label: "Key bound to this subscription"
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== 1"
+  - name: send_requests_to_each_model
+    params:
+      requests_per_model: "${config.requests_per_model}"
+      prompt: "${config.prompt}"
+    assertions:
+      unreachable_models:
+        label: "Models that didn't answer"
+        unit: "models"
+        promql: "${harness.subscription_check.model_count} - ${harness.subscription_check.reachable_count}"
+        expect: "== 0"
+cleanup: automatic

@@ -37,15 +37,40 @@ async def client(_temp_db, _mock_k8s):
         yield c
 
 
-async def test_scenarios_returns_twelve(client) -> None:
+async def test_scenarios_returns_all_fourteen_with_metadata(client) -> None:
     resp = await client.get("/api/scenarios")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 12
-    names = {s["name"] for s in data}
-    assert {"single_key_load", "multi_key_load", "direct_inference"} <= names
-    assert {"multi_model_subscription_spread", "multi_model_full_load"} <= names
-    assert all("name" in s and "description" in s and "category" in s for s in data)
+    assert len(data) == 14
+    by_name = {s["name"]: s for s in data}
+    assert {"smoke_test", "verify_subscription", "verify_subscription_rate_limit", "load_test"} <= set(by_name)
+    for s in data:
+        for field in ("title", "summary", "description", "category", "kind", "inputs", "previous_names"):
+            assert field in s, f"{s['name']} missing {field}"
+
+    rate_limit = by_name["verify_subscription_rate_limit"]
+    assert rate_limit["title"] == "Is my subscription's rate limit enforced?"
+    assert rate_limit["kind"] == "verify"
+    assert set(rate_limit["previous_names"]) == {
+        "rate_limit_validation", "rate_limit_validation_existing_subscription",
+    }
+    # The limit itself is read off the subscription at run time, not typed in.
+    assert "token_limit" not in rate_limit["config"]
+    assert rate_limit["inputs"]["limitador_namespace"]["from_model"] == "http_route"
+
+
+async def test_scenario_metadata_defaults_for_a_bare_custom_scenario(client, tmp_path, monkeypatch) -> None:
+    """A user-written scenario with none of the display metadata still lists
+    cleanly: title from its name, kind "verify", empty lists."""
+    (tmp_path / "my_check.yaml").write_text(
+        "name: my_check\ndescription: test\ntasks: []\ncleanup: automatic\n"
+    )
+    monkeypatch.setenv("SCENARIOS_DIR", str(tmp_path))
+
+    [scenario] = (await client.get("/api/scenarios")).json()
+    assert scenario["title"] == "My Check"
+    assert scenario["kind"] == "verify"
+    assert scenario["requires"] == [] and scenario["inputs"] == {}
 
 
 async def test_scenarios_category_defaults_to_custom(client, tmp_path, monkeypatch) -> None:
@@ -60,19 +85,19 @@ async def test_scenarios_category_defaults_to_custom(client, tmp_path, monkeypat
     resp = await client.get("/api/scenarios")
     assert resp.status_code == 200
     data = resp.json()
-    assert data == [{"name": "no_category", "description": "test", "config": {}, "category": "Custom"}]
+    assert [(s["name"], s["category"]) for s in data] == [("no_category", "Custom")]
 
 
 async def test_create_run_returns_run_id(client) -> None:
-    resp = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    resp = await client.post("/api/runs", json={"scenario": "load_test"})
     assert resp.status_code == 201
     data = resp.json()
     assert "run_id" in data
-    assert data["scenario"] == "single_key_load"
+    assert data["scenario"] == "load_test"
 
 
 async def test_list_runs_includes_created_run(client) -> None:
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.get("/api/runs")
@@ -82,13 +107,13 @@ async def test_list_runs_includes_created_run(client) -> None:
 
 
 async def test_get_run_by_id(client) -> None:
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.get(f"/api/runs/{run_id}")
     assert resp.status_code == 200
     assert resp.json()["id"] == run_id
-    assert resp.json()["scenario"] == "single_key_load"
+    assert resp.json()["scenario"] == "load_test"
 
 
 async def test_get_nonexistent_run_returns_404(client) -> None:
@@ -97,7 +122,7 @@ async def test_get_nonexistent_run_returns_404(client) -> None:
 
 
 async def test_get_run_log_lines(client) -> None:
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.get(f"/api/runs/{run_id}/logs/lines")
@@ -113,7 +138,7 @@ async def test_stop_pending_run_finalizes_immediately(client, monkeypatch) -> No
 
     monkeypatch.setattr(api.routes.runs, "stop_run", lambda run_id: False)
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.post(f"/api/runs/{run_id}/stop")
@@ -132,7 +157,7 @@ async def test_stop_running_run_returns_stopping_without_finalizing(client, monk
 
     monkeypatch.setattr(api.routes.runs, "stop_run", lambda run_id: True)
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.post(f"/api/runs/{run_id}/stop")
@@ -151,7 +176,7 @@ async def test_stop_unknown_run_returns_404(client) -> None:
 async def test_stop_already_terminal_run_returns_409(client) -> None:
     from api.db import get_db_path
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     async with aiosqlite.connect(get_db_path()) as db:
@@ -163,7 +188,7 @@ async def test_stop_already_terminal_run_returns_409(client) -> None:
 
 
 async def test_get_run_config_before_written_returns_null(client) -> None:
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.get(f"/api/runs/{run_id}/config")
@@ -177,7 +202,7 @@ async def test_get_run_config_returns_yaml(client, tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(api.routes.config, "_DATA_DIR", tmp_path)
     (tmp_path / "results").mkdir(parents=True, exist_ok=True)
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     (tmp_path / "results" / f"{run_id}-config.json").write_text(
@@ -196,7 +221,7 @@ async def test_create_run_defaults_auto_cleanup_true(client, tmp_path, monkeypat
 
     monkeypatch.setattr(api.routes.runs, "_RESULTS_DIR", tmp_path)
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     get_resp = await client.get(f"/api/runs/{run_id}")
@@ -212,7 +237,7 @@ async def test_create_run_respects_auto_cleanup_false(client, tmp_path, monkeypa
     monkeypatch.setattr(api.routes.runs, "_RESULTS_DIR", tmp_path)
 
     r = await client.post(
-        "/api/runs", json={"scenario": "single_key_load", "auto_cleanup": False}
+        "/api/runs", json={"scenario": "load_test", "auto_cleanup": False}
     )
     run_id = r.json()["run_id"]
 
@@ -228,7 +253,7 @@ async def test_set_auto_cleanup_toggle_while_active(client, tmp_path, monkeypatc
 
     monkeypatch.setattr(api.routes.runs, "_RESULTS_DIR", tmp_path)
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.post(f"/api/runs/{run_id}/auto-cleanup", json={"enabled": False})
@@ -250,7 +275,7 @@ async def test_set_auto_cleanup_404_unknown_run(client) -> None:
 async def test_set_auto_cleanup_409_once_terminal(client) -> None:
     from api.db import get_db_path
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     async with aiosqlite.connect(get_db_path()) as db:
@@ -267,7 +292,7 @@ async def test_cleanup_now_404_unknown_run(client) -> None:
 
 
 async def test_cleanup_now_409_while_active(client) -> None:
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     resp = await client.post(f"/api/runs/{run_id}/cleanup")
@@ -277,7 +302,7 @@ async def test_cleanup_now_409_while_active(client) -> None:
 async def test_cleanup_now_409_when_already_done(client) -> None:
     from api.db import get_db_path
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     async with aiosqlite.connect(get_db_path()) as db:
@@ -301,7 +326,7 @@ async def test_cleanup_now_starts_when_skipped(client, monkeypatch) -> None:
 
     monkeypatch.setattr(api.routes.runs, "run_manual_cleanup", _fake_manual_cleanup)
 
-    r = await client.post("/api/runs", json={"scenario": "single_key_load"})
+    r = await client.post("/api/runs", json={"scenario": "load_test"})
     run_id = r.json()["run_id"]
 
     async with aiosqlite.connect(get_db_path()) as db:

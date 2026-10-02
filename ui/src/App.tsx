@@ -93,31 +93,32 @@ function App() {
     setView(next);
   }
 
+  // One <Page> for every view, with the masthead as its header: PatternFly's
+  // Page fills the viewport and owns the only scroll container, so the
+  // masthead must live inside it — rendered above a full-height Page, it
+  // pushed the document past the viewport and gave every view two scrollbars.
+  const activeNav = view.page === 'run' ? null : view.page;
+  const masthead = <MaaspalMasthead activeNav={activeNav} onNavigate={handleNavigate} />;
+
   if (view.page === 'run') {
     return (
-      <>
-        <MaaspalMasthead activeNav={null} onNavigate={handleNavigate} />
-        <RunDetail
-          runId={view.runId}
-          onBack={handleBack}
-        />
-      </>
+      <Page header={masthead}>
+        <RunDetail runId={view.runId} onBack={handleBack} />
+      </Page>
     );
   }
 
   if (view.page === 'maas') {
     return (
-      <>
-        <MaaspalMasthead activeNav="maas" onNavigate={handleNavigate} />
+      <Page header={masthead}>
         <MaasOverviewPage />
-      </>
+      </Page>
     );
   }
 
   return (
     <>
-      <MaaspalMasthead activeNav="home" onNavigate={handleNavigate} />
-      <Page>
+      <Page header={masthead}>
         <PageSection>
           <Grid hasGutter>
             <GridItem span={4}>

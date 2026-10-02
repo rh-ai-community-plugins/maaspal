@@ -6,7 +6,7 @@ import traceback
 from kubernetes import client as k8s_client
 
 from harness.result import TaskResult
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 _GROUP = "maas.opendatahub.io"
@@ -292,6 +292,7 @@ class ApplyRateLimitSubscriptionTask(Task):
             model_name, model_namespace, token_limit, token_window,
         )
         _create_or_patch_subscription(api, sub_name, namespace, body, existing)
+        record_created(ctx, self.name, "MaaSSubscription", f"{namespace}/{sub_name}", existed=existing is not None)
         print(
             f"[apply_rate_limit_subscription] {'created' if existing is None else 'patched'} "
             f"{sub_name} token_limit={token_limit}/{token_window} for {model_namespace}/{model_name}",
@@ -303,6 +304,12 @@ class ApplyRateLimitSubscriptionTask(Task):
 
         ctx.shared_state["new_subscription_name"] = sub_name
         ctx.shared_state["subscription_namespace"] = namespace
+        owners = [*(owner_groups or []), *owner_users]
+        ctx.shared_state["task_summary"] = (
+            f"{'Created' if existing is None else 'Temporarily patched'} subscription "
+            f"{namespace}/{sub_name}: {token_limit} tokens per {token_window} on "
+            f"{model_namespace}/{model_name} · owners: {', '.join(owners) or '(none)'}"
+        )
         await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -375,6 +382,7 @@ class ApplyPriorityTestSubscriptionsTask(Task):
                 model_name, model_namespace, token_limit, token_window,
             )
             _create_or_patch_subscription(api, sub_name, namespace, body, existing)
+            record_created(ctx, self.name, "MaaSSubscription", f"{namespace}/{sub_name}", existed=existing is not None)
             print(
                 f"[apply_priority_test_subscriptions] "
                 f"{'created' if existing is None else 'patched'} {sub_name} "
@@ -394,6 +402,10 @@ class ApplyPriorityTestSubscriptionsTask(Task):
             )
 
         ctx.shared_state["priority_test_subscriptions"] = records
+        ctx.shared_state["task_summary"] = "Created " + "; ".join(
+            f"{s['name']} (priority {s['priority']}, {s.get('token_limit', 10)} tokens)"
+            for s in specs
+        ) + f" on {model_namespace}/{model_name}"
         await ctx.emit_assertion_state()
 
         return TaskResult(
@@ -506,6 +518,7 @@ class ProvisionSubscriptionsDistributedTask(Task):
             )
             existing = _get_existing_subscription(api, sub_name, namespace)
             _create_or_patch_subscription(api, sub_name, namespace, body, existing)
+            record_created(ctx, self.name, "MaaSSubscription", f"{namespace}/{sub_name}", existed=existing is not None)
             model_summary = ", ".join(m["name"] for m in selected)
             print(
                 f"[provision_subscriptions_distributed] "
@@ -524,6 +537,10 @@ class ProvisionSubscriptionsDistributedTask(Task):
                 "model_refs": model_refs,
             })
             ctx.shared_state["task_progress"] = {"current": i + 1, "total": subscription_count}
+            ctx.shared_state["task_summary"] = (
+                f"Created {i + 1} subscriptions spread across "
+                f"{len({(m['namespace'], m['name']) for r in records for m in r['model_refs']})} models"
+            )
             await ctx.emit_assertion_state()
 
         ctx.shared_state["distributed_subscriptions"] = records

@@ -73,6 +73,7 @@ async def test_run_manual_cleanup_calls_cleanup_with_empty_params_and_persisted_
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT cleanup_status FROM runs WHERE id=?", (run_id,)) as cur:
                 row = await cur.fetchone()
+        assert row is not None
         assert row["cleanup_status"] == "done"
 
         status = json.loads((tmp_path / f"{run_id}-cleanup-status.json").read_text())
@@ -108,6 +109,7 @@ async def test_run_manual_cleanup_marks_failed_when_a_task_raises(tmp_path, monk
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT cleanup_status FROM runs WHERE id=?", (run_id,)) as cur:
                 row = await cur.fetchone()
+        assert row is not None
         assert row["cleanup_status"] == "failed"
     finally:
         REGISTRY.pop("_cleanup_broken", None)
@@ -152,6 +154,40 @@ async def test_run_manual_cleanup_skips_unknown_task_name(tmp_path, monkeypatch)
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT cleanup_status FROM runs WHERE id=?", (run_id,)) as cur:
                 row = await cur.fetchone()
+        assert row is not None
         assert row["cleanup_status"] == "done"
     finally:
         REGISTRY.pop("_cleanup_known", None)
+
+
+async def test_run_manual_cleanup_updates_each_resources_status_on_the_run_page(tmp_path, monkeypatch) -> None:
+    """Resources left in place by a run with auto cleanup off flip to
+    "removed" on the run page once Clean Up Now succeeds for their task."""
+
+    class _Ok(Task):
+        async def run(self, ctx: TaskContext):  # type: ignore[override]  # pragma: no cover
+            raise NotImplementedError
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_cleanup_ok"] = _Ok
+    monkeypatch.setattr(cleanup_module, "_RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(cleanup_module.maas_client, "_kube", lambda: None)
+    monkeypatch.setattr(cleanup_module.maas_client, "sa_token", lambda: "test-token")
+    monkeypatch.setattr(cleanup_module.maas_client, "maas_api_url", lambda: "https://maas.example.com")
+
+    run_id = "manual-cleanup-res"
+    await _init_run_row(run_id)
+    (tmp_path / f"{run_id}-config.json").write_text(json.dumps({"tasks": [{"name": "_cleanup_ok"}]}))
+    created = [{"kind": "API key", "name": "k", "task": "_cleanup_ok", "action": "created", "status": "left in place"}]
+    (tmp_path / f"{run_id}-cleanup-state.json").write_text(json.dumps({"_created": created}))
+    (tmp_path / f"{run_id}-progress.json").write_text(json.dumps({"tasks": [], "resources": created}))
+
+    try:
+        await cleanup_module.run_manual_cleanup(run_id)
+    finally:
+        REGISTRY.pop("_cleanup_ok", None)
+
+    progress = json.loads((tmp_path / f"{run_id}-progress.json").read_text())
+    assert progress["resources"][0]["status"] == "removed"

@@ -8,7 +8,7 @@ import pytest
 
 from harness.result import TaskResult
 from harness.runner import ScenarioRunner
-from harness.tasks.base import Task, TaskContext
+from harness.tasks.base import Task, TaskContext, record_created
 from harness.tasks.registry import REGISTRY
 
 
@@ -1074,7 +1074,8 @@ def test_config_snapshot_excludes_incidental_environment_noise(
 def test_auto_cleanup_flag_false_skips_cleanup_and_writes_skipped_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from harness import cleanup_state, runner as runner_module
+    from harness import cleanup_state
+    from harness import runner as runner_module
 
     monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
     run_id = "auto-cleanup-off-001"
@@ -1188,3 +1189,342 @@ def test_auto_cleanup_task_failure_writes_failed_status(
         assert status["status"] == "failed"
     finally:
         REGISTRY.pop("_ac_broken", None)
+
+
+def test_progress_json_carries_narration_traffic_resources_and_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Everything the run page needs to explain a run, in one file: per-task
+    narration, a traffic summary/timeline, what was created (names only —
+    never key material), and a final plain-language verdict."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path / "results")
+
+    class _NarratingTask(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            ctx.shared_state["api_keys"] = [
+                {"id": "k1", "name": "maaspal-key-1", "key": "sk-oai-SECRET", "subscription": "free"}
+            ]
+            record_created(ctx, self.name, "API key", "maaspal-key-1", key_id="k1", subscription="free")
+            ctx.shared_state["inference_results"] = {"total_requests": 2, "tokens_before_first_429": 57}
+            ctx.shared_state["_traffic"] = {
+                "inference_results": {
+                    "task": self.name,
+                    "planned": 2,
+                    "timeline": [[0.1, 30, "ok", 10.0], [0.2, 57, "throttled", 5.0]],
+                }
+            }
+            ctx.shared_state["task_summary"] = "did the thing"
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_narrating"] = _NarratingTask
+    try:
+        path = _write(tmp_path, """
+            name: test_narration
+            config:
+              token_limit: 50
+            tasks:
+              - name: _narrating
+                params: {}
+            verdict:
+              pass: "Throttled after ${harness.inference_results.tokens_before_first_429} tokens (limit ${config.token_limit})."
+              fail: "Not throttled as expected."
+        """)
+        result = asyncio.run(ScenarioRunner(path, "narr-001").run())
+    finally:
+        REGISTRY.pop("_narrating", None)
+
+    assert result.status == "PASS"
+    raw = (tmp_path / "results" / "narr-001-progress.json").read_text()
+    assert "sk-oai-SECRET" not in raw
+    payload = json.loads(raw)
+
+    assert payload["tasks"][0]["summary"] == "did the thing"
+    traffic = payload["traffic"][0]
+    assert traffic["result_key"] == "inference_results"
+    assert traffic["limit"] == 50  # the scenario's token_limit, for the chart's reference line
+    assert traffic["summary"]["tokens_before_first_429"] == 57
+    assert [p[2] for p in traffic["timeline"]] == ["ok", "throttled"]
+    assert payload["resources"] == [
+        {
+            "kind": "API key", "name": "maaspal-key-1", "task": "_narrating", "action": "created",
+            "status": "removed", "key_id": "k1", "subscription": "free",
+        }
+    ]
+    assert payload["verdict"]["status"] == "PASS"
+    assert payload["verdict"]["text"] == "Throttled after 57 tokens (limit 50)."
+
+
+def test_verdict_falls_back_to_check_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+    asyncio.run(ScenarioRunner("scenarios/stub.yaml", "verdict-fallback-001").run())
+    payload = json.loads((tmp_path / "verdict-fallback-001-progress.json").read_text())
+    assert payload["verdict"]["text"] == "Run completed — this scenario defines no checks."
+
+
+def test_downsample_timeline_keeps_status_transitions() -> None:
+    from harness.runner import _TIMELINE_MAX_POINTS, _downsample_timeline
+
+    timeline = [[i, i, "ok", 1.0] for i in range(3000)]
+    timeline[1501][2] = "throttled"  # a lone transition a uniform stride would skip
+    thinned = _downsample_timeline(timeline)
+    assert len(thinned) <= _TIMELINE_MAX_POINTS + 10
+    assert any(p[2] == "throttled" for p in thinned)
+    assert thinned[0] == timeline[0] and thinned[-1] == timeline[-1]
+
+
+def test_each_resource_shows_its_own_cleanup_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removed, restored (a patched pre-existing object), and failed are
+    reported per resource, from the owning task's own cleanup result."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+
+    class _Creates(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            record_created(ctx, self.name, "MaaSSubscription", "ns/new-sub")
+            record_created(ctx, self.name, "MaaSSubscription", "ns/existing-sub", existed=True)
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    class _CleanupFails(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            record_created(ctx, self.name, "Model", "llm/sim-1")
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            raise RuntimeError("delete failed")
+
+    REGISTRY["_creates"] = _Creates
+    REGISTRY["_cleanup_fails"] = _CleanupFails
+    try:
+        path = _write(tmp_path, """
+            name: test_resources
+            config: {}
+            tasks:
+              - name: _creates
+              - name: _cleanup_fails
+        """)
+        asyncio.run(ScenarioRunner(path, "res-001").run())
+    finally:
+        REGISTRY.pop("_creates", None)
+        REGISTRY.pop("_cleanup_fails", None)
+
+    resources = json.loads((tmp_path / "res-001-progress.json").read_text())["resources"]
+    assert {r["name"]: r["status"] for r in resources} == {
+        "ns/new-sub": "removed",
+        "ns/existing-sub": "restored",
+        "llm/sim-1": "cleanup failed",
+    }
+
+
+def test_auto_cleanup_off_marks_resources_left_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harness import runner as runner_module
+    from harness.cleanup_state import write_auto_cleanup_flag
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+    write_auto_cleanup_flag(tmp_path, "res-002", False)
+
+    class _Creates(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            record_created(ctx, self.name, "API key", "k")
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_creates2"] = _Creates
+    try:
+        path = _write(tmp_path, """
+            name: test_resources
+            config: {}
+            tasks:
+              - name: _creates2
+        """)
+        asyncio.run(ScenarioRunner(path, "res-002").run())
+    finally:
+        REGISTRY.pop("_creates2", None)
+
+    resources = json.loads((tmp_path / "res-002-progress.json").read_text())["resources"]
+    assert resources[0]["status"] == "left in place"
+
+
+def test_task_verdict_text_overrides_the_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+
+    class _Concludes(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            ctx.shared_state["_verdict_text"] = "Inconclusive: limit too large."
+            ctx.shared_state["_findings"] = [{"title": "Finding", "text": "x"}]
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_concludes"] = _Concludes
+    try:
+        path = _write(tmp_path, """
+            name: test_verdict
+            config: {}
+            tasks:
+              - name: _concludes
+            verdict:
+              pass: "template text"
+        """)
+        asyncio.run(ScenarioRunner(path, "v-001").run())
+    finally:
+        REGISTRY.pop("_concludes", None)
+
+    payload = json.loads((tmp_path / "v-001-progress.json").read_text())
+    assert payload["verdict"]["text"] == "Inconclusive: limit too large."
+    assert payload["findings"] == [{"title": "Finding", "text": "x"}]
+
+
+def test_metrics_charts_sample_maas_and_harness_side_by_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each metrics poll records MaaS's value next to the harness's own count,
+    so the run page can show the MaaS counter catching up (scrape lag)."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+    readings = iter([10.0, 10.0, 30.0, 55.0, 55.0, 55.0, 55.0, 55.0])
+
+    async def fake_fetch_metrics(base_url: str, queries: dict, token: str) -> dict:
+        return {"total_requests": next(readings, 55.0)}
+
+    monkeypatch.setattr(runner_module, "fetch_metrics", fake_fetch_metrics)
+    monkeypatch.setattr(runner_module, "_METRICS_FINAL_MAX_WAIT_S", 0.05)
+    monkeypatch.setattr(runner_module, "_METRICS_FINAL_POLL_INTERVAL_S", 0.01)
+
+    class _Sends(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            ctx.shared_state["inference_results"] = {"total_requests": 45.0}
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_sends"] = _Sends
+    try:
+        path = _write(tmp_path, """
+            name: test_metrics_charts
+            config:
+              MAAS_METRICS_URL: "http://thanos.test/api/v1/query"
+            metrics_queries:
+              total_requests: "sum(foo)"
+            metrics_charts:
+              - title: Requests
+                maas: total_requests_delta
+                harness: inference_results.total_requests
+            tasks:
+              - name: _sends
+            assertions:
+              maas_requests_match:
+                compare: metrics.total_requests_delta
+                to: inference_results.total_requests
+                tolerance_pct: 0
+        """)
+        asyncio.run(ScenarioRunner(path, "mc-001").run())
+    finally:
+        REGISTRY.pop("_sends", None)
+
+    [chart] = json.loads((tmp_path / "mc-001-progress.json").read_text())["metrics_charts"]
+    assert chart["title"] == "Requests"
+    maas_values = [p[1] for p in chart["points"]]
+    assert maas_values[-1] == 45.0  # converged on what was sent
+    assert all(p[2] == 45.0 for p in chart["points"] if p[1] == 45.0)
+
+
+def test_stop_with_unresolvable_metrics_checks_still_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (confirmed live): after a Stop, a promql check whose
+    ${harness.x} value never appears left the metrics poller with nothing to
+    query, and its sleep returned instantly once the stop event was set — a
+    loop that never yielded, so cancelling it hung the run until SIGKILL and
+    no result was ever written."""
+    from harness import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_RESULTS_DIR", tmp_path)
+
+    async def fake_fetch_metrics(base_url: str, queries: dict, token: str) -> dict:
+        return {}
+
+    monkeypatch.setattr(runner_module, "fetch_metrics", fake_fetch_metrics)
+
+    class _Slow(Task):
+        async def run(self, ctx: TaskContext) -> TaskResult:
+            await asyncio.sleep(30)
+            return TaskResult(task_name=self.name, status="PASS", duration_ms=0)
+
+        async def cleanup(self, ctx: TaskContext) -> None:
+            pass
+
+    REGISTRY["_slow_stop"] = _Slow
+    try:
+        path = _write(tmp_path, """
+            name: test_stop_hang
+            config:
+              MAAS_METRICS_URL: "http://thanos.test/api/v1/query"
+            tasks:
+              - name: _slow_stop
+                assertions:
+                  never_resolves:
+                    promql: "${harness.inference_results.final_stage_p99_latency_ms}"
+                    expect: "< 100"
+        """)
+
+        async def _go():
+            stop = asyncio.Event()
+            runner = ScenarioRunner(path, "stop-hang-001", stop_event=stop)
+            task = asyncio.create_task(runner.run())
+            await asyncio.sleep(0.2)
+            stop.set()
+            return await asyncio.wait_for(task, timeout=5)
+
+        result = asyncio.run(_go())
+    finally:
+        REGISTRY.pop("_slow_stop", None)
+
+    assert result.status == "CANCELLED"
+    payload = json.loads((tmp_path / "stop-hang-001-progress.json").read_text())
+    assert payload["verdict"]["status"] == "CANCELLED"
+
+
+def test_interruptible_sleep_yields_even_when_already_stopped() -> None:
+    async def _go():
+        stop = asyncio.Event()
+        stop.set()
+        runner = ScenarioRunner("unused.yaml", "r", stop_event=stop)
+        ticks = 0
+
+        async def other() -> None:
+            nonlocal ticks
+            ticks += 1
+
+        task = asyncio.create_task(other())
+        await runner._interruptible_sleep(5)
+        await task
+        return ticks
+
+    assert asyncio.run(_go()) == 1
+
+
+def test_verdict_note_is_appended_to_a_passing_verdict() -> None:
+    from harness.runner import _render_verdict
+
+    v = _render_verdict({"pass": "Within the targets."}, "PASS", {"_verdict_note": "3 requests failed."}, [])
+    assert v["text"] == "Within the targets. 3 requests failed."
+    stopped = _render_verdict({}, "CANCELLED", {"_verdict_note": "3 requests failed."}, [])
+    assert "failed" not in stopped["text"]

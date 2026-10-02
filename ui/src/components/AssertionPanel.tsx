@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { AssertionState, TaskProgressEntry } from '../api/client';
+import { formatTaskName } from '../scenarioTitles';
 
 interface Props {
   assertions: AssertionState[];
@@ -33,8 +35,13 @@ const TASK_STATUS_COLOR: Record<TaskProgressEntry['status'], string> = {
 
 function formatValue(v: number | null): string {
   if (v === null) return '—';
-  if (Number.isInteger(v)) return String(v);
+  if (Number.isInteger(v) || Math.abs(v) >= 100) return Math.round(v).toLocaleString();
   return v.toFixed(2);
+}
+
+function withUnit(text: string, unit: string | null | undefined): string {
+  if (!unit) return text;
+  return unit === '%' || unit === 'ms' ? `${text}${unit === '%' ? '%' : ' ms'}` : `${text} ${unit}`;
 }
 
 function formatName(name: string): string {
@@ -49,13 +56,11 @@ function formatName(name: string): string {
     .trim();
 }
 
-function formatTaskName(name: string): string {
-  return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-}
 
 function AssertionCard({ a, muted }: { a: AssertionState; muted: boolean }) {
   const color = ASSERTION_COLORS[a.status];
   const bg = ASSERTION_BG[a.status];
+  const [showDetails, setShowDetails] = useState(false);
   return (
     <div
       className="maaspal-assertion-card"
@@ -68,13 +73,27 @@ function AssertionCard({ a, muted }: { a: AssertionState; muted: boolean }) {
         } as React.CSSProperties
       }
     >
-      <span className="maaspal-assertion-card__name">{formatName(a.name)}</span>
+      <span className="maaspal-assertion-card__name">{a.label || formatName(a.name)}</span>
       <span className="maaspal-assertion-card__value">
-        {formatValue(a.value)}
+        {a.value === null && a.status === 'PENDING' ? 'waiting for data…' : withUnit(formatValue(a.value), a.unit)}
         {a.expected_value != null && ` vs. expected ${formatValue(a.expected_value)}`}
       </span>
+      {a.target && (
+        <span className="maaspal-assertion-card__target">expected: {withUnit(a.target, a.unit)}</span>
+      )}
+      {a.description && <span className="maaspal-assertion-card__desc">{a.description}</span>}
       {a.expression && (
-        <span className="maaspal-assertion-card__expr">target: {a.expression}</span>
+        <>
+          <button
+            type="button"
+            className="maaspal-assertion-card__details-toggle"
+            onClick={() => setShowDetails((v) => !v)}
+            aria-expanded={showDetails}
+          >
+            {showDetails ? 'Hide details' : 'Details'}
+          </button>
+          {showDetails && <span className="maaspal-assertion-card__expr">{a.expression}</span>}
+        </>
       )}
       <span className="maaspal-assertion-card__status">
         <span>{STATUS_ICON[a.status]}</span>

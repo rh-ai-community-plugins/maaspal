@@ -186,7 +186,7 @@ def test_promql_assertion_expect_form_failing() -> None:
 def test_promql_assertion_requires_expect_or_compare_to() -> None:
     state = {"metrics": {"x": 1.0}}
     spec = {"promql": "sum(foo)"}
-    with pytest.raises(ValueError, match="needs either 'expect' or 'compare_to'"):
+    with pytest.raises(ValueError, match="needs one of 'expect', 'between' or 'compare_to'"):
         evaluate_assertion("x", spec, state)
 
 
@@ -272,3 +272,80 @@ def test_task_result_accepts_cancelled_status() -> None:
 def test_run_result_accepts_cancelled_status() -> None:
     result = RunResult(run_id="r1", scenario_name="s", status="CANCELLED")
     assert result.status == "CANCELLED"
+
+
+def test_promql_between_passes_inside_range_and_shows_real_value() -> None:
+    state = {"metrics": {"throttled_at": 57.0}}
+    spec = {"promql": "x", "between": ["50", "50 + 100"]}
+    r = evaluate_assertion("throttled_at", spec, state)
+    assert r.status == "PASSING"
+    assert r.current_value == 57.0
+    assert r.target == "50 – 150"
+
+
+@pytest.mark.parametrize("observed", [49.0, 151.0])
+def test_promql_between_fails_outside_range(observed: float) -> None:
+    state = {"metrics": {"throttled_at": observed}}
+    r = evaluate_assertion("throttled_at", {"promql": "x", "between": [50, "50 + 100"]}, state)
+    assert r.status == "FAILING"
+
+
+def test_promql_between_pending_still_shows_target() -> None:
+    r = evaluate_assertion("throttled_at", {"promql": "x", "between": [50, 150]}, {})
+    assert r.status == "PENDING"
+    assert r.target == "50 – 150"
+
+
+def test_expect_rhs_accepts_simple_arithmetic() -> None:
+    state = {"metrics": {"x": 120.0}}
+    r = evaluate_assertion("x", {"promql": "x", "expect": "<= 50 + 100"}, state)
+    assert r.status == "PASSING"
+    assert r.target == "<= 150"
+
+
+def test_bound_rejects_non_arithmetic() -> None:
+    state = {"metrics": {"x": 1.0}}
+    with pytest.raises(ValueError, match="Unsupported assertion bound"):
+        evaluate_assertion("x", {"promql": "x", "between": ["__import__('os')", 2]}, state)
+
+
+def test_display_metadata_passed_through() -> None:
+    state = {"metrics": {"x": 1.0}}
+    spec = {
+        "promql": "x",
+        "expect": "== 1",
+        "label": "Throttled at budget",
+        "description": "Why it matters",
+        "unit": "tokens",
+    }
+    r = evaluate_assertion("x", spec, state)
+    assert (r.label, r.description, r.unit) == ("Throttled at budget", "Why it matters", "tokens")
+    assert r.target == "== 1"
+
+
+def test_simple_form_has_target_and_no_label() -> None:
+    r = evaluate_assertion("error_rate_pct", "< 5", {"inference_results": {"error_rate_pct": 1.0}})
+    assert r.target == "< 5"
+    assert r.label is None
+
+
+def test_bounds_can_reference_live_harness_values() -> None:
+    """The limit under test may only be known at run time (read off the
+    subscription), so bounds accept ${harness.ns.key} as well as numbers."""
+    spec = {
+        "promql": "x",
+        "between": ["${harness.subscription_limits.token_limit}", "${harness.subscription_limits.token_limit} + 100"],
+    }
+    pending = evaluate_assertion("x", spec, {"metrics": {"x": 120.0}})
+    assert pending.status == "PENDING"  # limit not read yet
+
+    state = {"metrics": {"x": 120.0}, "subscription_limits": {"token_limit": 100}}
+    r = evaluate_assertion("x", spec, state)
+    assert r.status == "PASSING"
+    assert r.target == "100 – 200"
+
+
+def test_expect_can_reference_live_harness_values() -> None:
+    state = {"metrics": {"x": 3.0}, "users": {"count": 2}}
+    r = evaluate_assertion("x", {"promql": "x", "expect": "> ${harness.users.count}"}, state)
+    assert r.status == "PASSING"

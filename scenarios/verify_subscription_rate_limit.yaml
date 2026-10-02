@@ -1,0 +1,151 @@
+name: verify_subscription_rate_limit
+previous_names: [rate_limit_validation, rate_limit_validation_existing_subscription]
+title: "Is my subscription's rate limit enforced?"
+summary: >-
+  Sends traffic on one of your subscriptions until MaaS throttles it, and
+  shows how many tokens got through first — and that nothing got through after.
+description: >-
+  Reads the token limit your subscription declares for the chosen model,
+  creates an API key pinned to the subscription, and sends requests until
+  MaaS starts answering 429 (Too Many Requests) — as fast as it takes to use
+  the limit up within one window, ramping concurrency up when one request at
+  a time is too slow. Checks that throttling started at the configured limit
+  (not early, and not more than the requests already in flight past it), that
+  nothing got through afterwards, and that Limitador (the gateway's
+  rate-limit service) itself recorded the denials. If the limit still can't
+  be reached, the run says why — the model answering too slowly, or a time,
+  concurrency or request budget running out — with the numbers.
+category: "Rate limits"
+kind: verify
+order: 1
+mutates: [api_keys]
+requires: [subscription, target_model_name, target_model_namespace]
+est_duration: "~1 min"
+plan_template: >-
+  Read ${subscription}'s token limit for ${model}, create 1 API key on it, then
+  send requests one at a time until MaaS throttles, and check it happens at that limit.
+inputs:
+  subscription:
+    label: "Subscription"
+  target_model_name:
+    label: "Model"
+  max_concurrency:
+    advanced: true
+    help: >-
+      The most requests this run will have in flight at once. It starts at 1 and
+      doubles every 2 s while it's sending too slowly to use the limit up within
+      one window (a window resets otherwise, and the limit is never reached).
+      Higher reaches bigger limits but puts more load on the model.
+  max_duration_s:
+    advanced: true
+    help: >-
+      Longest the run keeps sending, in seconds. Blank = one window of the
+      subscription's limit (at most 10 minutes), which is all the time there
+      is to use it up.
+  max_requests:
+    advanced: true
+    help: "Safety cap on the total number of requests sent."
+  limitador_namespace:
+    advanced: true
+    from_model: http_route
+    help: >-
+      Which route's counters to read from Limitador (the gateway's rate-limit
+      service): the model's HTTPRoute, "<namespace>/<route name>". Filled in
+      from the model you pick.
+  metrics_max_wait_s:
+    advanced: true
+    help: >-
+      How long to wait for Prometheus to pick up Limitador's denial count
+      (it scrapes every ~30 s) before giving up on that check.
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  subscription: ""
+  target_model_name: ""
+  target_model_namespace: ""
+  max_concurrency: 128
+  max_duration_s: ""
+  max_requests: 20000
+  limitador_namespace: ""
+  metrics_max_wait_s: 65
+  prompt: "Hello, world!"
+metrics_queries:
+  limited_calls: 'sum(limited_calls{limitador_namespace="${config.limitador_namespace}"})'
+verdict:
+  pass: >-
+    MaaS throttled you after ${harness.inference_results.tokens_before_first_429} tokens
+    (configured ${harness.subscription_limits.token_limit} per window) and nothing got through afterwards.
+  fail: >-
+    The rate limit didn't behave as configured — first 429 after
+    ${harness.inference_results.tokens_before_first_429} tokens, against a configured
+    ${harness.subscription_limits.token_limit}. The checks below show which part differed.
+tasks:
+  - name: read_subscription_limits
+    params:
+      subscription: "${config.subscription}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-rate-key"
+      subscription: "${config.subscription}"
+    assertions:
+      subscription_echo_match_count:
+        label: "Key bound to your subscription"
+        description: "MaaS honoured the subscription we asked for instead of auto-selecting another."
+        promql: "${harness.key_provision_checks.subscription_echo_match_count}"
+        expect: "== 1"
+  - name: send_requests
+    params:
+      # Always pin the exact model — /v1/models can list several, and
+      # discovery's first-available fallback once silently hijacked this test.
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      concurrency: 1
+      prompt: "${config.prompt}"
+      key_pool: true
+      # No SDK retries: a hidden retry could land after the window resets
+      # and turn a real denial into a success.
+      retries: 0
+      until_throttled: true
+      limit_from_shared_state: "subscription_limits.token_limit"
+      window_from_shared_state: "subscription_limits.window_s"
+      max_concurrency: "${config.max_concurrency}"
+      max_duration_s: "${config.max_duration_s}"
+      max_requests: "${config.max_requests}"
+      chart: true
+    assertions:
+      throttled_at_all:
+        label: "MaaS throttled the traffic"
+        description: "Guards the next check, which only has a value once a 429 happens."
+        unit: "429s"
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "> 0"
+      tokens_before_first_429:
+        label: "Tokens through before the first 429"
+        description: >-
+          Should land between the configured limit and the limit plus whatever was
+          already in flight when it was crossed (requests in flight × tokens per request).
+        unit: "tokens"
+        promql: "${harness.inference_results.tokens_before_first_429}"
+        between:
+          - "${harness.subscription_limits.token_limit}"
+          - "${harness.subscription_limits.token_limit} + ${harness.inference_results.allowed_overshoot}"
+      limit_stays_closed:
+        label: "Requests that succeeded after being throttled"
+        description: "Once over the limit, nothing should get through until the window resets."
+        unit: "requests"
+        promql: "${harness.inference_results.successes_after_first_429}"
+        expect: "== 0"
+      maas_denied_by_rate_limit:
+        label: "Denials recorded by Limitador"
+        description: >-
+          Gateway-side confirmation (Limitador's limited_calls counter), not just
+          what this run saw. Waits for Prometheus to scrape.
+        unit: "denials"
+        promql: >-
+          sum(limited_calls{limitador_namespace="${config.limitador_namespace}"})
+          - ${baseline.limited_calls}
+        expect: "> 0"
+        max_wait_s: "${config.metrics_max_wait_s}"
+cleanup: automatic
