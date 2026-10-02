@@ -1,6 +1,7 @@
 """Integration test for the load_test scenario with several keys (formerly multi_key_load)."""
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -36,7 +37,7 @@ async def test_multi_key_load_all_keys_revoked() -> None:
 
     maas_url = os.environ["MAAS_API_URL"]
     sa_token = (
-        open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
         if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
         else os.environ.get("SA_TOKEN", "")
     )

@@ -16,7 +16,8 @@ from pathlib import Path
 
 import httpx
 import yaml
-from kubernetes import client as k8s, config as k8s_cfg
+from kubernetes import client as k8s
+from kubernetes import config as k8s_cfg
 from kubernetes.client import ApiException
 
 _MAAS_GROUP = "maas.opendatahub.io"

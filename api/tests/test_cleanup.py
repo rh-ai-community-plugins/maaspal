@@ -73,6 +73,7 @@ async def test_run_manual_cleanup_calls_cleanup_with_empty_params_and_persisted_
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT cleanup_status FROM runs WHERE id=?", (run_id,)) as cur:
                 row = await cur.fetchone()
+        assert row is not None
         assert row["cleanup_status"] == "done"
 
         status = json.loads((tmp_path / f"{run_id}-cleanup-status.json").read_text())
@@ -108,6 +109,7 @@ async def test_run_manual_cleanup_marks_failed_when_a_task_raises(tmp_path, monk
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT cleanup_status FROM runs WHERE id=?", (run_id,)) as cur:
                 row = await cur.fetchone()
+        assert row is not None
         assert row["cleanup_status"] == "failed"
     finally:
         REGISTRY.pop("_cleanup_broken", None)
@@ -152,6 +154,7 @@ async def test_run_manual_cleanup_skips_unknown_task_name(tmp_path, monkeypatch)
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT cleanup_status FROM runs WHERE id=?", (run_id,)) as cur:
                 row = await cur.fetchone()
+        assert row is not None
         assert row["cleanup_status"] == "done"
     finally:
         REGISTRY.pop("_cleanup_known", None)

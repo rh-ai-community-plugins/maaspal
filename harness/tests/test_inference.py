@@ -1,5 +1,6 @@
 import asyncio
 import time
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -14,7 +15,8 @@ def _api_status_error(status_code: int) -> APIStatusError:
     request = httpx.Request("POST", "http://m.test/v1/chat/completions")
     response = httpx.Response(status_code, request=request, json={"error": "denied"})
     return APIStatusError(
-        f"status {status_code}", response=response, body={"error": "denied"}
+        # The SDK is typed against httpx2 (an httpx fork); httpx objects work at runtime.
+        f"status {status_code}", response=response, body={"error": "denied"}  # type: ignore[arg-type]
     )
 
 
@@ -378,7 +380,7 @@ async def test_send_requests_debounce() -> None:
 
 async def test_key_pool_distribution() -> None:
     """Key-pool distribution: requests spread floor(M/N) each, remainder to first."""
-    calls_by_key: dict[str, int] = {}
+    calls_by_key: dict[str | None, int] = {}
 
     def _make_tracking_client(api_key: str | None = None, base_url: str | None = None, **_kwargs) -> MagicMock:
         m = MagicMock()
@@ -421,7 +423,7 @@ async def test_key_pool_distribution() -> None:
 
 async def test_key_pool_distribution_with_remainder() -> None:
     """Key-pool distribution: remainder goes to first key."""
-    calls_by_key: dict[str, int] = {}
+    calls_by_key: dict[str | None, int] = {}
 
     def _make_tracking_client(api_key: str | None = None, base_url: str | None = None, **_kwargs) -> MagicMock:
         m = MagicMock()
@@ -984,7 +986,7 @@ async def test_connection_errors_report_the_hidden_cause() -> None:
         try:
             raise httpx.ConnectError("Name or service not known")
         except httpx.ConnectError as cause:
-            raise APIConnectionError(request=request) from cause
+            raise APIConnectionError(request=request) from cause  # type: ignore[arg-type]
     except APIConnectionError as exc:
         conn_error = exc
 
@@ -1069,7 +1071,7 @@ async def test_error_samples_carry_how_long_each_failure_took() -> None:
 def test_errors_note_flags_a_constant_failure_time_as_a_timeout() -> None:
     from harness.tasks.inference import _errors_note
 
-    result = {
+    result: dict[str, Any] = {
         "fail_count": 77, "rate_limited_count": 0,
         "error_samples": [{"message": "HTTP 500 Internal Server Error", "count": 77,
                            "median_ms": 202.0, "p10_ms": 200.5, "p90_ms": 215.0}],

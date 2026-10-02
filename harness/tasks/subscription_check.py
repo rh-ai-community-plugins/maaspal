@@ -121,7 +121,7 @@ class DiscoverSubscriptionModelsTask(Task):
 
         sub = _find_subscription(sub_name)
         discovered = await _discovered_models(ctx)
-        models = []
+        models: list[dict] = []
         for ref in sub["model_refs"]:
             ref_id = f"{ref['namespace']}/{ref['name']}"
             if ref_id in discovered:

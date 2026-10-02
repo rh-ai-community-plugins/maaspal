@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import threading
@@ -22,7 +23,8 @@ _threads_lock = threading.Lock()
 
 
 def _kube():
-    from kubernetes import client as k8s, config as k8s_cfg
+    from kubernetes import client as k8s
+    from kubernetes import config as k8s_cfg
 
     try:
         k8s_cfg.load_incluster_config()
@@ -294,10 +296,8 @@ def _capture_logs(run_id: str) -> None:
     finally:
         # Atomically promote tmp → final log file.
         if tmp_file.exists():
-            try:
+            with contextlib.suppress(OSError):
                 tmp_file.rename(log_file)
-            except OSError:
-                pass
 
 
 def ensure_log_capture(run_id: str) -> None:
@@ -329,7 +329,7 @@ def get_log_lines(run_id: str, offset: int) -> tuple[list[str], bool]:
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
-            all_lines = [l for l in text.splitlines() if l]
+            all_lines = [line for line in text.splitlines() if line]
             return all_lines[offset:], done
         except OSError:
             continue

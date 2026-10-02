@@ -36,7 +36,7 @@ def _ctx(state: dict | None = None) -> TaskContext:
 
 def _status_error(code: int) -> APIStatusError:
     request = httpx.Request("POST", "http://m.test/v1/chat/completions")
-    return APIStatusError(f"status {code}", response=httpx.Response(code, request=request), body=None)
+    return APIStatusError(f"status {code}", response=httpx.Response(code, request=request), body=None)  # type: ignore[arg-type]
 
 
 def _ok(tokens: int = 30) -> MagicMock:

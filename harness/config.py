@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import re
@@ -56,10 +57,8 @@ def load_scenario(path: str) -> dict:
     scenario_config: dict[str, Any] = raw.get("config", {}) or {}
 
     user_overrides: dict[str, Any] = {}
-    try:
+    with contextlib.suppress(Exception):
         user_overrides = json.loads(os.environ.get("MAASPAL_CONFIG_OVERRIDES", "{}")) or {}
-    except Exception:
-        pass
 
     merged_config: dict[str, Any] = {**global_config, **scenario_config, **user_overrides}
 

@@ -1,6 +1,7 @@
 import ast
 import operator
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -294,7 +295,7 @@ def evaluate_assertion(
 
 
 def evaluate_all_assertions(
-    assertions: dict[str, str | dict[str, Any]], shared_state: dict
+    assertions: Mapping[str, Any], shared_state: dict
 ) -> list[AssertionResult]:
     return [evaluate_assertion(name, expr, shared_state) for name, expr in assertions.items()]
 

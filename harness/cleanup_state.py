@@ -14,7 +14,7 @@ those other files, with no extra monkeypatching required here.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # status: "pending" (not yet reached) | "cleaning" | "skipped" (toggle was off)
@@ -72,7 +72,7 @@ def write_cleanup_status(
         results_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "status": status,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "error": error,
         }
         _path(results_dir, run_id, "cleanup-status.json").write_text(

@@ -338,7 +338,7 @@ class ProvisionKeysDistributedTask(Task):
             for sub_idx, sub in enumerate(subscriptions):
                 sub_name = sub["name"]
                 count_for_sub = keys_per_sub + (1 if sub_idx < remainder else 0)
-                for j in range(count_for_sub):
+                for _ in range(count_for_sub):
                     global_key_index += 1
                     name_i = f"{key_name_prefix}-{global_key_index}"
                     body = {"name": name_i, "subscription": sub_name}

@@ -1,6 +1,7 @@
 """Integration test for the gateway_overhead scenario."""
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -31,7 +32,7 @@ async def test_direct_inference_no_api_keys_created() -> None:
 
     maas_url = os.environ["MAAS_API_URL"]
     sa_token = (
-        open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
         if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
         else os.environ.get("SA_TOKEN", "")
     )

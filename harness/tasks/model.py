@@ -3,7 +3,6 @@ import time
 import traceback
 
 import httpx
-
 from kubernetes import client as k8s_client
 
 from harness.result import TaskResult

@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import time
+from collections.abc import Sequence
 
 import httpx
 from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
@@ -206,7 +207,7 @@ def _errors_note(result: dict) -> str | None:
 def _float_or_none(value: object, shared_state: dict, ref: object) -> float | None:
     """A number from an explicit param, else from shared_state["ns"]["key"]."""
     if value not in (None, ""):
-        return float(value)
+        return float(str(value))
     if ref:
         ns, _, key = str(ref).partition(".")
         found = (shared_state.get(ns) or {}).get(key)
@@ -227,7 +228,7 @@ def _distribute(total: int, n_keys: int) -> list[int]:
     return [base + (remainder if i == 0 else 0) for i in range(n_keys)]
 
 
-def _percentiles(latencies: list[float]) -> dict[str, float]:
+def _percentiles(latencies: Sequence[float]) -> dict[str, float]:
     if not latencies:
         return {"p50_latency_ms": 0.0, "p95_latency_ms": 0.0, "p99_latency_ms": 0.0}
     s = sorted(latencies)
@@ -463,7 +464,7 @@ class SendRequestsTask(Task):
                 else:
                     key_urls.append(url)
                     key_models.append(target)
-            clients = [_client(k, u) for k, u in zip(key_strings, key_urls)]
+            clients = [_client(k, u) for k, u in zip(key_strings, key_urls, strict=True)]
             print(
                 f"[send_requests] base_url={url} model={model} "
                 f"keys=[{', '.join(_redact(k) for k in key_strings)}] "

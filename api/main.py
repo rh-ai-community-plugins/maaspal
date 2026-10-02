@@ -2,7 +2,7 @@ import asyncio
 import json
 import traceback
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -68,7 +68,7 @@ async def _sync_completed_runs() -> None:
                     "UPDATE runs SET status=?, updated_at=?, cleanup_status=?, cleanup_error=? WHERE id=?",
                     (
                         status,
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                         cleanup_info.get("status", "pending"),
                         cleanup_info.get("error"),
                         run_id,
@@ -109,7 +109,7 @@ async def _sync_completed_runs() -> None:
                 "WHERE id=?",
                 (
                     status,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     duration_ms,
                     cleanup_status,
                     cleanup_error,

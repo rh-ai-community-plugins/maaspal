@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
 from harness.tasks.base import TaskContext

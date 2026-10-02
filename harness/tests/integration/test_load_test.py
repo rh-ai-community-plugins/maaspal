@@ -6,6 +6,7 @@ Run with:
 """
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -37,13 +38,15 @@ async def test_single_key_load_no_leftover_keys() -> None:
 
     maas_url = os.environ["MAAS_API_URL"]
     sa_token = (
-        open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
         if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
         else os.environ.get("SA_TOKEN", "")
     )
 
+    from harness.runner import ScenarioRunner
+
     run_id = str(uuid.uuid4())
-    runner = ScenarioRunner("scenarios/load_test.yaml", run_id)  # type: ignore[name-defined]
+    runner = ScenarioRunner("scenarios/load_test.yaml", run_id)
     await runner.run()
 
     async with httpx.AsyncClient() as client:

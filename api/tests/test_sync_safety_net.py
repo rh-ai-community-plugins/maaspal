@@ -28,9 +28,13 @@ async def _running(run_id: str) -> None:
 
 
 async def _status(run_id: str) -> tuple[str, str]:
-    async with aiosqlite.connect(get_db_path()) as db:
-        async with db.execute("SELECT status, cleanup_status FROM runs WHERE id=?", (run_id,)) as cur:
-            return await cur.fetchone()
+    async with (
+        aiosqlite.connect(get_db_path()) as db,
+        db.execute("SELECT status, cleanup_status FROM runs WHERE id=?", (run_id,)) as cur,
+    ):
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0], row[1]
 
 
 async def test_stopped_run_whose_harness_died_is_finalized_cancelled(tmp_path, monkeypatch) -> None:

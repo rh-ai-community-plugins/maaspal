@@ -5,8 +5,28 @@ import os
 import re
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+from harness.cleanup_state import (
+    mark_left_in_place,
+    mark_task_cleanup,
+    read_auto_cleanup_flag,
+    resources_from_state,
+    write_cleanup_state,
+    write_cleanup_status,
+)
+from harness.config import load_scenario
+from harness.metrics_client import fetch_metrics
+from harness.result import (
+    AssertionResult,
+    RunResult,
+    TaskResult,
+    compute_run_status,
+    evaluate_all_assertions,
+)
+from harness.tasks.base import Task, TaskContext
+from harness.tasks.registry import REGISTRY
 
 _SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 _DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -105,26 +125,6 @@ def _redact_sensitive_config(value):
     if isinstance(value, list):
         return [_redact_sensitive_config(v) for v in value]
     return value
-
-from harness.cleanup_state import (
-    mark_left_in_place,
-    mark_task_cleanup,
-    resources_from_state,
-    read_auto_cleanup_flag,
-    write_cleanup_state,
-    write_cleanup_status,
-)
-from harness.config import load_scenario
-from harness.metrics_client import fetch_metrics
-from harness.result import (
-    AssertionResult,
-    RunResult,
-    TaskResult,
-    compute_run_status,
-    evaluate_all_assertions,
-)
-from harness.tasks.base import Task, TaskContext
-from harness.tasks.registry import REGISTRY
 
 _EMIT_DEBOUNCE_S = 0.1
 # Default cap for settling a metrics-dependent assertion (see _settle_and_evaluate).
@@ -441,7 +441,7 @@ class ScenarioRunner:
 
     async def run(self) -> RunResult:
         run_start = time.monotonic()
-        run_started_at = datetime.now(timezone.utc).isoformat()
+        run_started_at = datetime.now(UTC).isoformat()
         scenario = load_scenario(self.scenario_path)
         scenario_name: str = scenario["name"]
         config: dict = scenario.get("_resolved_config", {})
@@ -543,7 +543,7 @@ class ScenarioRunner:
                             entry["assertions_status"] = "PENDING"
                     task_list.append(entry)
                 elif i == current_idx:
-                    entry: dict = {"name": task.name, "status": "RUNNING"}
+                    entry = {"name": task.name, "status": "RUNNING"}
                     if current_task_started_at:
                         entry["started_at"] = current_task_started_at
                     tp = shared_state.get("task_progress")
@@ -732,12 +732,12 @@ class ScenarioRunner:
             }
             metrics_bg = asyncio.create_task(_metrics_bg())
 
-        for i, (task, task_def) in enumerate(zip(tasks, task_defs)):
+        for i, (task, task_def) in enumerate(zip(tasks, task_defs, strict=True)):
             if self._stop_event and self._stop_event.is_set():
                 break
             current_task_idx = i
             current_task_assertions = task_def.get("assertions") or {}
-            current_task_started_at = datetime.now(timezone.utc).isoformat()
+            current_task_started_at = datetime.now(UTC).isoformat()
             _write_progress(i, task_results)
             print(f"[runner] task: {task.name}", flush=True)
             start = time.monotonic()
