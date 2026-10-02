@@ -11,14 +11,16 @@ dist/
 *.db
 
 # Frontend
-ui/node_modules/
-ui/dist/
+node_modules/
+coverage/
+*.tsbuildinfo
 uv.lock
 
 # Local env / secrets
 .env
 .env.*
 !.env.example
+!.env.development
 
 # OS
 .DS_Store
@@ -31,3 +33,6 @@ Thumbs.db
 
 # K8s / OCP
 kubeconfig
+
+# Helm
+*.tgz

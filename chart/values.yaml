@@ -1,0 +1,117 @@
+# Default values for maaspal.
+
+# -- Target namespace for all namespaced resources (the harness runs its Jobs,
+# throwaway models and minted ServiceAccounts here too).
+namespace: cp-maaspal
+
+# Overrides .Chart.Name so deployed resources use the plugin name, not the
+# chart name (which has a -chart suffix to avoid OCI registry collisions).
+nameOverride: "maaspal"
+fullnameOverride: ""
+
+# --- MaaS settings (the harness's global ConfigMap) ---
+maas:
+  # MaaS base URL. Empty = https://maas.<cluster apps domain>, read from the
+  # cluster's ingress config at install time.
+  apiUrl: ""
+  # Thanos Querier instant-query endpoint for MaaS metrics checks. Empty =
+  # https://thanos-querier-openshift-monitoring.<apps domain>/api/v1/query.
+  metricsUrl: ""
+  defaultModel: ""
+  # Empty = MaaS auto-selects the highest-priority subscription.
+  defaultSubscription: ""
+  # Seconds a stopped run gets to finish cleanup before it's killed.
+  stopGracePeriodSeconds: 120
+
+# --- Frontend (nginx serving remoteEntry.js) ---
+image:
+  repository: quay.io/rh-ai-community-plugins/maaspal
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+securityContext:
+  runAsNonRoot: true
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# --- BFF (FastAPI backend; also the harness Job image) ---
+bff:
+  enabled: true
+  image:
+    repository: quay.io/rh-ai-community-plugins/maaspal-bff
+    tag: ""
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  # Run history (SQLite), logs and live run files. ReadWriteOnce: each harness
+  # Job is pinned to the BFF's node so it can mount the same volume.
+  persistence:
+    size: 2Gi
+    storageClassName: ""
+
+# The harness ServiceAccount (BFF + every harness Job). The frontend pod does
+# not use it.
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# --- Who may use MaaS:PAL ---
+# Every API call checks the dashboard user's token with a SelfSubjectAccessReview
+# for verb "use" on harness.maaspal.rh-ai-community-plugins.io in this namespace.
+# The chart's <name>-user Role grants exactly that; bind it here (cluster-admins
+# always pass). Example: groups: ["rhoai-admins"]
+access:
+  users: []
+  groups: []
+
+# --- Optional grants the harness ServiceAccount holds ---
+rbac:
+  # Read MaaS / Kuadrant / Gateway API / KServe objects (MaaS setup pages,
+  # model health checks).
+  maasReadonly: true
+  # Create/patch/delete MaaSSubscriptions and MaaSAuthPolicies (most
+  # "explore" scenarios).
+  subscriptionWrite: true
+  # Deploy throwaway simulated models and Routes (denied_without_auth_policy,
+  # gateway_overhead, multi_model_load).
+  modelWrite: true
+  # cluster-monitoring-view (MaaS metrics checks via Thanos).
+  monitoring: true
+  # Create ServiceAccounts and mint tokens for them in this namespace
+  # (rate_limit_per_user_or_shared). The most sensitive grant: review before
+  # enabling.
+  userProvisioning: false
+
+# Only the RHOAI dashboard may reach the BFF.
+networkPolicy:
+  enabled: true
+  dashboardNamespace: redhat-ods-applications

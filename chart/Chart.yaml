@@ -1,0 +1,15 @@
+apiVersion: v2
+name: maaspal-chart
+description: MaaS:PAL — a testing harness for RHOAI Models as a Service, as an RHOAI Dashboard community plugin
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - rhoai
+  - openshift-ai
+  - plugin
+  - maas
+  - testing
+home: https://github.com/rh-ai-community-plugins/maaspal
+sources:
+  - https://github.com/rh-ai-community-plugins/maaspal

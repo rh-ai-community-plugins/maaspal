@@ -1,0 +1,20 @@
+{{- if .Values.bff.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "maaspal.fullname" . }}-bff
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bff
+spec:
+  type: {{ .Values.bff.service.type }}
+  ports:
+    - port: {{ .Values.bff.service.port }}
+      targetPort: {{ .Values.bff.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "maaspal.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bff
+{{- end }}

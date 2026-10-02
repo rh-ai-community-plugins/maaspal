@@ -1,0 +1,39 @@
+{{- if .Values.rbac.userProvisioning }}
+# Grants the harness SA the ability to create/delete throwaway
+# ServiceAccounts and mint tokens for them via the TokenRequest subresource,
+# scoped to the harness's own maaspal namespace only — used by
+# harness/tasks/identity.py (create_user, provision_keys_for_users) to mint
+# genuinely distinct caller identities for multi-user testing (ADR-023).
+#
+# ** MORE SENSITIVE THAN ANY OTHER GRANT THIS HARNESS HOLDS **
+# Minting a token for a ServiceAccount is a real elevated capability — flagged
+# as such in docs/architecture/empirical-verification-checklist.md before
+# this file existed. Review deliberately before applying; this is not a
+# routine grant on the level of the CR-write RBAC files alongside it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-user-provisioning
+  namespace: {{ include "maaspal.namespace" . }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "delete", "get", "list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-user-provisioning
+  namespace: {{ include "maaspal.namespace" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "maaspal.serviceAccountName" . }}
+    namespace: {{ include "maaspal.namespace" . }}
+roleRef:
+  kind: Role
+  name: {{ include "maaspal.clusterPrefix" . }}-user-provisioning
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

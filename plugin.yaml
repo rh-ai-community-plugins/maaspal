@@ -1,0 +1,86 @@
+# --- Plugin identity (required) ---
+name: maaspal
+displayName: "MaaS:PAL"
+description: A testing harness for RHOAI Models as a Service — runs scenarios (rate limits, access control, API keys, usage metrics, load) against your live MaaS setup and explains the results
+version: 0.1.0
+
+# --- Maintainer (required) ---
+maintainer:
+  name: TODO-maintainer-name          # replace with the maintainer's name
+  github: TODO-github-handle          # replace with the maintainer's GitHub handle
+
+# --- RHOAI compatibility (required) ---
+rhoai_compatibility:
+  # ExternalModel/ExternalProvider are read from inference.opendatahub.io (3.5+).
+  min_version: "3.5.0"
+  tested_versions: ["3.5.0"]
+
+# --- Deployment (required) ---
+deployment_model: cluster-shared     # per-project | cluster-shared | both
+
+image:
+  repository: quay.io/rh-ai-community-plugins/maaspal
+  tag: "0.1.0"
+
+bff_image:                           # FastAPI backend; also the image every harness Job runs
+  repository: quay.io/rh-ai-community-plugins/maaspal-bff
+  tag: "0.1.0"
+
+# --- Installation (required) ---
+install:
+  # assisted: the defaults work on most clusters (the MaaS and Thanos URLs are
+  # derived from the cluster's apps domain), but an admin decides who gets
+  # access (access.groups) and whether to enable the optional
+  # rbac.userProvisioning grant.
+  method: assisted
+  namespace: cp-maaspal
+  helm:
+    chart_path: chart/
+    registry: oci://quay.io/rh-ai-community-plugins/maaspal-chart
+  prerequisites:
+    - RHOAI with Models as a Service (MaaS) enabled
+    - Kuadrant / Limitador (installed with MaaS)
+    - OpenShift cluster monitoring (Thanos Querier) for the usage-metrics checks
+    - The plugin namespace labelled maas.opendatahub.io/gateway-access=true (scenarios that deploy throwaway models)
+  instructions: https://github.com/rh-ai-community-plugins/maaspal/blob/main/docs/deployment/OPENSHIFT_DEPLOY.md
+
+# --- Dashboard integration (required) ---
+remote:
+  type: module-federation
+  spec:
+    name: maaspal
+    scope: maaspal
+    # Update this URL to point to your deployed OpenShift route.
+    remoteEntry: https://<your-openshift-route>/remoteEntry.js
+    paths:
+      - type: route
+        path: /maaspal
+        extensions:
+          - maaspal/extensions
+      - type: icon
+        path: maaspal/Icon
+    # The BFF also needs a dashboard proxyService entry (/maaspal/api → the
+    # maaspal-bff Service, port 3000, authorize: true) — see
+    # docs/deployment/OPENSHIFT_DEPLOY.md.
+
+# --- RBAC (required) ---
+# The harness ServiceAccount needs cluster-wide grants to read the MaaS setup
+# and create temporary test resources in the MaaS tenant / model namespaces.
+# Each is a chart value (rbac.*); userProvisioning is off by default.
+# Users need the chart's maaspal-user Role (a virtual permission checked by the
+# BFF) — bind it with access.users / access.groups.
+rbac:
+  required_roles:
+    - "<namespace>-maaspal-maas-readonly (ClusterRole): read MaaS, Kuadrant, Gateway API, KServe and RHOAI config objects; get on Secrets"
+    - "<namespace>-maaspal-maas-subscription-write (ClusterRole): write MaaSSubscriptions and MaaSAuthPolicies"
+    - "<namespace>-maaspal-model-write (ClusterRole): write LLMInferenceServices, MaaSModelRefs and Routes"
+    - "cluster-monitoring-view (ClusterRole): query Thanos"
+    - "maaspal (Role, plugin namespace): Jobs, pods and pod logs"
+    - "<namespace>-maaspal-user-provisioning (Role, optional): create ServiceAccounts and mint their tokens"
+  cluster_roles: true
+
+# --- Support (optional) ---
+support:
+  repo: https://github.com/rh-ai-community-plugins/maaspal
+  docs: https://github.com/rh-ai-community-plugins/maaspal/tree/main/docs
+  issues: https://github.com/rh-ai-community-plugins/maaspal/issues

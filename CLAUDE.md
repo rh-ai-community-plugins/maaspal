@@ -4,22 +4,26 @@
 
 A testing harness for Red Hat OpenShift AI (RHOAI) Models as a Service (MaaS). Validates existing RHOAI environments by running test scenarios against live endpoints. The harness user will typically be an admin, but uses RHOAI's dedicated endpoints and functionality as intended (not bypassing RHOAI's own access controls — acting through RHOAI's user-facing APIs, not raw cluster admin operations).
 
-Tests are composed of atomic **tasks** (e.g., provision API key, send inference requests) grouped into **scenarios** (user-selectable flows defined in YAML). The harness runs in-cluster as Kubernetes Jobs, orchestrated by a web UI accessed via an OpenShift Route.
+Tests are composed of atomic **tasks** (e.g., provision API key, send inference requests) grouped into **scenarios** (user-selectable flows defined in YAML). The harness runs in-cluster as Kubernetes Jobs, orchestrated by a UI that is an **RHOAI Dashboard community plugin** (ADR-026): a Webpack Module Federation remote under *Community plugins → MaaS:PAL*, following the `rh-ai-community-plugins/hello-world` seed project.
 
 ## Architecture Overview
 
 ```
-                  Browser UI (React + TypeScript + PatternFly 5)
+                  RHOAI Dashboard (host) — loads /_mf/maaspal/remoteEntry.js
+                  Plugin UI (React + TypeScript + PatternFly 6, Module Federation remote,
+                  nginx Deployment "maaspal" :8080)
                   - Pick scenario, override config params, start run
                   - Live log polling (REST, 1s interval) with smart scroll
                   - Live assertion status panel (2s poll, independent of logs)
                   - Task progress pipeline (2s poll)
-                  - Results history + per-run detail view; URL hash routing (#run/<id>)
+                  - Results history + per-run detail view; routes /maaspal/runs[/<id>], /maaspal/setup
                   - Run page narration: verdict/finding, steps with per-resource
                     cleanup status, traffic and metrics charts, collapsible logs
-                          |
-                  FastAPI Backend (Deployment)
-                  - Serve UI static files
+                          |  /maaspal/api/*  → dashboard proxyService (authorize: true,
+                          |  user's token forwarded) → /api/*
+                  FastAPI BFF (Deployment "maaspal-bff" :3000)
+                  - Every route: SelfSubjectAccessReview with the user's token (api/auth.py)
+                  - GET  /api/health                          (ungated, probes)
                   - GET  /api/scenarios
                   - POST /api/runs  (accepts config_overrides)
                   - GET  /api/runs, /api/runs/{id}
@@ -57,65 +61,21 @@ Tests are composed of atomic **tasks** (e.g., provision API key, send inference 
 
 ```
 maaspal/
-├── harness/                    # Test runner (K8s Job entrypoint)
-│   ├── main.py                 # Job entrypoint: loads kube client config (ADR-009 update), SIGTERM handler, runs the scenario, writes /data/results/<id>.json
-│   ├── runner.py               # ScenarioRunner: task loop, assertions, metrics polling, graceful stop, cleanup; writes progress/assertions/config files (incl. the run page's narration, traffic, resources, tables, findings, verdict)
-│   ├── result.py               # RunResult/TaskResult dataclasses + assertion evaluation (simple, match, promql; between/label/unit/target; live ${harness.x} bounds)
-│   ├── config.py               # Config loader: global ConfigMap + scenario YAML + launch overrides; task `when:` filtering
-│   ├── cleanup_state.py        # Auto-cleanup flag, persisted shared_state, cleanup status, per-resource cleanup marking (shared with api/cleanup.py)
-│   ├── metrics_client.py       # fetch_metrics: Thanos Querier client
-│   ├── durations.py            # parse_duration_s: "30s"/"1m"/"24h" → seconds
-│   └── tasks/
-│       ├── base.py             # Task ABC, TaskContext, record_created()
-│       ├── registry.py         # task name → class (incl. aliases)
-│       ├── auth.py             # provision_api_key, revoke_api_keys, verify_api_key_search, provision_keys_distributed (REST-only)
-│       ├── identity.py         # create_user, provision_keys_for_users (ADR-023)
-│       ├── inference.py        # send_requests: fixed bursts, until_throttled ramp, step load (stages)
-│       ├── subscription.py     # apply_rate_limit_subscription, apply_priority_test_subscriptions, provision_subscriptions_distributed
-│       ├── subscription_check.py # read_subscription_limits, discover_subscription_models, send_requests_to_each_model (ADR-025)
-│       ├── access_policy.py    # apply_auth_policy (ADR-018)
-│       ├── model.py            # deploy_simulated_model (ADR-024), expose_model_route + probe_direct_endpoint (gateway_overhead)
-│       ├── platform_health.py  # check_platform_health (REST smoke), check_model_health (read-only model wiring, one or all models)
-│       ├── analysis.py         # classify_rate_limit_pooling: two users' bursts → per-user/shared finding
-│       ├── metrics.py          # check_maas_metrics (optional explicit metrics task; not used by built-in scenarios)
-│       └── stubs.py            # pause (production: waits out rate-limit windows), stub_pass/stub_fail (tests)
-│
-├── scenarios/                  # Scenario YAMLs (mounted as a ConfigMap) — see "Scenarios" below
-│   ├── smoke_test.yaml, verify_subscription.yaml                         # Quick check
-│   ├── verify_subscription_rate_limit.yaml, keys_share_user_budget.yaml,
-│   │   rate_limit_window_recovery.yaml, subscription_auto_selection.yaml,
-│   │   rate_limit_per_user_or_shared.yaml                                # Rate limits
-│   ├── denied_without_auth_policy.yaml                                   # Access control
-│   ├── api_key_lifecycle.yaml                                            # API keys
-│   ├── usage_metrics_accuracy.yaml                                       # Usage metrics
-│   ├── load_test.yaml, gateway_overhead.yaml, multi_model_load.yaml      # Performance
-│   ├── model_config_health.yaml                                          # Diagnostics
-│   └── stub.yaml, stub_failing.yaml                                      # test fixtures, hidden from the UI
-│
-├── api/                        # FastAPI backend
-│   ├── main.py                 # App, static UI, background poller that finalizes runs (incl. runs whose harness died without a result)
-│   ├── db.py                   # SQLite (aiosqlite)
-│   ├── k8s.py                  # create_job (backoffLimit 0), stop_run (suspends the Job), run_job_state, delete_stopped_job, log capture to PVC
-│   ├── cleanup.py              # Manual "Clean Up Now": re-runs task cleanup() from persisted state
-│   ├── maas_client.py          # Read-only MaaS domain model for the MaaS Setup tab (also reused by harness tasks — same image)
-│   └── routes/
-│       ├── scenarios.py        # GET /api/scenarios (config defaults + display/launch metadata)
-│       ├── runs.py             # POST /api/runs, GET /api/runs[/{id}], POST /api/runs/{id}/stop|auto-cleanup|cleanup
-│       ├── logs.py             # GET /api/runs/{id}/logs/lines?offset=N
-│       ├── assertions.py       # GET /api/runs/{id}/assertions
-│       ├── progress.py         # GET /api/runs/{id}/progress
-│       ├── config.py           # GET /api/runs/{id}/config (YAML text)
-│       └── maas.py             # GET /api/maas/{status,subscriptions,models,access,auth-policies,rate-limit-policies,limitador,gateways,http-routes,platform}
-│
-├── ui/                         # React + TypeScript + PatternFly 5, built to ui/dist/
-│   └── src/
-│       ├── App.tsx             # Hash routing (#run/<id>, #maas); one <Page> with the masthead as its header (single scrollbar)
-│       ├── api/client.ts       # Typed fetch wrappers + types for every route
+├── src/                        # Frontend: Module Federation remote (React 18 + TypeScript + PatternFly 6), built by webpack to dist/
+│   ├── index.ts → bootstrap.tsx # Standalone dev entry only: mounts App at /maaspal/* like the dashboard does
+│   ├── rhoai/
+│   │   ├── extensions.ts       # Exposed as ./extensions: Community plugins section (shared), MaaS:PAL section, "Test runs"/"MaaS setup" links, /maaspal/* route
+│   │   └── CommunityNavIcon.tsx # [SHARED] community plugins icon — never edit
+│   └── app/
+│       ├── App.tsx             # react-router routes under /maaspal: runs, runs/:runId, setup; CommunityBanner; no <Page> (the dashboard owns the chrome)
+│       ├── api/client.ts       # Typed fetch wrappers + types for every route; API_BASE = /maaspal/api (the dashboard's proxyService)
 │       ├── launchForm.ts       # Launch-form helpers: autofill, show_if, required gating, plan sentence
 │       ├── scenarioTitles.ts   # Scenario id → title (incl. previous_names), name formatting
 │       ├── monacoSetup.ts      # Self-hosted, YAML-only Monaco (see Frontend Monaco Setup)
-│       ├── styles/theme.css    # Light UI, dark masthead, red accents
+│       ├── styles/theme.css    # Red accents, scoped to .maaspal-plugin / maaspal-* classes
 │       └── components/
+│           ├── CommunityBanner.tsx/.css # [SHARED] required "Community Plugin" banner — never edit
+│           ├── MaaspalNavIcon.tsx    # Sidebar icon, exposed as ./Icon
 │           ├── ScenarioList.tsx      # Scenario cards by category, with badges
 │           ├── RunTrigger.tsx        # Launch modal: labelled inputs, ⓘ help, Advanced section, autofill, "What this run will do"
 │           ├── RunHistory.tsx        # Past runs (titles via scenarioTitles)
@@ -129,38 +89,92 @@ maaspal/
 │           ├── RunSettingsModal.tsx, RawYamlModal.tsx # Read-only Monaco YAML views (run settings; CRs in the MaaS Setup tab)
 │           └── maas/                 # MaaS Setup tab (ADR-017): Models, Subscriptions, Authorization Policies, Access Control, Access Simulator, Rate Limiting, Networking, Platform Config
 │
-├── deploy/                     # OpenShift manifests (all applied by `oc apply -k .`)
-│   ├── serviceaccount.yaml     # maaspal SA
-│   ├── rbac.yaml               # Role: jobs (incl. patch, for Stop), pods, pods/log in maaspal
-│   ├── rbac-maas-readonly.yaml # ClusterRole: read MaaS/Kuadrant/Gateway API/KServe resources + get on Secrets (ADR-017)
-│   ├── rbac-maas-subscription-write.yaml # ClusterRole: write maassubscriptions + maasauthpolicies
-│   ├── rbac-model-write.yaml   # ClusterRole: write llminferenceservices, maasmodelrefs, routes (throwaway models)
-│   ├── rbac-monitoring.yaml    # cluster-monitoring-view (Thanos)
-│   ├── rbac-user-provisioning.yaml # Role: create ServiceAccounts + mint tokens in maaspal (ADR-023) — the most sensitive grant
-│   ├── pvc.yaml, configmap-global.yaml, deployment.yaml, service.yaml, route.yaml
+├── bff/                        # Python project: FastAPI BFF + the harness (same image, bff/Containerfile)
+│   ├── pyproject.toml
+│   ├── Containerfile           # UBI9 Python 3.11, UID 1001, uvicorn on :3000; also every harness Job's image
+│   ├── harness/                    # Test runner (K8s Job entrypoint)
+│   │   ├── main.py                 # Job entrypoint: loads kube client config (ADR-009 update), SIGTERM handler, runs the scenario, writes /data/results/<id>.json
+│   │   ├── runner.py               # ScenarioRunner: task loop, assertions, metrics polling, graceful stop, cleanup; writes progress/assertions/config files (incl. the run page's narration, traffic, resources, tables, findings, verdict)
+│   │   ├── result.py               # RunResult/TaskResult dataclasses + assertion evaluation (simple, match, promql; between/label/unit/target; live ${harness.x} bounds)
+│   │   ├── config.py               # Config loader: global ConfigMap + scenario YAML + launch overrides; task `when:` filtering
+│   │   ├── cleanup_state.py        # Auto-cleanup flag, persisted shared_state, cleanup status, per-resource cleanup marking (shared with api/cleanup.py)
+│   │   ├── metrics_client.py       # fetch_metrics: Thanos Querier client
+│   │   ├── durations.py            # parse_duration_s: "30s"/"1m"/"24h" → seconds
+│   │   └── tasks/
+│   │       ├── base.py             # Task ABC, TaskContext, record_created()
+│   │       ├── registry.py         # task name → class (incl. aliases)
+│   │       ├── auth.py             # provision_api_key, revoke_api_keys, verify_api_key_search, provision_keys_distributed (REST-only)
+│   │       ├── identity.py         # create_user, provision_keys_for_users (ADR-023)
+│   │       ├── inference.py        # send_requests: fixed bursts, until_throttled ramp, step load (stages)
+│   │       ├── subscription.py     # apply_rate_limit_subscription, apply_priority_test_subscriptions, provision_subscriptions_distributed
+│   │       ├── subscription_check.py # read_subscription_limits, discover_subscription_models, send_requests_to_each_model (ADR-025)
+│   │       ├── access_policy.py    # apply_auth_policy (ADR-018)
+│   │       ├── model.py            # deploy_simulated_model (ADR-024), expose_model_route + probe_direct_endpoint (gateway_overhead)
+│   │       ├── platform_health.py  # check_platform_health (REST smoke), check_model_health (read-only model wiring, one or all models)
+│   │       ├── analysis.py         # classify_rate_limit_pooling: two users' bursts → per-user/shared finding
+│   │       ├── metrics.py          # check_maas_metrics (optional explicit metrics task; not used by built-in scenarios)
+│   │       └── stubs.py            # pause (production: waits out rate-limit windows), stub_pass/stub_fail (tests)
+│   │
+│   ├── scenarios/                  # Scenario YAMLs (baked into the BFF image) — see "Scenarios" below
+│   │   ├── smoke_test.yaml, verify_subscription.yaml                         # Quick check
+│   │   ├── verify_subscription_rate_limit.yaml, keys_share_user_budget.yaml,
+│   │   │   rate_limit_window_recovery.yaml, subscription_auto_selection.yaml,
+│   │   │   rate_limit_per_user_or_shared.yaml                                # Rate limits
+│   │   ├── denied_without_auth_policy.yaml                                   # Access control
+│   │   ├── api_key_lifecycle.yaml                                            # API keys
+│   │   ├── usage_metrics_accuracy.yaml                                       # Usage metrics
+│   │   ├── load_test.yaml, gateway_overhead.yaml, multi_model_load.yaml      # Performance
+│   │   ├── model_config_health.yaml                                          # Diagnostics
+│   │   └── stub.yaml, stub_failing.yaml                                      # test fixtures, hidden from the UI
+│   │
+│   ├── api/                        # FastAPI backend
+│   │   ├── main.py                 # App (every route gated by auth.py), /api/health, background poller that finalizes runs (incl. runs whose harness died without a result)
+│   │   ├── auth.py                 # Access gate: SelfSubjectAccessReview with the dashboard user's token (ADR-026)
+│   │   ├── db.py                   # SQLite (aiosqlite)
+│   │   ├── k8s.py                  # create_job (backoffLimit 0), stop_run (suspends the Job), run_job_state, delete_stopped_job, log capture to PVC
+│   │   ├── cleanup.py              # Manual "Clean Up Now": re-runs task cleanup() from persisted state
+│   │   ├── maas_client.py          # Read-only MaaS domain model for the MaaS Setup tab (also reused by harness tasks — same image)
+│   │   └── routes/
+│   │       ├── scenarios.py        # GET /api/scenarios (config defaults + display/launch metadata)
+│   │       ├── runs.py             # POST /api/runs, GET /api/runs[/{id}], POST /api/runs/{id}/stop|auto-cleanup|cleanup
+│   │       ├── logs.py             # GET /api/runs/{id}/logs/lines?offset=N
+│   │       ├── assertions.py       # GET /api/runs/{id}/assertions
+│   │       ├── progress.py         # GET /api/runs/{id}/progress
+│   │       ├── config.py           # GET /api/runs/{id}/config (YAML text)
+│   │       └── maas.py             # GET /api/maas/{status,subscriptions,models,access,auth-policies,rate-limit-policies,limitador,gateways,http-routes,platform}
 │
+├── chart/                      # Helm chart maaspal-chart (replaces the old deploy/ + kustomize)
+│   ├── values.yaml             # namespace cp-maaspal, maas.* settings, images, access.users/groups, rbac.* toggles, networkPolicy
+│   └── templates/              # frontend + BFF Deployments/Services, PVC, global ConfigMap, SA, Roles/ClusterRoles (one file per old rbac-*.yaml), maaspal-user Role, NetworkPolicy, NOTES
+│
+├── config/webpack.{common,dev,prod}.js # ModuleFederationPlugin (name maaspal, exposes ./extensions + ./Icon, shared singletons); dev proxies /maaspal/api → :3000
 ├── docs/
 │   ├── architecture/
-│   │   ├── adrs/                          # Architecture Decision Records (ADR-001 to ADR-025)
+│   │   ├── adrs/                          # Architecture Decision Records (ADR-001 to ADR-026)
 │   │   ├── maas-domain-reference.md       # MaaS governance objects (subscriptions, models, policies, Kuadrant, gateway) as found live
 │   │   ├── maas-metrics-reference.md      # Every MaaS/RHOAI metric found live, not just the ones MaaS:PAL uses
 │   │   └── empirical-verification-checklist.md  # Which claims are verified against a live cluster (Verified/Partial/Gap)
+│   ├── deployment/OPENSHIFT_DEPLOY.md     # Install, register with the dashboard, access, permissions, chart reference
 │   └── project/
 │       └── implementation-plan.md  # Original phased plan (historical)
 │
-├── Dockerfile                  # Multi-stage: Node (UI build) → Python (API + harness)
-├── Makefile                    # build, push, deploy, dev, test, lint
-├── kustomization.yaml          # oc apply -k . — deploy/ + the maaspal-scenarios ConfigMap (configMapGenerator; scenario files listed by hand, checked by test_kustomization_scenarios_configmap_matches_directory)
-├── pyproject.toml
-└── README.md                   # Overview, deploy, permissions, develop
+├── plugin.yaml                 # Community plugin manifest (identity, compatibility, images, install, remote, RBAC)
+├── Containerfile               # Frontend image: webpack build → UBI9 nginx serving dist/ on :8080 (CORS on remoteEntry.js)
+├── package.json                # Frontend deps/scripts + module-federation block
+├── Makefile                    # install, lint, typecheck, test, validate, build, dev(-standalone|-bff), image-*, chart-*, deploy
+├── scripts/                    # build-push.sh, scan-image.sh, sync-chart-version.js (npm `version` hook: chart, pyproject, plugin.yaml)
+└── README.md                   # Overview, quick start (install, register, access), permissions, develop
 ```
 
 ## Key Design Decisions
 
-### Single Container Image
-Both the API server and the harness job use the same image, different entrypoints:
-- API server: `uvicorn api.main:app`
-- Job runner: `python -m harness.main --scenario <name> --run-id <uuid>`
+### Images
+The plugin ships two images (ADR-026). The frontend (`Containerfile`, `quay.io/rh-ai-community-plugins/maaspal`) is nginx serving the webpack build. The BFF and the harness Job share one image (`bff/Containerfile`, `…/maaspal-bff`), with different entrypoints:
+- BFF: `uvicorn api.main:app --port 3000`
+- Job runner: `python -m harness.main --scenario <name> --run-id <uuid>` (image from `MAASPAL_IMAGE`; ServiceAccount, global ConfigMap and PVC names from `MAASPAL_SERVICE_ACCOUNT`/`MAASPAL_GLOBAL_CONFIGMAP`/`MAASPAL_DATA_PVC`, all set by the chart's global ConfigMap)
+
+### Access gate (ADR-026)
+The BFF acts with the `maaspal` ServiceAccount, so every route except `/api/health` runs `api/auth.py:require_user` (a dependency on the whole FastAPI app): it needs the dashboard-forwarded `Authorization: Bearer <user token>` (401 otherwise) and makes a **SelfSubjectAccessReview with that token** for verb `use` on `harness.maaspal.rh-ai-community-plugins.io` in the plugin namespace (403 if denied, 503 if the API server is unreachable). That resource is virtual — granted only by the chart's `maaspal-user` Role (`access.users`/`access.groups`), giving no real cluster power; cluster-admins pass. Decisions are cached 60 s per token hash. `MAASPAL_AUTH_MODE=off` (local dev, and `api/tests/conftest.py`) disables it. A NetworkPolicy limits BFF ingress to the dashboard namespace.
 
 ### Task Model
 ```python
@@ -176,7 +190,7 @@ class Task(ABC):
 
 ### Tiered Config (three-level merge, lowest → highest precedence)
 
-1. **Global ConfigMap** (`configmap-global.yaml`): cluster-level defaults, injected as env vars into every Job
+1. **Global ConfigMap** (`chart/templates/configmap-global.yaml`, from the chart's `maas.*` values; the MaaS and Thanos URLs default to ones derived from the cluster's apps domain): cluster-level defaults, injected as env vars into the BFF and every Job. Also carries `NAMESPACE` (the plugin namespace), which scenarios can reference as `${config.NAMESPACE}`
    ```yaml
    MAAS_API_URL: "https://maas.apps.mycluster.example.com"
    DEFAULT_MODEL: "granite-3-8b-instruct"
@@ -356,12 +370,12 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
 - `create`, `get`, `list`, `watch`, `delete`, `patch` on `jobs` in the harness namespace — `patch` is for Stop (suspending the Job, see above)
 - `get`, `list`, `watch`, `delete` on `pods` — `delete` is only the fallback Stop uses when it can't patch the Job
 - `get` on `pods/log`
-- `get`, `list`, `create`, `patch`, `delete` on `maassubscriptions` and `maasauthpolicies` (`maas.opendatahub.io/v1alpha1`, `deploy/rbac-maas-subscription-write.yaml`) — for every scenario that creates temporary subscriptions or auth policies
-- `get`, `list`, `create`, `patch`, `delete` on `llminferenceservices`/`maasmodelrefs`, and `get`/`create`/`delete` on `routes` (`deploy/rbac-model-write.yaml`) — for scenarios that deploy throwaway models (`denied_without_auth_policy`, `gateway_overhead`, `multi_model_load`)
-- Cluster-wide read of MaaS/Kuadrant/Gateway API/KServe resources plus `get` on Secrets (`deploy/rbac-maas-readonly.yaml`, ADR-017) — the MaaS Setup tab, `check_model_health`, `read_subscription_limits`, `discover_subscription_models`
+- `get`, `list`, `create`, `patch`, `delete` on `maassubscriptions` and `maasauthpolicies` (`maas.opendatahub.io/v1alpha1`, `chart/templates/rbac-maas-subscription-write.yaml`) — for every scenario that creates temporary subscriptions or auth policies
+- `get`, `list`, `create`, `patch`, `delete` on `llminferenceservices`/`maasmodelrefs`, and `get`/`create`/`delete` on `routes` (`chart/templates/rbac-model-write.yaml`) — for scenarios that deploy throwaway models (`denied_without_auth_policy`, `gateway_overhead`, `multi_model_load`)
+- Cluster-wide read of MaaS/Kuadrant/Gateway API/KServe resources plus `get` on Secrets (`chart/templates/rbac-maas-readonly.yaml`, ADR-017) — the MaaS Setup tab, `check_model_health`, `read_subscription_limits`, `discover_subscription_models`
 - (`tokenratelimitpolicies` read, part of the read-only grant above, is also what `check_model_health` and `provision_subscriptions_distributed`'s readiness wait use)
-- `cluster-monitoring-view` ClusterRole binding (`deploy/rbac-monitoring.yaml`, cluster-scoped — the only cluster-scoped grant the SA needs beyond its own namespace) — for querying Thanos Querier (background MaaS metrics polling)
-- `create`, `delete`, `get`, `list` on `serviceaccounts` and `create` on `serviceaccounts/token`, scoped to the `maaspal` namespace (`deploy/rbac-user-provisioning.yaml`) — for `create_user`/`provision_keys_for_users` (ADR-023). **Meaningfully more sensitive than any other grant this harness holds** — minting a ServiceAccount token is a real elevated capability; review deliberately before applying, not as routine.
+- `cluster-monitoring-view` ClusterRole binding (`chart/templates/rbac-monitoring.yaml`, cluster-scoped — the only cluster-scoped grant the SA needs beyond its own namespace) — for querying Thanos Querier (background MaaS metrics polling)
+- `create`, `delete`, `get`, `list` on `serviceaccounts` and `create` on `serviceaccounts/token`, scoped to the plugin namespace (`chart/templates/rbac-user-provisioning.yaml`, off unless `rbac.userProvisioning=true`) — for `create_user`/`provision_keys_for_users` (ADR-023). **Meaningfully more sensitive than any other grant this harness holds** — minting a ServiceAccount token is a real elevated capability; review deliberately before applying, not as routine.
 
 ## Task Reference
 
@@ -415,13 +429,13 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
   - **Direct calls**: `url_from_shared_state` reads a deployed model's `direct_url` (set by `expose_model_route`); `insecure_tls` for its self-signed certificate.
   - Aliases: `send_requests_after_window`, `send_requests_via_maas`, `verify_other_keys_still_work`, `verify_revoked_key_denied`, `send_requests_as_second_user`.
 
-- **`expose_model_route` / `probe_direct_endpoint`** (`harness/tasks/model.py`): a passthrough-TLS OpenShift Route straight to a just-deployed model's workload Service (`<name>-kserve-workload-svc`, port `https`), so a latency comparison enters through cluster ingress both ways. `LLMInferenceService.status.addresses` only ever lists MaaS gateway URLs (confirmed live). The probe checks the route answers before timing, records `direct_probe.reachable`, and never fails the run. If unreachable it records a finding, and the MaaS leg still runs. Needs `routes` in `deploy/rbac-model-write.yaml`.
+- **`expose_model_route` / `probe_direct_endpoint`** (`harness/tasks/model.py`): a passthrough-TLS OpenShift Route straight to a just-deployed model's workload Service (`<name>-kserve-workload-svc`, port `https`), so a latency comparison enters through cluster ingress both ways. `LLMInferenceService.status.addresses` only ever lists MaaS gateway URLs (confirmed live). The probe checks the route answers before timing, records `direct_probe.reachable`, and never fails the run. If unreachable it records a finding, and the MaaS leg still runs. Needs `routes` in `chart/templates/rbac-model-write.yaml`.
 
 - **Per-resource cleanup status (ADR-025)**: tasks call `harness/tasks/base.py:record_created(ctx, task, kind, name, existed=…)` for every cluster object they create or patch (names only — never key values/tokens). The runner marks each with its owning task's `cleanup()` outcome (`removed`/`restored`/`cleanup failed`, or `left in place` with auto cleanup off; mid-run `revoked` for keys), via `harness/cleanup_state.py`, which `api/cleanup.py`'s manual "Clean Up Now" also uses.
 
 ### Background Metrics Polling
 
-MaaS/RHOAI metrics are read from Prometheus/Thanos Querier's instant-query API (`GET {MAAS_METRICS_URL}?query=<promql>`), not a MaaS-specific REST endpoint — see ADR-014 for why, and the SA RBAC (`deploy/rbac-monitoring.yaml`, `cluster-monitoring-view`) this requires. A scenario's `metrics_queries:` block (a dict of `{name: promql}` resolved for `${config.x}` like `assertions:`/task `params:`, see `scenarios/usage_metrics_accuracy.yaml`) names which named PromQL queries to run — moved here from the global ConfigMap's `MAAS_METRICS_QUERIES` in ADR-015 so the query text lives next to the assertions that use it; `MAAS_METRICS_URL` itself stays global (cluster wiring). Originally confirmed on `cluster-rkmhx.rkmhx.sandbox1230.opentlc.com`; `deploy/configmap-global.yaml` now targets `cluster-2ppnp.2ppnp.sandbox449.opentlc.com`, where `limited_calls` was re-confirmed live on 2026-10-02. Kuadrant/Limitador's gateway counters `authorized_calls` (total_requests) and `authorized_hits` (total_tokens — weighted per-token via the model's `TokenRateLimitPolicy`), both scoped by the `limitador_namespace` label (the target model's HTTPRoute name). See `docs/architecture/maas-metrics-reference.md` for the full catalog of every metric-emitting component found (not just these two) and ADR-014 for the decision. If deploying to a different cluster/model, re-verify these against a live `/api/v1/series` query rather than assuming — metric names/labels are confirmed to vary across Limitador deployments.
+MaaS/RHOAI metrics are read from Prometheus/Thanos Querier's instant-query API (`GET {MAAS_METRICS_URL}?query=<promql>`), not a MaaS-specific REST endpoint — see ADR-014 for why, and the SA RBAC (`chart/templates/rbac-monitoring.yaml`, `cluster-monitoring-view`) this requires. A scenario's `metrics_queries:` block (a dict of `{name: promql}` resolved for `${config.x}` like `assertions:`/task `params:`, see `scenarios/usage_metrics_accuracy.yaml`) names which named PromQL queries to run — moved here from the global ConfigMap's `MAAS_METRICS_QUERIES` in ADR-015 so the query text lives next to the assertions that use it; `MAAS_METRICS_URL` itself stays global (cluster wiring). Originally confirmed on `cluster-rkmhx.rkmhx.sandbox1230.opentlc.com`; the chart's global ConfigMap (formerly `deploy/configmap-global.yaml`) last targeted `cluster-2ppnp.2ppnp.sandbox449.opentlc.com`, where `limited_calls` was re-confirmed live on 2026-10-02. Kuadrant/Limitador's gateway counters `authorized_calls` (total_requests) and `authorized_hits` (total_tokens — weighted per-token via the model's `TokenRateLimitPolicy`), both scoped by the `limitador_namespace` label (the target model's HTTPRoute name). See `docs/architecture/maas-metrics-reference.md` for the full catalog of every metric-emitting component found (not just these two) and ADR-014 for the decision. If deploying to a different cluster/model, re-verify these against a live `/api/v1/series` query rather than assuming — metric names/labels are confirmed to vary across Limitador deployments.
 
 **Scoping caveat that applies to every form of MaaS-side assertion** (match form and PromQL form alike, ADR-014/ADR-015): no metric in the catalog carries a run-id or caller-id label — the finest grain confirmed live is `limitador_namespace`, shared by every caller of that model route. `authorized_calls`/`authorized_hits` aggregate *all* traffic on that route, not just this run's. Isolation is achieved purely by time-windowing (the baseline-delta subtraction below), never by a Prometheus label filter — a `promql`-form assertion's `${baseline.x}`/`${harness.x}` template variables are numeric literal substitutions, not labels, so they don't change this. Low risk on a dedicated single-model test sandbox; would need a caller-scoped label (if a deployed Limitador ever exposes one) on a busier shared cluster.
 
@@ -469,19 +483,19 @@ Below the chips, `RunDetail.tsx` renders the rest of the page from the same prog
 - **Traffic**: per burst, a one-line summary or the full panel (stats, error reasons, `TrafficChart.tsx`), switchable either way ("Show chart" / "Show summary"). Bursts in one `chart_group` share a timeline with the waits between them shaded. Step-load bursts show a per-step table plus throughput and p95-by-step charts. `MetricsComparisonChart.tsx` plots MaaS-reported vs sent counts.
 - **Tables** tasks publish, the **checks** (`AssertionPanel.tsx`) on the right, and a **Logs** panel at the bottom: line count, last-line preview, a Show/Hide button, open automatically on failure.
 
-The masthead is the `<Page header>`, so the page has a single scrollbar.
+The dashboard owns the page chrome (masthead, sidebar, scroll container), so the plugin renders no `<Page>` of its own — only the required `CommunityBanner`, a small logo header and its routes.
 
 ### Scenario Categories (ADR-020, regrouped by ADR-025)
 
-`ScenarioList.tsx` groups scenarios by a `category:` field (optional in the YAML, defaulted to `"Custom"` by `api/routes/scenarios.py` when absent) into sections organised by the user's question: Quick check, Rate limits, Access control, API keys, Usage metrics, Performance, Diagnostics, and an always-rendered Custom bucket (shown even when empty). Within a category, `kind: verify` scenarios sort before `explore`, then by `order`. Cards show `title`, `summary` and badges (uses your setup / creates temporary resources / read-only, needs extra RBAC, duration). The category order lives in two places kept in sync by hand — `CATEGORY_ORDER` in `ui/src/components/ScenarioList.tsx` and `_KNOWN_CATEGORIES` in `harness/tests/test_scenarios.py`.
+`ScenarioList.tsx` groups scenarios by a `category:` field (optional in the YAML, defaulted to `"Custom"` by `api/routes/scenarios.py` when absent) into sections organised by the user's question: Quick check, Rate limits, Access control, API keys, Usage metrics, Performance, Diagnostics, and an always-rendered Custom bucket (shown even when empty). Within a category, `kind: verify` scenarios sort before `explore`, then by `order`. Cards show `title`, `summary` and badges (uses your setup / creates temporary resources / read-only, needs extra RBAC, duration). The category order lives in two places kept in sync by hand — `CATEGORY_ORDER` in `src/app/components/ScenarioList.tsx` and `_KNOWN_CATEGORIES` in `harness/tests/test_scenarios.py`.
 
 ### Frontend Monaco Setup
 
-`RunSettingsModal.tsx`'s read-only YAML view (see Results Storage above) is the only place this app uses Monaco. Two deliberate choices in `ui/src/monacoSetup.ts`, both because this app otherwise bundles everything into the container image and avoids external runtime dependencies (no CDN usage anywhere else in the UI, static files served straight from the FastAPI backend per the Dockerfile):
-- **Self-hosted, not CDN-loaded.** `@monaco-editor/react` defaults to lazy-fetching Monaco's AMD bundle from a public CDN at runtime — a real risk for an app meant to run inside OpenShift clusters that may have restricted egress. `monacoSetup.ts` imports `monaco-editor` directly and points `@monaco-editor/react`'s `loader.config({ monaco })` at it instead, plus configures `self.MonacoEnvironment.getWorker` to use a Vite-bundled worker (`monaco-editor/editor/editor.worker.js?worker`) rather than one Monaco would otherwise fetch itself.
-- **Trimmed to YAML only.** Importing the full `monaco-editor` package entry pulls in tokenizers for every one of its ~80 bundled languages (pushed the lazy chunk over 4MB) when this app only ever displays YAML. `monacoSetup.ts` instead imports the slim core (`monaco-editor/editor/editor.api.js`) plus just the YAML language definition (`monaco-editor/languages/definitions/yaml/register.js`) — both resolved through `monaco-editor`'s package.json `exports` map, which already implies the `esm/vs/` path prefix (a doubled-prefix import path is a common mistake here and fails silently/confusingly at Rollup build time, not at dev time).
-- `RunSettingsModal` itself is loaded via `React.lazy()` from `RunDetail.tsx` (not a static import) so Monaco's bundle is only fetched when a user actually opens the settings modal, not on every run page view.
-- `ui/tsconfig.json` needs `"types": ["vite/client"]` for the `?worker` import's types to resolve — absent from the original tsconfig since nothing else in the app used Vite's special import suffixes.
+`RunSettingsModal.tsx`'s and the MaaS setup pages' read-only YAML views (`RawYamlModal.tsx`, see Results Storage above) are the only places this app uses Monaco. Deliberate choices in `src/app/monacoSetup.ts`, because the plugin bundles everything into its own image and avoids external runtime dependencies:
+- **Self-hosted, not CDN-loaded.** `@monaco-editor/react` defaults to lazy-fetching Monaco's AMD bundle from a public CDN at runtime — a real risk for an app meant to run inside OpenShift clusters that may have restricted egress. `monacoSetup.ts` imports `monaco-editor` directly and points `@monaco-editor/react`'s `loader.config({ monaco })` at it instead, plus configures `self.MonacoEnvironment.getWorker` to use a webpack-bundled worker (`new Worker(new URL('monaco-editor/editor/editor.worker.js', import.meta.url))`, webpack 5's native worker syntax) rather than one Monaco would otherwise fetch itself. With `publicPath: 'auto'`, the worker and chunks are served from the plugin's own path (`/_mf/maaspal/` inside the dashboard).
+- **Trimmed to YAML only.** Importing the full `monaco-editor` package entry pulls in tokenizers for every one of its ~80 bundled languages (pushed the lazy chunk over 4MB) when this app only ever displays YAML. `monacoSetup.ts` instead imports the slim core (`monaco-editor/editor/editor.api.js`) plus just the YAML language definition (`monaco-editor/languages/definitions/yaml/register.js`) — both resolved through `monaco-editor`'s package.json `exports` map, which already implies the `esm/vs/` path prefix (a doubled-prefix import path is a common mistake here). `tsconfig.json` uses `"moduleResolution": "bundler"` so TypeScript follows that map too.
+- `RawYamlModal` is loaded via `React.lazy()` everywhere (not a static import) so Monaco's bundle is only fetched when a user actually opens a YAML view — confirmed in the build: the app chunks contain no Monaco code.
+- `RawYamlModal` uses PatternFly 6's composable `Modal` (`ModalHeader`/`ModalBody`/`ModalFooter`) and `@patternfly/react-code-editor` v6.
 
 ## Scenarios
 
@@ -495,7 +509,7 @@ Every scenario answers one question of the form "is my MaaS behaving the way I e
 | `keys_share_user_budget` (Rate limits, explore) | Do all my keys share one budget? | combined tokens before first 429 within [limit, limit + `allowed_overshoot`]; no key succeeds after the first 429 | Own temporary subscription (100 tokens / 24h), N keys round-robin, until throttled. Not yet run live. |
 | `rate_limit_window_recovery` (Rate limits, explore) | Does access come back after the window? | throttled before the wait; successes after the wait > 0 | Own temporary subscription (50 tokens / 1m), `pause` for the window + buffer; both bursts on one chart. Not yet run live. |
 | `subscription_auto_selection` (Rate limits, explore) | Which subscription do my keys get? | auto-selected key bound to the higher-priority subscription; tokens sent > low limit; 429s == 0 | Two temporary subscriptions (priority 50/10 tokens vs 200/1M). Formerly `rate_limit_priority_precedence` (ADR-021). |
-| `rate_limit_per_user_or_shared` (Rate limits, explore) | Are limits per user or shared? | result conclusive | Reports a **finding** (per user / shared / inconclusive) via `classify_rate_limit_pooling` — no expectation input. Two minted ServiceAccounts on one temporary 50-token subscription, both bursts `until_throttled`. Needs `deploy/rbac-user-provisioning.yaml`. |
+| `rate_limit_per_user_or_shared` (Rate limits, explore) | Are limits per user or shared? | result conclusive | Reports a **finding** (per user / shared / inconclusive) via `classify_rate_limit_pooling` — no expectation input. Two minted ServiceAccounts on one temporary 50-token subscription, both bursts `until_throttled`. Needs `chart/templates/rbac-user-provisioning.yaml`. |
 | `denied_without_auth_policy` (Access control, explore) | No auth policy → access denied? | > 90% rejected; 401/403 > 0; 429 == 0 | Throwaway model + identity + quota-only subscription. Formerly `subscription_without_authpolicy` (ADR-018). |
 | `api_key_lifecycle` (API keys, verify) | Do API keys behave correctly? | name echo / expiry / search finds all; error rate < 5%; revoke 1 key → it's denied, the others still work (< 5% errors), search lists key_count − 1 active | REST-only (ADR-019). |
 | `usage_metrics_accuracy` (Usage metrics, verify) | Do MaaS usage metrics match real traffic? | `authorized_calls`/`authorized_hits` baseline-deltas match requests/tokens sent within tolerance | `limitador_namespace` autofilled from the model's HTTPRoute. Formerly `metrics_fill` (ADR-014/015). Run page plots MaaS-reported vs sent (`metrics_charts:`). |
@@ -534,14 +548,15 @@ See [`docs/project/implementation-plan.md`](docs/project/implementation-plan.md)
 ## Verification
 
 ### Development
-1. **Unit tests**: `make test` — pytest (harness + API, mocked HTTP/K8s) and Jest (UI). `make lint` — ruff, mypy, eslint.
-2. **Scenario files**: `harness/tests/test_scenarios.py` checks every scenario loads and resolves (in every `when:` mode), uses registered tasks, a known category, display metadata, `inputs`/`requires`/`show_if` that reference real config keys, unique `previous_names`, and that `kustomization.yaml` lists every scenario file.
-3. **Local dev**: `make dev` — FastAPI + Vite dev servers. **Local harness**: `python -m harness.main --scenario scenarios/smoke_test.yaml --run-id test-123` (needs real cluster env vars).
-4. **Seeded run pages**: to check the run page without a cluster, run `ScenarioRunner` on a real scenario with only the cluster edges faked (key creation, model responses, Thanos), point `DATA_DIR`/`DB_PATH` at a scratch dir, serve with `uvicorn api.main:app`, and screenshot with headless Chrome. This caught several layout and wording bugs that tests didn't.
-5. **Deploy**: `make push IMAGE=…` then `make deploy`. Changes reach the cluster only through a new image.
+1. **Unit tests**: `make test` — pytest in `bff/` (harness + API, mocked HTTP/K8s; `api/tests/test_auth.py` covers the access gate) and Jest (UI). `make lint` — eslint + markdownlint, ruff, `helm lint`. `make typecheck` — tsc, mypy. `make validate` runs all of them. Python targets use `PYTHON=` (a virtualenv with `make install-bff`).
+2. **Scenario files**: `bff/harness/tests/test_scenarios.py` checks every scenario loads and resolves (in every `when:` mode), uses registered tasks, a known category, display metadata, and `inputs`/`requires`/`show_if` that reference real config keys, unique `previous_names`. Scenario `config:` defaults may reference cluster settings (`model_namespace: "${config.NAMESPACE}"`), resolved by `harness/config.py:resolve_config_defaults` for both the harness and `GET /api/scenarios`.
+3. **Local dev**: `make dev-bff` (FastAPI on :3000, access check off) plus `make dev-standalone` (webpack on :9500, open `/maaspal`) — or `make dev` with a local RHOAI dashboard on :8443. **Local harness**: `cd bff && python -m harness.main --scenario scenarios/smoke_test.yaml --run-id test-123` (needs real cluster env vars).
+4. **Seeded run pages**: to check the run page without a cluster, run `ScenarioRunner` on a real scenario with only the cluster edges faked (key creation, model responses, Thanos), point `DATA_DIR`/`DB_PATH` at a scratch dir, serve with `make dev-bff` + `make dev-standalone`, and screenshot with headless Chrome. This caught several layout and wording bugs that tests didn't.
+5. **Plugin build**: `npm run build` must produce `dist/remoteEntry.js` exposing `./extensions` and `./Icon`. `helm template maaspal chart/ -n cp-maaspal` must render (the MaaS/Thanos URLs are empty there — `lookup` needs a cluster).
+6. **Deploy**: `make image-push REGISTRY=… VERSION=…` then `make deploy REGISTRY=… IMAGE_TAG=…` (Helm), then register with the dashboard (README step 2). Changes reach the cluster only through new images.
 
 ### Live checks per scenario
-Run from the UI (or `POST /api/runs`) against a cluster with `deploy/` applied. "Confirmed" means the current scenario passed live; "earlier form" means an older version passed live but the scenario has changed since (ADR-025).
+Run from the dashboard's MaaS:PAL pages (or `POST /api/runs` through the dashboard proxy) against a cluster with the chart installed and the plugin registered. "Confirmed" means the current scenario passed live; "earlier form" means an older version passed live but the scenario has changed since (ADR-025).
 
 | Scenario | Check live | Status |
 |---|---|---|
@@ -561,7 +576,7 @@ Run from the UI (or `POST /api/runs`) against a cluster with `deploy/` applied. 
 | `model_config_health` | all models checked; flags match `oc get tokenratelimitpolicy,gateway,httproute`; fails honestly when a resource is missing | earlier form (as `platform_health_check` with 4 flags) |
 
 ### Cross-cutting live checks
-- **Stop** (**confirmed 2026-10-02** on `load_test`): the pod is gone within seconds, the run shows `CANCELLED` and stays there, the Job is deleted after finalization, and temporary resources are removed. Needs `patch` on Jobs (`deploy/rbac.yaml`). A run whose harness dies without a result is finalized by the API backstop (confirmed: it finalized a previously stuck run).
+- **Stop** (**confirmed 2026-10-02** on `load_test`): the pod is gone within seconds, the run shows `CANCELLED` and stays there, the Job is deleted after finalization, and temporary resources are removed. Needs `patch` on Jobs (`chart/templates/rbac.yaml`). A run whose harness dies without a result is finalized by the API backstop (confirmed: it finalized a previously stuck run).
 - **Cleanup**: run page lists every created object as removed/restored; with auto cleanup off they show "left in place", then "removed ✓" after Clean Up Now. Spot-check with `oc get maassubscriptions -n models-as-a-service` and the MaaS key search.
 - **UI**: single page scrollbar; launch form shows ⓘ help, an Advanced section, "What this run will do" with "More details", autofilled limit/window/route from the pickers; run history shows titles, including for runs of renamed scenarios.
 - **CR-based scenarios** need `harness/main.py:_load_kube_config()` (ADR-009 update) — without it every `CustomObjectsApi` call fails with `LocationValueError: No host specified`. Fixed and confirmed live; if CR tasks start failing that way again, check this first.

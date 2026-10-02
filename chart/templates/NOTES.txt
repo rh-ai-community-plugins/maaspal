@@ -1,0 +1,20 @@
+MaaS:PAL {{ .Chart.AppVersion }} is installed in namespace {{ include "maaspal.namespace" . }}.
+
+MaaS API URL: {{ include "maaspal.maasApiUrl" . | default "NOT SET — pass --set maas.apiUrl=https://maas.<apps domain>" }}
+
+Next steps:
+
+1. Let the MaaS gateway accept the throwaway models some scenarios deploy here:
+     oc label namespace {{ include "maaspal.namespace" . }} maas.opendatahub.io/gateway-access=true --overwrite
+
+2. Register the plugin with the RHOAI dashboard (MODULE_FEDERATION_CONFIG) — see
+   docs/deployment/OPENSHIFT_DEPLOY.md. Entry:
+     {"name": "maaspal",
+      "backend": {"remoteEntry": "/remoteEntry.js", "authorize": false, "tls": false,
+                  "service": {"name": "{{ include "maaspal.fullname" . }}", "namespace": "{{ include "maaspal.namespace" . }}", "port": {{ .Values.service.port }}}},
+      "proxyService": [{"path": "/maaspal/api", "pathRewrite": "/api", "authorize": true, "tls": false,
+                        "service": {"name": "{{ include "maaspal.fullname" . }}-bff", "namespace": "{{ include "maaspal.namespace" . }}", "port": {{ .Values.bff.service.port }}}}]}
+
+3. Give people access (cluster-admins already have it):
+     oc create rolebinding maaspal-users -n {{ include "maaspal.namespace" . }} --role={{ include "maaspal.fullname" . }}-user --group=<group>
+   or set access.groups / access.users in values.

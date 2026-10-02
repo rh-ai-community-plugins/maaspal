@@ -1,0 +1,76 @@
+{{- if .Values.bff.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "maaspal.fullname" . }}-bff
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bff
+spec:
+  # One replica: SQLite and run files live on a ReadWriteOnce volume.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "maaspal.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: bff
+  template:
+    metadata:
+      labels:
+        {{- include "maaspal.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bff
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-global.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "maaspal.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: bff
+          image: {{ include "maaspal.bffImage" . | quote }}
+          imagePullPolicy: {{ .Values.bff.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          envFrom:
+            - configMapRef:
+                name: {{ include "maaspal.fullname" . }}-global-config
+          ports:
+            - name: http
+              containerPort: {{ .Values.bff.service.targetPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.bff.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "maaspal.fullname" . }}-data
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

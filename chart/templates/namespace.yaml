@@ -1,0 +1,12 @@
+{{- if ne (include "maaspal.namespace" .) .Release.Namespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+    # Lets the MaaS gateway accept HTTPRoutes for the throwaway models some
+    # scenarios deploy here. With `--create-namespace` this file isn't
+    # rendered; label the namespace yourself (see the README).
+    maas.opendatahub.io/gateway-access: "true"
+{{- end }}

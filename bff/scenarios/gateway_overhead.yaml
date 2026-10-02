@@ -1,0 +1,129 @@
+name: gateway_overhead
+previous_names: [direct_inference]
+title: "How much latency does the MaaS gateway add?"
+summary: >-
+  Deploys a small test model, then sends the same requests straight to it and
+  through MaaS, and shows the latency difference.
+description: >-
+  Deploys a throwaway simulated model and makes it available two ways: through
+  MaaS (an auth policy and a subscription of its own) and through a plain
+  OpenShift Route straight to the model. Both paths enter through the
+  cluster's ingress like a real client would, so the only difference is the
+  MaaS gateway. It checks the direct route answers, then sends the same burst
+  both ways. The difference in median latency
+  is what the gateway (authentication, rate limiting, routing) adds. Using
+  its own model means there's nothing to look up or type in, and your real
+  models' traffic isn't affected. Everything is removed afterwards.
+category: "Performance"
+kind: explore
+mutates: [api_keys, subscriptions, auth_policies, models, routes]
+needs_rbac: [model-write]
+est_duration: "~3 min"
+plan_template: >-
+  Deploy a test model in ${config.model_namespace}, expose it through MaaS and through
+  its own Route, then send ${config.request_count} requests each way and compare
+  median latency.
+inputs:
+  request_count:
+    label: "Requests per path"
+  max_overhead_ms:
+    label: "Max added latency (ms)"
+    help: "How much slower the median request through MaaS may be than direct before this fails."
+  concurrency:
+    advanced: true
+    help: "How many requests are in flight at the same time."
+  model_namespace:
+    advanced: true
+    help: >-
+      Where to deploy the test model. Must carry the maas.opendatahub.io/gateway-access
+      label so MaaS's gateway accepts its route (make deploy labels maaspal).
+  model_ready_timeout:
+    advanced: true
+    help: "How long to wait for the test model to start, in seconds."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions and MaaSAuthPolicies live in on this cluster (the MaaS tenant namespace)."
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  request_count: 50
+  max_overhead_ms: 500
+  concurrency: 5
+  model_namespace: "${config.NAMESPACE}"
+  model_ready_timeout: 180
+  subscription_namespace: "models-as-a-service"
+  prompt: "Hello, world!"
+verdict:
+  pass: >-
+    MaaS added about ${harness.metrics.gateway_overhead_p50_ms} ms: median
+    ${harness.direct_results.p50_latency_ms} ms direct vs ${harness.via_maas_results.p50_latency_ms} ms through MaaS.
+  fail: >-
+    Median ${harness.direct_results.p50_latency_ms} ms direct vs
+    ${harness.via_maas_results.p50_latency_ms} ms through MaaS — outside the targets below.
+tasks:
+  - name: deploy_simulated_model
+    params:
+      count: 1
+      name_prefix: "maaspal-overhead-model"
+      namespace: "${config.model_namespace}"
+      ready_max_wait_s: "${config.model_ready_timeout}"
+  - name: apply_auth_policy
+    params:
+      policy_name: "maaspal-overhead-policy"
+      namespace: "${config.subscription_namespace}"
+      model_refs_from_shared_state: "deployed_models"
+      subject_groups: ["system:authenticated"]
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "maaspal-overhead-test"
+      namespace: "${config.subscription_namespace}"
+      model_from_shared_state: "deployed_models"
+      # Generous: throttling must not skew the latency comparison.
+      token_limit: 100000000
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-overhead-key"
+      subscription: "maaspal-overhead-test"
+  - name: expose_model_route
+    params:
+      models_from_shared_state: "deployed_models"
+  - name: probe_direct_endpoint
+    params:
+      models_from_shared_state: "deployed_models"
+  - name: send_requests
+    params:
+      url_from_shared_state: "deployed_models"
+      skip_unless: "direct_probe.reachable"
+      # Passthrough Route: the model's own self-signed certificate.
+      insecure_tls: true
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      result_key: "direct_results"
+    assertions:
+      direct_error_rate_pct:
+        label: "Error rate calling the model directly (its own Route)"
+        unit: "%"
+        promql: "${harness.direct_results.error_rate_pct}"
+        expect: "< 5"
+  - name: send_requests_via_maas
+    params:
+      model_from_shared_state: "deployed_models"
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      key_pool: true
+      result_key: "via_maas_results"
+    assertions:
+      via_maas_error_rate_pct:
+        label: "Error rate through MaaS"
+        unit: "%"
+        promql: "${harness.via_maas_results.error_rate_pct}"
+        expect: "< 5"
+      gateway_overhead_p50_ms:
+        label: "Latency added by MaaS (median)"
+        unit: "ms"
+        promql: "${harness.via_maas_results.p50_latency_ms} - ${harness.direct_results.p50_latency_ms}"
+        expect: "< ${config.max_overhead_ms}"
+cleanup: automatic

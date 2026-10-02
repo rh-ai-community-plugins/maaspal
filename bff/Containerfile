@@ -1,0 +1,25 @@
+# MaaS:PAL BFF: the FastAPI backend the RHOAI dashboard proxies /maaspal/api to,
+# and the image every harness Job runs (`python -m harness.main ...`).
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+USER 0
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY harness/ harness/
+COPY api/ api/
+COPY scenarios/ scenarios/
+RUN pip install --no-cache-dir . \
+    && chown -R 1001:0 /app \
+    && chmod -R g=u /app
+
+ENV SCENARIOS_DIR=/app/scenarios \
+    DATA_DIR=/data \
+    DB_PATH=/data/maaspal.db \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 3000
+
+USER 1001:0
+
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "3000"]

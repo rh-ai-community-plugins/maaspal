@@ -1,0 +1,79 @@
+{{- if .Values.rbac.maasReadonly }}
+# Grants the harness SA read-only visibility into the MaaS domain model
+# (subscriptions, models, access policies, tenant config), the Kuadrant/
+# Limitador enforcement layer beneath it, the Gateway API networking layer,
+# and the platform-level RHOAI config (DataScienceCluster/OdhDashboardConfig)
+# that turns MaaS on in the first place — for the "MaaS Setup" overview in
+# the UI. `namespaces` (get/list/watch) is for checking the
+# maas.opendatahub.io/gateway-access label a model's namespace needs for the
+# Gateway to accept HTTPRoutes from it — see the Models tab. Cluster-scoped
+# (not a namespaced Role) because the target
+# namespaces (e.g. models-as-a-service, llm) are install-specific and not
+# known ahead of time — same reasoning as rbac-monitoring.yaml's grant of
+# cluster-monitoring-view. get/list/watch only: this is introspection of
+# RHOAI's own resources, not a bypass of MaaS's own access controls.
+# See docs/architecture/adrs/ADR-017-maas-cluster-visibility.md.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-maas-readonly
+rules:
+  - apiGroups: ["maas.opendatahub.io"]
+    resources:
+      - maassubscriptions
+      - maasmodelrefs
+      - maasauthpolicies
+      - tenants
+    verbs: ["get", "list", "watch"]
+  # RHOAI 3.5+: ExternalModel/ExternalProvider live under this group instead
+  # of maas.opendatahub.io (see docs/architecture/maas-domain-reference.md
+  # Catalog item B). Targets 3.5+ only — a 3.4 cluster's ExternalModel isn't
+  # read by this version of MaaS:PAL.
+  - apiGroups: ["inference.opendatahub.io"]
+    resources: ["externalmodels", "externalproviders"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kuadrant.io"]
+    resources: ["tokenratelimitpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["limitador.kuadrant.io"]
+    resources: ["limitadors"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["llminferenceservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["user.openshift.io"]
+    resources: ["groups"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["datasciencecluster.opendatahub.io"]
+    resources: ["datascienceclusters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["opendatahub.io"]
+    resources: ["odhdashboardconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  # `get` only, deliberately no `list`/`watch`: MaaS:PAL only ever reads one
+  # specific, already-known Secret name (an ExternalProvider's
+  # spec.auth.secretRef) to check its labels — it never enumerates every
+  # Secret in a namespace, and never reads .data/.stringData.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-maas-readonly
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "maaspal.serviceAccountName" . }}
+    namespace: {{ include "maaspal.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "maaspal.clusterPrefix" . }}-maas-readonly
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

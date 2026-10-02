@@ -1,8 +1,0 @@
-ui/node_modules
-ui/dist
-.git
-.venv
-__pycache__
-*.pyc
-harness/tests
-api/tests
