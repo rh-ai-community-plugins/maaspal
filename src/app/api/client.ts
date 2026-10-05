@@ -160,6 +160,113 @@ export async function stopRun(runId: string): Promise<void> {
   if (!r.ok) throw await apiError(r, 'stopRun');
 }
 
+// "Send from user browser" (api/routes/browser.py): a run step waiting for the
+// open run page to send its requests straight to the MaaS gateway.
+export interface BrowserWorkStatus {
+  pending: boolean;
+  // Another tab already took it.
+  claimed?: boolean;
+  step?: string;
+  result_key?: string;
+  count?: number;
+}
+
+export interface BrowserTarget {
+  // Base URL ending in /v1 — the gateway's generic or per-model route.
+  url: string;
+  model: string;
+  // The run's own temporary API key (revoked at cleanup).
+  key: string;
+}
+
+export type RequestApi = 'chat_completions' | 'completions' | 'responses' | 'embeddings';
+
+export interface BrowserOrder {
+  order_id: string;
+  claim_id: string;
+  result_key: string;
+  step: string;
+  api: RequestApi;
+  // Appended to a target's URL, e.g. "/chat/completions".
+  path: string;
+  stream: boolean;
+  prompt: string;
+  batch_size: number;
+  concurrency: number;
+  retries: number;
+  timeout_s: number | null;
+  stop_after_429s: number;
+  stop_after_transport_errors: number;
+  targets: BrowserTarget[];
+  // Target index per request, in send order.
+  plan: number[];
+}
+
+// One finished request, raw — the harness computes every number from these.
+export interface BrowserRecord {
+  // Seconds from the start of the burst to this request's start.
+  t0_offset_s: number;
+  latency_ms: number;
+  ok?: boolean;
+  status?: number | null;
+  reason?: string;
+  // Set when no HTTP response could be read at all.
+  error?: string | null;
+  headers?: Record<string, string>;
+  body?: string;
+  usage?: Record<string, number> | null;
+  // When each text-carrying chunk of a streamed reply arrived, ms since start.
+  arrivals?: number[];
+  attempts?: { status: number | null; reason?: string; ms: number }[];
+}
+
+export type BrowserDoneReason = 'finished' | 'blocked' | 'stopped' | 'error';
+
+export async function getBrowserWork(runId: string): Promise<BrowserWorkStatus> {
+  try {
+    const r = await fetch(`${API_BASE}/runs/${runId}/browser-work`, { cache: 'no-store' });
+    if (!r.ok) return { pending: false };
+    return (await r.json()) as BrowserWorkStatus;
+  } catch {
+    return { pending: false };
+  }
+}
+
+// null when there's nothing to take (or another tab already took it).
+export async function claimBrowserWork(runId: string, origin: string): Promise<BrowserOrder | null> {
+  const r = await fetch(`${API_BASE}/runs/${runId}/browser-work/claim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ origin }),
+    cache: 'no-store',
+  });
+  if (r.status === 404 || r.status === 409) return null;
+  if (!r.ok) throw await apiError(r, 'claimBrowserWork');
+  return (await r.json()) as BrowserOrder;
+}
+
+// false once the step is over for this tab (run stopped, step ended).
+export async function postBrowserResults(
+  runId: string,
+  body: {
+    claim_id: string;
+    result_key: string;
+    records: BrowserRecord[];
+    done?: boolean;
+    reason?: BrowserDoneReason;
+    detail?: string;
+  },
+): Promise<boolean> {
+  const r = await fetch(`${API_BASE}/runs/${runId}/browser-results`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 409 || r.status === 410 || r.status === 404) return false;
+  if (!r.ok) throw await apiError(r, 'postBrowserResults');
+  return true;
+}
+
 export interface TaskProgressEntry {
   name: string;
   status: 'PENDING' | 'RUNNING' | 'DONE' | 'FAIL' | 'CANCELLED';
@@ -251,6 +358,8 @@ export interface TrafficBurst {
   chart_group?: string | null;
   // Wall-clock start, seconds since the epoch.
   t0?: number;
+  // Who sent it: the harness pod, or the user's browser ("Send from user browser").
+  origin?: 'pod' | 'browser';
   planned?: number;
   summary: TrafficSummary;
   timeline: TrafficPoint[];

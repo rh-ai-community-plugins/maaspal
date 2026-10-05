@@ -40,3 +40,4 @@ Each ADR follows the [Michael Nygard format](https://cognitect.com/blog/2011/11/
 | [ADR-024](ADR-024-dynamic-model-routing-and-rate-limit-precision.md) | Dynamic Model Routing and Rate-Limit Measurement Precision | Accepted |
 | [ADR-025](ADR-025-question-first-scenarios-and-run-narration.md) | Question-First Scenarios and Run Narration | Accepted |
 | [ADR-026](ADR-026-rhoai-community-plugin.md) | MaaS:PAL as an RHOAI Dashboard Community Plugin | Accepted |
+| [ADR-027](ADR-027-browser-originated-traffic.md) | Browser-Originated Traffic ("Send from user browser") | Accepted (phase 1: fixed bursts) |

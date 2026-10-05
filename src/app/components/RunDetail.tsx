@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Button, Grid, GridItem, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
+import { Alert, Button, Grid, GridItem, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
 import { AssertionPanel } from './AssertionPanel';
 import { LogStream } from './LogStream';
 import {
@@ -12,7 +12,8 @@ import {
   VerdictBanner,
 } from './RunInsights';
 import { TaskProgress } from './TaskProgress';
-import { useScenarioTitle } from '../scenarioTitles';
+import { formatTaskName, useScenarioTitle } from '../scenarioTitles';
+import { useBrowserSender, type BrowserSendState } from '../useBrowserSender';
 import {
   cleanupRun,
   getAssertions,
@@ -30,6 +31,32 @@ import { statusStyle } from '../status';
 import { COLOR, toneColor } from '../styles/colors';
 
 const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING']);
+
+// "Send from user browser": this tab is sending a step's requests (or another
+// tab is) — closing it would leave the step without a sender.
+function BrowserSendBanner({ state }: { state: BrowserSendState }) {
+  if (state.phase === 'idle') return null;
+  if (state.phase === 'elsewhere') {
+    return (
+      <Alert
+        variant="info"
+        isInline
+        isPlain
+        title={`${formatTaskName(state.step)} is being sent from another browser tab — keep that tab open.`}
+      />
+    );
+  }
+  return (
+    <Alert
+      variant="info"
+      isInline
+      title={`Sending from your browser: ${state.finished} / ${state.total} requests for ${formatTaskName(state.step)}`}
+    >
+      These requests go from this browser straight to the MaaS gateway. Keep this page open until the step
+      finishes.
+    </Alert>
+  );
+}
 // Cleanup keeps going after a run reaches its final status — keep polling the
 // run until cleanup is settled too, or resource statuses go stale.
 const CLEANUP_SETTLED = new Set(['done', 'failed', 'skipped']);
@@ -125,6 +152,7 @@ export function RunDetail({ runId, onBack }: Props) {
   const [cleaningUp, setCleaningUp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [, setTick] = useState(0);
+  const browserSend = useBrowserSender(runId, run?.status.toUpperCase() === 'RUNNING');
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'instant' });
@@ -330,6 +358,8 @@ export function RunDetail({ runId, onBack }: Props) {
         ) : (
           insights.verdict && <VerdictBanner verdict={insights.verdict} />
         )}
+
+        <BrowserSendBanner state={browserSend} />
 
         <TaskProgress tasks={taskProgress} />
 

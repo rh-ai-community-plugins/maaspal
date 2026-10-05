@@ -123,6 +123,13 @@ function ErrorList({ samples, label }: { samples: ErrorSample[]; label: string }
   );
 }
 
+// "Send Requests — Before the wait", plus where it was sent from when that
+// was the user's browser ("Send from user browser").
+function burstHeading(burst: TrafficBurst): string {
+  const name = burst.label ? `${formatTaskName(burst.task)} — ${burst.label}` : formatTaskName(burst.task);
+  return burst.origin === 'browser' ? `${name} (sent from the browser)` : name;
+}
+
 export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
   // Open as a chart when the scenario marked this burst as the one that
   // answers its question; any burst can be switched either way.
@@ -135,7 +142,7 @@ export function TrafficPanel({ burst }: { burst: TrafficBurst }) {
       ? s.http_attempts - s.total_requests
       : 0;
   const throttled = s.tokens_before_first_429 !== undefined;
-  const heading = burst.label ? `${formatTaskName(burst.task)} — ${burst.label}` : formatTaskName(burst.task);
+  const heading = burstHeading(burst);
   return (
     <section className="maaspal-panel" aria-label={`Traffic: ${heading}`}>
       <div className="maaspal-panel__header">
@@ -360,7 +367,7 @@ function TrafficLine({
   onToggle?: () => void;
 }) {
   const s = burst.summary;
-  const heading = burst.label ? `${formatTaskName(burst.task)} — ${burst.label}` : formatTaskName(burst.task);
+  const heading = burstHeading(burst);
   const firstError = !s.success_count ? s.error_samples?.[0] : undefined;
   return (
     <div className={bare ? 'maaspal-traffic-line maaspal-traffic-line--bare' : 'maaspal-traffic-line'} aria-label={`Traffic: ${heading}`}>

@@ -180,7 +180,7 @@ class SendRequestsToEachModelTask(Task):
         )
         for i, m in enumerate(models):
             result_key = f"subscription_model_{i + 1}"
-            await _inference.SendRequestsTask(
+            sent = await _inference.SendRequestsTask(
                 self.name,
                 {
                     "url": m["url"],
@@ -194,6 +194,7 @@ class SendRequestsToEachModelTask(Task):
                     # The scenario's Request API / Streaming settings.
                     "api": self.params.get("api"),
                     "stream": self.params.get("stream"),
+                    "from_browser": self.params.get("from_browser"),
                 },
             ).run(ctx)
             ctx.shared_state["_traffic"][result_key]["label"] = m["ref"]
@@ -221,6 +222,14 @@ class SendRequestsToEachModelTask(Task):
                 f"{check['reachable_count']} of {i + 1} model(s) answered with this subscription's key"
             )
             await ctx.emit_assertion_state()
+            if sent.status == "FAIL":
+                # Only "Send from user browser" fails a burst outright (no
+                # open run page, or the browser was blocked) — every later
+                # model would hit the same wall.
+                return TaskResult(
+                    task_name=self.name, status="FAIL", error=sent.error,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                )
 
         return TaskResult(task_name=self.name, status="PASS", duration_ms=(time.monotonic() - start) * 1000)
 

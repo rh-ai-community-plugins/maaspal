@@ -12,6 +12,7 @@ from api.auth import require_user
 from api.db import get_db_path, init_db
 from api.k8s import delete_stopped_job, run_job_state
 from api.routes.assertions import router as assertions_router
+from api.routes.browser import router as browser_router
 from api.routes.config import router as config_router
 from api.routes.logs import router as logs_router
 from api.routes.maas import router as maas_router
@@ -151,6 +152,7 @@ app.include_router(logs_router)
 app.include_router(assertions_router)
 app.include_router(progress_router)
 app.include_router(config_router)
+app.include_router(browser_router)
 app.include_router(maas_router)
 
 

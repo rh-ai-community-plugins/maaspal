@@ -13,6 +13,8 @@ const mockGetAssertions = client.getAssertions as jest.MockedFunction<typeof cli
 const mockGetProgress = client.getProgress as jest.MockedFunction<typeof client.getProgress>;
 const mockSetAutoCleanup = client.setAutoCleanup as jest.MockedFunction<typeof client.setAutoCleanup>;
 const mockCleanupRun = client.cleanupRun as jest.MockedFunction<typeof client.cleanupRun>;
+const mockGetBrowserWork = client.getBrowserWork as jest.MockedFunction<typeof client.getBrowserWork>;
+const mockClaimBrowserWork = client.claimBrowserWork as jest.MockedFunction<typeof client.claimBrowserWork>;
 
 function baseRun(overrides: Partial<Run> = {}): Run {
   return {
@@ -28,6 +30,7 @@ function baseRun(overrides: Partial<Run> = {}): Run {
 }
 
 beforeEach(() => {
+  mockGetBrowserWork.mockResolvedValue({ pending: false });
   mockGetAssertions.mockResolvedValue([]);
   mockGetProgress.mockResolvedValue({ tasks: [] });
 });
@@ -97,4 +100,40 @@ test('Clean Up Now is absent once cleanup is done', async () => {
   await screen.findByLabelText('Auto cleanup');
   expect(screen.queryByRole('button', { name: /clean up now/i })).not.toBeInTheDocument();
   expect(screen.queryByText(/cleaning up/i)).not.toBeInTheDocument();
+});
+
+test('says when another tab is sending a step from its browser', async () => {
+  mockGetRun.mockResolvedValue(baseRun({ status: 'RUNNING' }));
+  mockGetBrowserWork.mockResolvedValue({ pending: true, claimed: true, step: 'send_requests' });
+  render(<RunDetail runId="run-1" onBack={() => undefined} />);
+  expect(await screen.findByText(/being sent from another browser tab/)).toBeInTheDocument();
+  expect(mockClaimBrowserWork).not.toHaveBeenCalled();
+});
+
+test('claims a waiting step and shows that this tab is sending it', async () => {
+  mockGetRun.mockResolvedValue(baseRun({ status: 'RUNNING' }));
+  mockGetBrowserWork.mockResolvedValue({ pending: true, claimed: false, step: 'send_requests', count: 1 });
+  mockClaimBrowserWork.mockResolvedValue({
+    order_id: 'o', claim_id: 'c', result_key: 'inference_results', step: 'send_requests',
+    api: 'chat_completions', path: '/chat/completions', stream: false, prompt: 'Hi', batch_size: 1,
+    concurrency: 1, retries: 0, timeout_s: null, stop_after_429s: 0, stop_after_transport_errors: 0,
+    targets: [{ url: 'https://maas.test/v1', model: 'm', key: 'sk-oai-1' }], plan: [0],
+  });
+  // The request stays in flight for the whole test.
+  const originalFetch = global.fetch;
+  global.fetch = jest.fn(() => new Promise<Response>(() => undefined));
+  try {
+    render(<RunDetail runId="run-1" onBack={() => undefined} />);
+    expect(await screen.findByText(/Sending from your browser: 0 \/ 1 requests for Send Requests/)).toBeInTheDocument();
+    expect(mockClaimBrowserWork).toHaveBeenCalledWith('run-1', window.location.origin);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('never sends from the browser once the run is over', async () => {
+  mockGetRun.mockResolvedValue(baseRun({ status: 'PASS' }));
+  render(<RunDetail runId="run-1" onBack={() => undefined} />);
+  await screen.findByText('PASS');
+  expect(mockGetBrowserWork).not.toHaveBeenCalled();
 });

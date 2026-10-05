@@ -44,12 +44,21 @@ inputs:
     help: >-
       Stream each reply. Tokens are counted from the final usage chunk, and
       the time to the first token is reported.
+  send_from_browser:
+    label: "Send from user browser"
+    advanced: true
+    help: >-
+      Send this run's requests from your browser straight to the MaaS gateway, the way an
+      outside client would, instead of from the test pod inside the cluster. Keep this
+      run's page open while it runs. If the gateway won't take calls from a browser, the
+      step fails and says so — that is the result.
 config:
   subscription: ""
   requests_per_model: 3
   prompt: "Hello, world!"
   request_api: chat_completions
   stream: false
+  send_from_browser: true
 verdict:
   pass: >-
     All ${harness.subscription_check.model_count} models this subscription covers answered with its key.
@@ -79,6 +88,7 @@ tasks:
     params:
       api: "${config.request_api}"
       stream: "${config.stream}"
+      from_browser: "${config.send_from_browser}"
       requests_per_model: "${config.requests_per_model}"
       prompt: "${config.prompt}"
     assertions:

@@ -51,6 +51,14 @@ inputs:
     help: >-
       Stream each reply. Tokens are counted from the final usage chunk, and
       the time to the first token is reported.
+  send_from_browser:
+    label: "Send from user browser"
+    advanced: true
+    help: >-
+      Send this run's requests from your browser straight to the MaaS gateway, the way an
+      outside client would, instead of from the test pod inside the cluster. Keep this
+      run's page open while it runs. If the gateway won't take calls from a browser, the
+      step fails and says so — that is the result.
 config:
   key_name: "maaspal-lifecycle-key"
   key_count: 3
@@ -59,6 +67,7 @@ config:
   prompt: "Hello, world!"
   request_api: chat_completions
   stream: false
+  send_from_browser: true
 verdict:
   pass: "API keys behaved correctly: revoking one key cut it off immediately and left the others working."
   fail: "Part of the API key lifecycle didn't behave as expected — see the failing step below."
@@ -91,6 +100,7 @@ tasks:
     params:
       api: "${config.request_api}"
       stream: "${config.stream}"
+      from_browser: "${config.send_from_browser}"
       count: "${config.request_count}"
       concurrency: "${config.concurrency}"
       prompt: "${config.prompt}"
@@ -110,6 +120,7 @@ tasks:
     params:
       api: "${config.request_api}"
       stream: "${config.stream}"
+      from_browser: "${config.send_from_browser}"
       count: "${config.request_count}"
       concurrency: "${config.concurrency}"
       prompt: "${config.prompt}"
@@ -127,6 +138,7 @@ tasks:
     params:
       api: "${config.request_api}"
       stream: "${config.stream}"
+      from_browser: "${config.send_from_browser}"
       count: "${config.request_count}"
       concurrency: "${config.concurrency}"
       prompt: "${config.prompt}"

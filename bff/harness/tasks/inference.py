@@ -1,15 +1,20 @@
 import asyncio
 import contextlib
 import json
+import os
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 from openai.types.chat import ChatCompletionMessageParam
 
+from harness import browser_channel
 from harness.durations import parse_duration_s
 from harness.result import TaskResult
 from harness.tasks.base import Task, TaskContext
@@ -97,6 +102,12 @@ def _diagnose_unthrottled(
             "Raise Max duration under Advanced settings."
         )
     return "unknown", f"{need}{got}, and was never throttled."
+
+# "Send from user browser": how long to wait for the open run page to pick a
+# step up, how long it may go quiet once sending, and how often to look.
+_BROWSER_CLAIM_TIMEOUT_S = 120.0
+_BROWSER_IDLE_TIMEOUT_S = 60.0
+_BROWSER_POLL_S = 0.25
 
 # Per-request timeline entries kept in memory per send_requests invocation —
 # the runner downsamples further before writing it out for the UI chart.
@@ -295,6 +306,23 @@ class _Reply:
         return self.last_text_ms - self.ttft_ms
 
 
+@dataclass
+class _Outcome:
+    """One finished request, however it was sent (this pod or the user's
+    browser): when it started (time.monotonic(), this pod's clock), how long
+    it took, and either the reply (success), the HTTP status it failed with,
+    or neither (no HTTP answer at all). `error_message` is set for every
+    failure except a 429; `origin` is failure_origin()'s (who, evidence)."""
+
+    t0: float
+    latency_ms: float
+    stage: int = 0
+    reply: _Reply | None = None
+    status: int | None = None
+    error_message: str | None = None
+    origin: tuple[str, str] | None = None
+
+
 def _int_attr(obj: object, *names: str) -> int | None:
     for name in names:
         value = getattr(obj, name, None)
@@ -431,6 +459,38 @@ def failure_origin(status: int | None, headers: Mapping[str, str], text: str) ->
     return "unknown", f"HTTP {status}"
 
 
+_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens")
+
+
+def _outcome_from_browser(rec: dict, start: float) -> _Outcome:
+    """One request the user's browser reported (src/app/browserSender.ts), on
+    this pod's clock (`start` = when the browser began sending). A browser
+    can only read the response headers the gateway exposes to it, so
+    failure_origin() often works from the status and body alone."""
+    latency = max(0.0, float(rec.get("latency_ms") or 0))
+    t0 = start + max(0.0, float(rec.get("t0_offset_s") or 0))
+    raw_status = rec.get("status")
+    status = raw_status if isinstance(raw_status, int) and not isinstance(raw_status, bool) else None
+    if rec.get("ok") and status is not None and status < 400:
+        usage = rec.get("usage")
+        fields = {k: usage[k] for k in _USAGE_FIELDS if isinstance(usage, dict) and k in usage}
+        arrivals = [float(a) for a in rec.get("arrivals") or [] if isinstance(a, (int, float))]
+        reply = _reply_from_usage(SimpleNamespace(**fields) if isinstance(usage, dict) else None, arrivals)
+        return _Outcome(t0=t0, latency_ms=latency, reply=reply)
+    if status is not None:
+        headers = {str(k): str(v) for k, v in (rec.get("headers") or {}).items()}
+        body = str(rec.get("body") or "")
+        message = None
+        if status != 429:
+            flat = body.strip().replace("\n", " ")
+            message = f"HTTP {status} {rec.get('reason') or ''}".strip() + (f": {flat[:80]}" if flat else "")
+        return _Outcome(
+            t0=t0, latency_ms=latency, status=status, error_message=message,
+            origin=failure_origin(status, headers, body),
+        )
+    return _Outcome(t0=t0, latency_ms=latency, error_message=str(rec.get("error") or "no response")[:200])
+
+
 def _exc_failure_origin(exc: APIStatusError) -> tuple[str, str]:
     response = exc.response
     return failure_origin(
@@ -457,6 +517,14 @@ class SendRequestsTask(Task):
         if api == "embeddings":
             stream = False  # embeddings have no streaming form
         batch_size = max(1, int(self.params.get("batch_size") or 1))
+        # "Send from user browser": the open run page sends this burst from
+        # the user's own machine, straight to the MaaS gateway; this pod
+        # still does everything else and tallies what the browser reports
+        # (see _browser_burst below and harness/browser_channel.py).
+        from_browser_param = self.params.get("from_browser")
+        from_browser = _truthy(
+            ctx.config.get("send_from_browser", False) if from_browser_param in (None, "") else from_browser_param
+        )
 
         # `skip_unless: "ns.key"` — only send if that shared_state value is
         # truthy (e.g. "direct_probe.reachable"): a precondition that failed
@@ -532,6 +600,11 @@ class SendRequestsTask(Task):
         insecure_tls = str(self.params.get("insecure_tls", "")).lower() in ("true", "1", "yes")
 
         url_from_shared_state = self.params.get("url_from_shared_state")
+        if from_browser and (until_throttled or stage_levels or insecure_tls or url_from_shared_state):
+            raise ValueError(
+                "Send from user browser supports fixed bursts only — not until-throttled ramps, "
+                "step load, or direct in-cluster endpoints yet. Turn it off for this scenario."
+            )
         if url_from_shared_state:
             # A model deploy_simulated_model just created, called directly on
             # its own Route (expose_model_route) — bypassing the MaaS gateway
@@ -563,19 +636,22 @@ class SendRequestsTask(Task):
         async def _mark_attempt_start(request: httpx.Request) -> None:
             request.extensions["maaspal_t0"] = time.monotonic()
 
-        async def _count_attempt(response: httpx.Response) -> None:
+        def _tally_attempt(status: int, reason: str, took_ms: float) -> None:
             nonlocal http_attempts
             http_attempts += 1
-            failed = response.status_code >= 400
+            failed = status >= 400
             if failed:
-                t0 = response.request.extensions.get("maaspal_t0")
-                took_ms = (time.monotonic() - t0) * 1000 if isinstance(t0, float) else 0.0
-                message = f"HTTP {response.status_code} {response.reason_phrase}".strip()
+                message = f"HTTP {status} {reason}".strip()
                 attempt_failures.setdefault(message, []).append(took_ms)
             if stage_levels:
                 counts = stage_attempts.setdefault(stage_idx, [0, 0])
                 counts[0] += 1
                 counts[1] += int(failed)
+
+        async def _count_attempt(response: httpx.Response) -> None:
+            t0 = response.request.extensions.get("maaspal_t0")
+            took_ms = (time.monotonic() - t0) * 1000 if isinstance(t0, float) else 0.0
+            _tally_attempt(response.status_code, response.reason_phrase, took_ms)
 
         def _client(api_key: str, base_url: str) -> AsyncOpenAI:
             return AsyncOpenAI(
@@ -782,6 +858,9 @@ class SendRequestsTask(Task):
             # A limit far above the traffic (a load test's deliberately
             # unlimited subscription) would only squash the chart flat.
             traffic_entry["limit"] = None
+        if from_browser:
+            # The run page labels this burst "Sent from your browser".
+            traffic_entry["origin"] = "browser"
         ctx.shared_state.setdefault("_traffic", {})[result_key] = {
             **traffic_entry,
             "task": self.name,
@@ -795,15 +874,229 @@ class SendRequestsTask(Task):
         # Pooled modes cap in-flight requests by opening worker slots instead.
         sem = asyncio.Semaphore(max_concurrency if (until_throttled or stage_levels) else concurrency)
 
-        async def do_request(client_idx: int) -> None:
+        latest_end = run_start
+
+        async def record_outcome(o: _Outcome) -> None:
+            """Tally one finished request — sent from this pod or reported by
+            the user's browser (from_browser) — into this burst's results."""
             nonlocal success, fail, last_emit, rate_limited_count, unauthorized_count
             nonlocal server_error_count, other_error_count, not_found_count
             nonlocal total_tokens_sent, prompt_tokens_sent, completion_tokens_sent
             nonlocal first_rate_limited_at_tokens, requests_before_first_429
-            nonlocal seconds_to_first_429, successes_after_first_429, skipped
+            nonlocal seconds_to_first_429, successes_after_first_429
             nonlocal first_429_at, concurrency_at_first_429, max_tokens_per_request
-            nonlocal final_http_failures, usage_missing_count
+            nonlocal final_http_failures, usage_missing_count, latest_end
             nonlocal streamed_reply_count, all_at_once_reply_count, transport_error_count
+            end = o.t0 + o.latency_ms / 1000
+            latest_end = max(latest_end, end)
+            status_class = "ok"
+            reply = o.reply
+            error_message = o.error_message
+            if reply is not None:
+                success += 1
+                # Leakage = admitted AFTER MaaS had already throttled. A
+                # request that was in flight when the first 429 came back
+                # was admitted before it, so doesn't count.
+                if first_429_at is not None and o.t0 > first_429_at:
+                    successes_after_first_429 += 1
+                if reply.total_tokens is None:
+                    usage_missing_count += 1
+                else:
+                    total_tokens_sent += reply.total_tokens
+                    max_tokens_per_request = max(max_tokens_per_request, reply.total_tokens)
+                prompt_tokens_sent += reply.prompt_tokens or 0
+                completion_tokens_sent += reply.completion_tokens or 0
+                if reply.ttft_ms is not None:
+                    ttfts.append(reply.ttft_ms)
+            elif o.status is not None:
+                fail += 1
+                final_http_failures += 1
+                status_class = _status_class(o.status)
+                if o.origin is not None:
+                    origin, evidence = o.origin
+                    failure_origins[origin] = failure_origins.get(origin, 0) + 1
+                    failure_origin_evidence.setdefault(origin, evidence)
+                if o.status == 429:
+                    rate_limited_count += 1
+                    if first_rate_limited_at_tokens is None:
+                        first_rate_limited_at_tokens = total_tokens_sent
+                        requests_before_first_429 = success
+                        seconds_to_first_429 = end - run_start
+                        first_429_at = end
+                        concurrency_at_first_429 = current_concurrency
+                elif o.status in (401, 403):
+                    unauthorized_count += 1
+                elif o.status == 404:
+                    not_found_count += 1
+                elif o.status >= 500:
+                    server_error_count += 1
+                else:
+                    other_error_count += 1
+                # Error reasons are for genuine failures; throttling has its
+                # own counters (and is often the expected outcome).
+                if error_message is not None:
+                    error_counts[error_message] = error_counts.get(error_message, 0) + 1
+            else:
+                # No HTTP answer at all (timeout, dropped connection, or a
+                # browser that refused the cross-origin call).
+                fail += 1
+                other_error_count += 1
+                transport_error_count += 1
+                status_class = "error"
+                error_message = error_message or "no response"
+                error_counts[error_message] = error_counts.get(error_message, 0) + 1
+
+            latency_ms = o.latency_ms
+            latencies.append(latency_ms)
+            if reply is not None:
+                if reply.completion_tokens:
+                    ms_per_output_token.append(latency_ms / reply.completion_tokens)
+                spread = reply.spread_ms
+                if spread is not None:
+                    stream_spreads.append(spread)
+                    stream_chunks.append(reply.text_chunks)
+                    if reply.text_chunks > 1 and spread >= STREAM_SPREAD_MIN_MS:
+                        streamed_reply_count += 1
+                    else:
+                        all_at_once_reply_count += 1
+                    if reply.completion_tokens and reply.completion_tokens > 1:
+                        inter_token_ms.append(spread / (reply.completion_tokens - 1))
+                    if len(chunk_gaps) < _TIMELINE_CAP:
+                        chunk_gaps.extend(reply.chunk_gaps)
+            if error_message is not None:
+                error_latencies.setdefault(error_message, []).append(latency_ms)
+            if stage_levels:
+                acc = stage_acc[o.stage]
+                acc["latencies"].append(latency_ms)
+                if status_class == "ok":
+                    acc["ok"] += 1
+                    acc["tokens"] += (reply.total_tokens if reply else 0) or 0
+                elif status_class == "throttled":
+                    acc["throttled"] += 1
+                else:
+                    acc["errors"] += 1
+            total = success + fail
+            elapsed = latest_end - run_start
+            if len(timeline) < _TIMELINE_CAP:
+                timeline.append(
+                    [round(elapsed, 3), total_tokens_sent, status_class, round(latency_ms, 1)]
+                )
+            non_throttle_fail = fail - rate_limited_count
+            result_data = {
+                "total_requests": total,
+                "http_attempts": http_attempts,
+                "failed_attempts": sum(len(v) for v in attempt_failures.values()),
+                "retried_failed_attempts": max(
+                    0, sum(len(v) for v in attempt_failures.values()) - final_http_failures
+                ),
+                "attempt_error_samples": [
+                    {"message": m, "count": len(v), **_latency_spread(v)}
+                    for m, v in sorted(attempt_failures.items(), key=lambda kv: -len(kv[1]))[:3]
+                ],
+                "success_count": success,
+                "fail_count": fail,
+                "rate_limited_count": rate_limited_count,
+                "unauthorized_count": unauthorized_count,
+                "server_error_count": server_error_count,
+                "not_found_count": not_found_count,
+                "other_error_count": other_error_count,
+                # The three most common failure reasons, for the run page.
+                "error_samples": [
+                    {"message": m, "count": c, **_latency_spread(error_latencies.get(m) or [])}
+                    for m, c in sorted(error_counts.items(), key=lambda kv: -kv[1])[:3]
+                ],
+                "error_rate_pct": (fail / total * 100) if total > 0 else 0.0,
+                # Errors excluding 429s — throttling by a subscription's
+                # own limit is often the *expected* outcome, not a fault.
+                "non_throttle_error_rate_pct": (
+                    (non_throttle_fail / total * 100) if total > 0 else 0.0
+                ),
+                "successes_after_first_429": successes_after_first_429,
+                "throughput_rps": success / elapsed if elapsed > 0 else 0.0,
+                "token_throughput_per_sec": total_tokens_sent / elapsed if elapsed > 0 else 0.0,
+                "total_tokens_sent": total_tokens_sent,
+                "prompt_tokens_sent": prompt_tokens_sent,
+                "completion_tokens_sent": completion_tokens_sent,
+                "usage_missing_count": usage_missing_count,
+                "api": api,
+                "stream": stream,
+                "failure_origins": dict(failure_origins),
+                "failure_origin_evidence": dict(failure_origin_evidence),
+                **_percentiles(latencies),
+            }
+            if ttfts:
+                ttft_pct = _percentiles(ttfts)
+                result_data["p50_ttft_ms"] = ttft_pct["p50_latency_ms"]
+                result_data["p95_ttft_ms"] = ttft_pct["p95_latency_ms"]
+            if ms_per_output_token:
+                result_data["p50_ms_per_output_token"] = _percentiles(ms_per_output_token)["p50_latency_ms"]
+            if stream_spreads:
+                result_data["p50_stream_spread_ms"] = _percentiles(stream_spreads)["p50_latency_ms"]
+                result_data["p50_stream_chunks"] = _percentiles(stream_chunks)["p50_latency_ms"]
+                result_data["streamed_reply_count"] = streamed_reply_count
+                result_data["all_at_once_reply_count"] = all_at_once_reply_count
+            if inter_token_ms:
+                # TPOT: time per output token after the first, from the
+                # stream itself — (last text − first text) ÷ (tokens − 1).
+                result_data["p50_tpot_ms"] = _percentiles(inter_token_ms)["p50_latency_ms"]
+            if chunk_gaps:
+                # ITL: the actual gaps between text chunks, so jitter
+                # (a p95 far above the p50) shows, not just an average.
+                gaps = _percentiles(chunk_gaps)
+                result_data["p50_itl_ms"] = gaps["p50_latency_ms"]
+                result_data["p95_itl_ms"] = gaps["p95_latency_ms"]
+            result_data["transport_error_count"] = transport_error_count
+            # Only present once a 429 has actually happened — an absent
+            # key (not a 0/None placeholder) is what keeps a referencing
+            # assertion honestly PENDING instead of misreading "not yet
+            # rate limited" as "rate limited at 0 tokens".
+            if first_rate_limited_at_tokens is not None:
+                result_data["first_rate_limited_at_tokens"] = first_rate_limited_at_tokens
+                result_data["tokens_before_first_429"] = first_rate_limited_at_tokens
+                result_data["requests_before_first_429"] = requests_before_first_429
+                result_data["seconds_to_first_429"] = round(seconds_to_first_429 or 0.0, 3)
+                # With N requests in flight, up to N requests' tokens can
+                # land past the limit before MaaS starts refusing — the
+                # honest upper bound for "throttled at the limit".
+                result_data["concurrency_at_first_429"] = concurrency_at_first_429
+                result_data["allowed_overshoot"] = (
+                    (concurrency_at_first_429 or 1) * max(max_tokens_per_request, 1)
+                )
+            if until_throttled:
+                result_data["peak_concurrency"] = current_concurrency
+            ctx.shared_state[result_key] = result_data
+            if until_throttled and limit_tokens:
+                # Progress toward the limit is what this burst is about.
+                ctx.shared_state["task_progress"] = {
+                    "current": min(total_tokens_sent, int(limit_tokens)),
+                    "total": int(limit_tokens),
+                    "unit": "tokens",
+                }
+            elif until_throttled:
+                ctx.shared_state["task_progress"] = {"current": total, "total": None, "unit": "requests"}
+            elif stage_levels:
+                ctx.shared_state["task_progress"] = {
+                    "current": stage_idx + 1, "total": len(stage_levels), "unit": "steps",
+                }
+            else:
+                ctx.shared_state["task_progress"] = {"current": total, "total": count}
+            if stage_levels:
+                # The request ceiling in step mode is a safety cap, not a plan.
+                ctx.shared_state["task_summary"] = (
+                    f"Step {stage_idx + 1}/{len(stage_levels)}: {current_concurrency} in flight · "
+                    + _summary_line(result_data, None)
+                )
+            else:
+                ctx.shared_state["task_summary"] = _summary_line(
+                    result_data, None if until_throttled else count
+                )
+            now = time.monotonic()
+            if now - last_emit >= _DEBOUNCE_SECS:
+                last_emit = now
+                await ctx.emit_assertion_state()
+
+        async def do_request(client_idx: int) -> None:
+            nonlocal skipped
             async with sem:
                 if (
                     (stop_after_429s and rate_limited_count >= stop_after_429s)
@@ -814,10 +1107,11 @@ class SendRequestsTask(Task):
                     return
                 t0 = time.monotonic()
                 my_stage = stage_idx
-                status_class = "ok"
-                error_message: str | None = None
                 effective_model = (key_models[client_idx] if key_models else None) or model
                 reply: _Reply | None = None
+                status: int | None = None
+                error_message: str | None = None
+                origin: tuple[str, str] | None = None
                 try:
                     reply = await _send_one(
                         clients[client_idx],
@@ -828,212 +1122,157 @@ class SendRequestsTask(Task):
                         batch_size=batch_size,
                         t0=t0,
                     )
-                    success += 1
-                    # Leakage = admitted AFTER MaaS had already throttled. A
-                    # request that was in flight when the first 429 came back
-                    # was admitted before it, so doesn't count.
-                    if first_429_at is not None and t0 > first_429_at:
-                        successes_after_first_429 += 1
-                    if reply.total_tokens is None:
-                        usage_missing_count += 1
-                    else:
-                        total_tokens_sent += reply.total_tokens
-                        max_tokens_per_request = max(max_tokens_per_request, reply.total_tokens)
-                    prompt_tokens_sent += reply.prompt_tokens or 0
-                    completion_tokens_sent += reply.completion_tokens or 0
-                    if reply.ttft_ms is not None:
-                        ttfts.append(reply.ttft_ms)
                 except APIStatusError as exc:
-                    fail += 1
-                    final_http_failures += 1
-                    status_class = _status_class(exc.status_code)
-                    origin, evidence = _exc_failure_origin(exc)
-                    failure_origins[origin] = failure_origins.get(origin, 0) + 1
-                    failure_origin_evidence.setdefault(origin, evidence)
-                    if exc.status_code == 429:
-                        rate_limited_count += 1
-                        if first_rate_limited_at_tokens is None:
-                            first_rate_limited_at_tokens = total_tokens_sent
-                            requests_before_first_429 = success
-                            seconds_to_first_429 = time.monotonic() - run_start
-                            first_429_at = time.monotonic()
-                            concurrency_at_first_429 = current_concurrency
-                    elif exc.status_code in (401, 403):
-                        unauthorized_count += 1
-                    elif exc.status_code == 404:
-                        not_found_count += 1
-                    elif exc.status_code >= 500:
-                        server_error_count += 1
-                    else:
-                        other_error_count += 1
-                    # Error reasons are for genuine failures; throttling has its
-                    # own counters (and is often the expected outcome).
+                    status = exc.status_code
+                    origin = _exc_failure_origin(exc)
                     if exc.status_code != 429:
                         error_message = _error_message(exc)
-                        error_counts[error_message] = error_counts.get(error_message, 0) + 1
                     print(
                         f"[send_requests] request failed: status={exc.status_code} {exc}",
                         flush=True,
                     )
                 except Exception as exc:
-                    fail += 1
-                    other_error_count += 1
-                    transport_error_count += 1
-                    status_class = "error"
                     error_message = _error_message(exc)
-                    error_counts[error_message] = error_counts.get(error_message, 0) + 1
                     print(f"[send_requests] request failed: {error_message}", flush=True)
+                await record_outcome(
+                    _Outcome(
+                        t0=t0,
+                        latency_ms=(time.monotonic() - t0) * 1000,
+                        stage=my_stage,
+                        reply=reply,
+                        status=status,
+                        error_message=error_message,
+                        origin=origin,
+                    )
+                )
 
-                latency_ms = (time.monotonic() - t0) * 1000
-                latencies.append(latency_ms)
-                if reply is not None:
-                    if reply.completion_tokens:
-                        ms_per_output_token.append(latency_ms / reply.completion_tokens)
-                    spread = reply.spread_ms
-                    if spread is not None:
-                        stream_spreads.append(spread)
-                        stream_chunks.append(reply.text_chunks)
-                        if reply.text_chunks > 1 and spread >= STREAM_SPREAD_MIN_MS:
-                            streamed_reply_count += 1
-                        else:
-                            all_at_once_reply_count += 1
-                        if reply.completion_tokens and reply.completion_tokens > 1:
-                            inter_token_ms.append(spread / (reply.completion_tokens - 1))
-                        if len(chunk_gaps) < _TIMELINE_CAP:
-                            chunk_gaps.extend(reply.chunk_gaps)
-                if error_message is not None:
-                    error_latencies.setdefault(error_message, []).append(latency_ms)
-                if stage_levels:
-                    acc = stage_acc[my_stage]
-                    acc["latencies"].append(latency_ms)
-                    if status_class == "ok":
-                        acc["ok"] += 1
-                        acc["tokens"] += (reply.total_tokens if reply else 0) or 0
-                    elif status_class == "throttled":
-                        acc["throttled"] += 1
-                    else:
-                        acc["errors"] += 1
-                total = success + fail
-                elapsed = time.monotonic() - run_start
-                if len(timeline) < _TIMELINE_CAP:
-                    timeline.append(
-                        [round(elapsed, 3), total_tokens_sent, status_class, round(latency_ms, 1)]
-                    )
-                non_throttle_fail = fail - rate_limited_count
-                result_data = {
-                    "total_requests": total,
-                    "http_attempts": http_attempts,
-                    "failed_attempts": sum(len(v) for v in attempt_failures.values()),
-                    "retried_failed_attempts": max(
-                        0, sum(len(v) for v in attempt_failures.values()) - final_http_failures
-                    ),
-                    "attempt_error_samples": [
-                        {"message": m, "count": len(v), **_latency_spread(v)}
-                        for m, v in sorted(attempt_failures.items(), key=lambda kv: -len(kv[1]))[:3]
-                    ],
-                    "success_count": success,
-                    "fail_count": fail,
-                    "rate_limited_count": rate_limited_count,
-                    "unauthorized_count": unauthorized_count,
-                    "server_error_count": server_error_count,
-                    "not_found_count": not_found_count,
-                    "other_error_count": other_error_count,
-                    # The three most common failure reasons, for the run page.
-                    "error_samples": [
-                        {"message": m, "count": c, **_latency_spread(error_latencies.get(m) or [])}
-                        for m, c in sorted(error_counts.items(), key=lambda kv: -kv[1])[:3]
-                    ],
-                    "error_rate_pct": (fail / total * 100) if total > 0 else 0.0,
-                    # Errors excluding 429s — throttling by a subscription's
-                    # own limit is often the *expected* outcome, not a fault.
-                    "non_throttle_error_rate_pct": (
-                        (non_throttle_fail / total * 100) if total > 0 else 0.0
-                    ),
-                    "successes_after_first_429": successes_after_first_429,
-                    "throughput_rps": success / elapsed if elapsed > 0 else 0.0,
-                    "token_throughput_per_sec": total_tokens_sent / elapsed if elapsed > 0 else 0.0,
-                    "total_tokens_sent": total_tokens_sent,
-                    "prompt_tokens_sent": prompt_tokens_sent,
-                    "completion_tokens_sent": completion_tokens_sent,
-                    "usage_missing_count": usage_missing_count,
-                    "api": api,
-                    "stream": stream,
-                    "failure_origins": dict(failure_origins),
-                    "failure_origin_evidence": dict(failure_origin_evidence),
-                    **_percentiles(latencies),
-                }
-                if ttfts:
-                    ttft_pct = _percentiles(ttfts)
-                    result_data["p50_ttft_ms"] = ttft_pct["p50_latency_ms"]
-                    result_data["p95_ttft_ms"] = ttft_pct["p95_latency_ms"]
-                if ms_per_output_token:
-                    result_data["p50_ms_per_output_token"] = _percentiles(ms_per_output_token)["p50_latency_ms"]
-                if stream_spreads:
-                    result_data["p50_stream_spread_ms"] = _percentiles(stream_spreads)["p50_latency_ms"]
-                    result_data["p50_stream_chunks"] = _percentiles(stream_chunks)["p50_latency_ms"]
-                    result_data["streamed_reply_count"] = streamed_reply_count
-                    result_data["all_at_once_reply_count"] = all_at_once_reply_count
-                if inter_token_ms:
-                    # TPOT: time per output token after the first, from the
-                    # stream itself — (last text − first text) ÷ (tokens − 1).
-                    result_data["p50_tpot_ms"] = _percentiles(inter_token_ms)["p50_latency_ms"]
-                if chunk_gaps:
-                    # ITL: the actual gaps between text chunks, so jitter
-                    # (a p95 far above the p50) shows, not just an average.
-                    gaps = _percentiles(chunk_gaps)
-                    result_data["p50_itl_ms"] = gaps["p50_latency_ms"]
-                    result_data["p95_itl_ms"] = gaps["p95_latency_ms"]
-                result_data["transport_error_count"] = transport_error_count
-                # Only present once a 429 has actually happened — an absent
-                # key (not a 0/None placeholder) is what keeps a referencing
-                # assertion honestly PENDING instead of misreading "not yet
-                # rate limited" as "rate limited at 0 tokens".
-                if first_rate_limited_at_tokens is not None:
-                    result_data["first_rate_limited_at_tokens"] = first_rate_limited_at_tokens
-                    result_data["tokens_before_first_429"] = first_rate_limited_at_tokens
-                    result_data["requests_before_first_429"] = requests_before_first_429
-                    result_data["seconds_to_first_429"] = round(seconds_to_first_429 or 0.0, 3)
-                    # With N requests in flight, up to N requests' tokens can
-                    # land past the limit before MaaS starts refusing — the
-                    # honest upper bound for "throttled at the limit".
-                    result_data["concurrency_at_first_429"] = concurrency_at_first_429
-                    result_data["allowed_overshoot"] = (
-                        (concurrency_at_first_429 or 1) * max(max_tokens_per_request, 1)
-                    )
-                if until_throttled:
-                    result_data["peak_concurrency"] = current_concurrency
-                ctx.shared_state[result_key] = result_data
-                if until_throttled and limit_tokens:
-                    # Progress toward the limit is what this burst is about.
-                    ctx.shared_state["task_progress"] = {
-                        "current": min(total_tokens_sent, int(limit_tokens)),
-                        "total": int(limit_tokens),
-                        "unit": "tokens",
-                    }
-                elif until_throttled:
-                    ctx.shared_state["task_progress"] = {"current": total, "total": None, "unit": "requests"}
-                elif stage_levels:
-                    ctx.shared_state["task_progress"] = {
-                        "current": stage_idx + 1, "total": len(stage_levels), "unit": "steps",
-                    }
-                else:
-                    ctx.shared_state["task_progress"] = {"current": total, "total": count}
-                if stage_levels:
-                    # The request ceiling in step mode is a safety cap, not a plan.
-                    ctx.shared_state["task_summary"] = (
-                        f"Step {stage_idx + 1}/{len(stage_levels)}: {current_concurrency} in flight · "
-                        + _summary_line(result_data, None)
-                    )
-                else:
-                    ctx.shared_state["task_summary"] = _summary_line(
-                        result_data, None if until_throttled else count
-                    )
-                now = time.monotonic()
-                if now - last_emit >= _DEBOUNCE_SECS:
-                    last_emit = now
-                    await ctx.emit_assertion_state()
+        browser_failure: str | None = None
 
-        if until_throttled or stage_levels:
+        async def browser_burst() -> None:
+            """Hand this burst to the open run page and tally what it reports.
+
+            The order names every target (URL, model, the run's own API key)
+            and how many requests each gets, in the same round-robin order
+            this pod would use. Each record the browser sends back goes
+            through record_outcome() — the same bookkeeping as a request sent
+            from here — so results, checks, charts and logs come out the same."""
+            nonlocal run_start, latest_end, skipped, browser_failure
+            if key_pool_entries:
+                targets = [
+                    {"url": u, "model": m or model, "key": k}
+                    for k, u, m in zip(key_strings, key_urls, key_models, strict=True)
+                ]
+            else:
+                if token == ctx.sa_token:
+                    raise ValueError(
+                        "Send from user browser needs an API key (key_pool, key_index or token) — "
+                        "the harness never hands its own ServiceAccount token to a browser."
+                    )
+                targets = [{"url": url, "model": model, "key": token}]
+            assignments = _distribute(count, len(targets))
+            plan = [
+                key_idx
+                for round_idx in range(max(assignments, default=0))
+                for key_idx, n_reqs in enumerate(assignments)
+                if round_idx < n_reqs
+            ]
+            results_dir = Path(os.environ.get("DATA_DIR", "/data")) / "results"
+            claim_timeout_s = float(self.params.get("browser_claim_timeout_s") or _BROWSER_CLAIM_TIMEOUT_S)
+            idle_timeout_s = float(self.params.get("browser_idle_timeout_s") or _BROWSER_IDLE_TIMEOUT_S)
+            browser_channel.write_order(results_dir, ctx.run_id, result_key, {
+                "order_id": uuid.uuid4().hex,
+                "result_key": result_key,
+                "step": self.name,
+                "api": api,
+                "path": API_PATHS[api].removeprefix("/v1"),
+                "stream": stream,
+                "prompt": prompt,
+                "batch_size": batch_size,
+                "concurrency": concurrency,
+                "retries": retries,
+                "timeout_s": timeout_s,
+                "stop_after_429s": stop_after_429s,
+                "stop_after_transport_errors": stop_after_transport_errors,
+                "targets": targets,
+                "plan": plan,
+            })
+            try:
+                print(f"[send_requests] waiting for the run page to send {count} requests from the browser", flush=True)
+                ctx.shared_state["task_summary"] = "Waiting for the open run page to send from your browser…"
+                await ctx.emit_assertion_state()
+                deadline = time.monotonic() + claim_timeout_s
+                claim = browser_channel.read_claim(results_dir, ctx.run_id, result_key)
+                while claim is None:
+                    if time.monotonic() >= deadline:
+                        browser_failure = (
+                            f"No open run page picked this step up within {claim_timeout_s:g}s — "
+                            "keep the run page open while a run sends from your browser."
+                        )
+                        return
+                    await asyncio.sleep(_BROWSER_POLL_S)
+                    claim = browser_channel.read_claim(results_dir, ctx.run_id, result_key)
+                print(
+                    f"[send_requests] sending from the browser ({claim.get('origin') or 'unknown origin'})",
+                    flush=True,
+                )
+                # Timeline and throughput count from when the browser started.
+                run_start = latest_end = time.monotonic()
+                ctx.shared_state["_traffic"][result_key]["t0"] = time.time()
+                offset = 0
+                last_seen = time.monotonic()
+                while True:
+                    records, offset = browser_channel.read_records(results_dir, ctx.run_id, result_key, offset)
+                    if records:
+                        last_seen = time.monotonic()
+                    for rec in records:
+                        if rec.get("done"):
+                            reason = str(rec.get("reason") or "finished")
+                            skipped = max(0, count - (success + fail))
+                            if reason == "blocked":
+                                detail = str(rec.get("detail") or "")
+                                # A browser can't tell CORS from an unreachable
+                                # host — both are an unreadable answer.
+                                browser_failure = (
+                                    "Your browser got no readable answer from the MaaS gateway: it did not "
+                                    f"allow a cross-origin call from {claim.get('origin') or 'the dashboard'}, "
+                                    "or isn't reachable from the user's machine"
+                                    + (f" ({detail})" if detail else "")
+                                    + ". A browser client there can't use MaaS as it is set up."
+                                )
+                                ctx.shared_state.setdefault("_findings", []).append(
+                                    {"title": "Blocked by the browser", "text": browser_failure, "outcome": "blocked"}
+                                )
+                                ctx.shared_state["_verdict_text"] = browser_failure
+                            elif reason != "finished":
+                                browser_failure = f"The browser stopped sending: {rec.get('detail') or reason}"
+                            print(f"[send_requests] browser done: {reason}", flush=True)
+                            return
+                        o = _outcome_from_browser(rec, run_start)
+                        for attempt in rec.get("attempts") or []:
+                            if isinstance(attempt.get("status"), int):
+                                _tally_attempt(
+                                    attempt["status"], str(attempt.get("reason") or ""), float(attempt.get("ms") or 0)
+                                )
+                        if o.reply is None:
+                            what = f"status={o.status} " if o.status is not None else ""
+                            print(
+                                f"[send_requests] (browser) request failed: {what}{o.error_message or ''}".rstrip(),
+                                flush=True,
+                            )
+                        await record_outcome(o)
+                    if time.monotonic() - last_seen >= idle_timeout_s:
+                        browser_failure = (
+                            f"The browser stopped reporting for {idle_timeout_s:g}s — the run page was "
+                            "probably closed or lost its connection."
+                        )
+                        return
+                    await asyncio.sleep(_BROWSER_POLL_S)
+            finally:
+                browser_channel.remove_order(results_dir, ctx.run_id, result_key)
+
+        if from_browser:
+            await browser_burst()
+        elif until_throttled or stage_levels:
             n_clients = len(clients)
             requests_started = 0
 
@@ -1197,12 +1436,17 @@ class SendRequestsTask(Task):
                 _summary_line(ctx.shared_state[result_key], count)
                 + f" · stopped early after {stop_after_429s} throttled requests"
             )
+        if browser_failure:
+            ctx.shared_state["task_summary"] = (
+                _summary_line(result, count) + f" · {browser_failure}" if result else browser_failure
+            )
         await ctx.emit_assertion_state()
 
         return TaskResult(
             task_name=self.name,
-            status="PASS",
+            status="FAIL" if browser_failure else "PASS",
             duration_ms=(time.monotonic() - start) * 1000,
+            error=browser_failure,
         )
 
     async def _resolve_url_model_and_token(self, ctx: TaskContext) -> tuple[str, str, str]:

@@ -158,6 +158,40 @@ def test_send_requests_steps_follow_request_api_settings(path: pathlib.Path) -> 
         assert params.get("stream") == "${config.stream}", f"{path.name}: {step['name']} ignores stream"
 
 
+# Scenarios whose requests must come from inside the cluster: both legs of a
+# direct-vs-MaaS comparison go to in-cluster endpoints a browser can't reach.
+_NO_BROWSER = {"gateway_overhead", "request_types"}
+
+
+@pytest.mark.parametrize("path", _SCENARIO_PATHS, ids=lambda p: p.stem)
+def test_send_requests_steps_offer_send_from_browser(path: pathlib.Path) -> None:
+    """Every scenario that sends inference requests offers "Send from user
+    browser" as an advanced checkbox, and every such step follows it. Large
+    sends (until throttled, step load) default to sending from the pod."""
+    from harness.tasks.inference import SendRequestsTask
+    from harness.tasks.subscription_check import SendRequestsToEachModelTask
+
+    raw = yaml.safe_load(path.read_text())
+    steps = [
+        t for t in raw.get("tasks") or []
+        if issubclass(REGISTRY[t["name"]], (SendRequestsTask, SendRequestsToEachModelTask))
+    ]
+    config, inputs = raw.get("config") or {}, raw.get("inputs") or {}
+    if not steps or raw["name"] in _NO_BROWSER:
+        assert "send_from_browser" not in config, f"{path.name}: can't send from a browser"
+        return
+    assert isinstance(config.get("send_from_browser"), bool), f"{path.name}: send_from_browser must be a boolean"
+    assert inputs.get("send_from_browser", {}).get("advanced"), f"{path.name}: send_from_browser must be advanced"
+    large = any((s.get("params") or {}).get("until_throttled") or (s.get("params") or {}).get("stages") for s in steps)
+    if large:
+        assert config["send_from_browser"] is False, f"{path.name}: large sends default to the pod"
+    for step in steps:
+        params = step.get("params") or {}
+        assert params.get("from_browser") == "${config.send_from_browser}", (
+            f"{path.name}: {step['name']} ignores send_from_browser"
+        )
+
+
 def test_previous_names_are_unique_and_retired() -> None:
     """previous_names lets old run-history rows resolve to a renamed
     scenario's title — each old id must map to exactly one current scenario,
