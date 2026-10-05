@@ -6,8 +6,8 @@ version: 0.1.0
 
 # --- Maintainer (required) ---
 maintainer:
-  name: TODO-maintainer-name          # replace with the maintainer's name
-  github: TODO-github-handle          # replace with the maintainer's GitHub handle
+  name: Robert Lundberg          # replace with the maintainer's name
+  github: RHRolun          # replace with the maintainer's GitHub handle
 
 # --- RHOAI compatibility (required) ---
 rhoai_compatibility:
