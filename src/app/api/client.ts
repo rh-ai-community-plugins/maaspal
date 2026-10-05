@@ -2,6 +2,19 @@
 // is forwarded to the BFF's /api/* with the user's token (ADR-026).
 export const API_BASE = '/maaspal/api';
 
+// The BFF explains refusals in FastAPI's `detail` field — above all the access
+// gate's 401/403 ("You don't have access to MaaS:PAL…", api/auth.py) — so show
+// that instead of a bare status code.
+async function apiError(r: Response, what: string): Promise<Error> {
+  try {
+    const body = (await r.json()) as { detail?: unknown };
+    if (typeof body.detail === 'string') return new Error(body.detail);
+  } catch {
+    // not JSON (e.g. an HTML error page from a proxy)
+  }
+  return new Error(`${what} failed: ${r.status}`);
+}
+
 // Per-config-key launch-form metadata (scenario YAML `inputs:`, ADR-025).
 // Every field is optional; a config key with no entry renders as a plain
 // labelled input exactly as before.
@@ -91,7 +104,7 @@ export interface CreateRunResponse {
 
 export async function listScenarios(): Promise<Scenario[]> {
   const r = await fetch(`${API_BASE}/scenarios`);
-  if (!r.ok) throw new Error(`listScenarios failed: ${r.status}`);
+  if (!r.ok) throw await apiError(r, 'listScenarios');
   return r.json() as Promise<Scenario[]>;
 }
 
@@ -105,7 +118,7 @@ export async function createRun(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ scenario, config_overrides, auto_cleanup }),
   });
-  if (!r.ok) throw new Error(`createRun failed: ${r.status}`);
+  if (!r.ok) throw await apiError(r, 'createRun');
   return r.json() as Promise<CreateRunResponse>;
 }
 
@@ -115,31 +128,31 @@ export async function setAutoCleanup(runId: string, enabled: boolean): Promise<{
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
   });
-  if (!r.ok) throw new Error(`setAutoCleanup failed: ${r.status}`);
+  if (!r.ok) throw await apiError(r, 'setAutoCleanup');
   return r.json() as Promise<{ auto_cleanup: boolean }>;
 }
 
 export async function cleanupRun(runId: string): Promise<{ cleanup_status: CleanupStatus }> {
   const r = await fetch(`${API_BASE}/runs/${runId}/cleanup`, { method: 'POST' });
-  if (!r.ok) throw new Error(`cleanupRun failed: ${r.status}`);
+  if (!r.ok) throw await apiError(r, 'cleanupRun');
   return r.json() as Promise<{ cleanup_status: CleanupStatus }>;
 }
 
 export async function listRuns(): Promise<Run[]> {
   const r = await fetch(`${API_BASE}/runs`);
-  if (!r.ok) throw new Error(`listRuns failed: ${r.status}`);
+  if (!r.ok) throw await apiError(r, 'listRuns');
   return r.json() as Promise<Run[]>;
 }
 
 export async function getRun(runId: string): Promise<Run> {
   const r = await fetch(`${API_BASE}/runs/${runId}`);
-  if (!r.ok) throw new Error(`getRun failed: ${r.status}`);
+  if (!r.ok) throw await apiError(r, 'getRun');
   return r.json() as Promise<Run>;
 }
 
 export async function stopRun(runId: string): Promise<void> {
   const r = await fetch(`${API_BASE}/runs/${runId}/stop`, { method: 'POST' });
-  if (!r.ok) throw new Error(`stopRun failed: ${r.status}`);
+  if (!r.ok) throw await apiError(r, 'stopRun');
 }
 
 export interface TaskProgressEntry {

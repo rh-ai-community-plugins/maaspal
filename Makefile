@@ -152,12 +152,20 @@ chart-push: ## Package and push Helm chart to OCI registry (requires Helm 3.8+)
 	helm push $(CHART_TGZ) oci://$(REGISTRY)
 	@rm -f $(CHART_TGZ)
 
-deploy: ## helm upgrade --install from chart/ into NAMESPACE (images from REGISTRY, tag IMAGE_TAG)
+# Development deploy: pull policy Always plus a rollout restart, so re-pushing
+# the same tag (e.g. 0.1.0-dev) actually reaches the running pods. Harness Jobs
+# always pull fresh (api/k8s.py). Released installs keep the chart's
+# IfNotPresent with versioned tags.
+deploy: ## helm upgrade --install from chart/ into NAMESPACE (images from REGISTRY, tag IMAGE_TAG), then restart the pods
 	helm upgrade --install maaspal chart/ -n $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(FRONTEND_IMAGE) --set image.tag=$(IMAGE_TAG) \
 		--set bff.image.repository=$(REGISTRY)/$(BFF_IMAGE) --set bff.image.tag=$(IMAGE_TAG) \
+		--set image.pullPolicy=Always --set bff.image.pullPolicy=Always \
 		--set namespace=$(NAMESPACE)
 	oc label namespace $(NAMESPACE) maas.opendatahub.io/gateway-access=true --overwrite
+	oc rollout restart deployment/maaspal deployment/maaspal-bff -n $(NAMESPACE)
+	oc rollout status deployment/maaspal -n $(NAMESPACE) --timeout=300s
+	oc rollout status deployment/maaspal-bff -n $(NAMESPACE) --timeout=300s
 
 # ──────────────────────────────────────────────
 # Clean

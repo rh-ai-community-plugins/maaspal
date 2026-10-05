@@ -230,12 +230,26 @@ class DeploySimulatedModelTask(Task):
                 print(f"[deploy_simulated_model] created LLMInferenceService {namespace}/{isvc_name}", flush=True)
                 isvc_existed = False
 
+            # Recorded the moment it exists, not after the ready waits below
+            # (up to ready_max_wait_s each): a Stop cancels this task mid-wait,
+            # and cleanup only deletes what's in deployed_models. Confirmed
+            # live — recording at the end left a stopped run's model behind.
+            entry = {
+                "name": isvc_name,
+                "namespace": namespace,
+                "isvc_created": not isvc_existed,
+                "ref_created": False,
+                "ready": False,
+            }
+            deployed.append(entry)
+            record_created(ctx, self.name, "Model", f"{namespace}/{isvc_name}", existed=isvc_existed)
+
             isvc_ready = await _wait_for_isvc_ready(api, isvc_name, namespace, ready_max_wait_s, "deploy_simulated_model")
             if not isvc_ready:
                 ready_count += 1
                 ctx.shared_state["task_progress"] = {"current": ready_count, "total": count}
                 await ctx.emit_assertion_state()
-                return {"name": isvc_name, "namespace": namespace, "isvc_created": not isvc_existed, "ref_created": False, "ready": False}
+                return entry
 
             # Step 2: create/patch the MaaSModelRef — the MaaS controller does not
             # auto-create these; they must be applied manually (confirmed live:
@@ -258,19 +272,16 @@ class DeploySimulatedModelTask(Task):
                 )
                 print(f"[deploy_simulated_model] created MaaSModelRef {namespace}/{isvc_name}", flush=True)
                 ref_existed = False
+            entry["ref_created"] = not ref_existed
 
-            ref_ready = await _wait_for_model_ref_runtime_ready(api, isvc_name, namespace, ready_max_wait_s, "deploy_simulated_model")
+            entry["ready"] = await _wait_for_model_ref_runtime_ready(
+                api, isvc_name, namespace, ready_max_wait_s, "deploy_simulated_model"
+            )
 
             ready_count += 1
             ctx.shared_state["task_progress"] = {"current": ready_count, "total": count}
             await ctx.emit_assertion_state()
-            return {
-                "name": isvc_name,
-                "namespace": namespace,
-                "isvc_created": not isvc_existed,
-                "ref_created": not ref_existed,
-                "ready": ref_ready,
-            }
+            return entry
 
         if parallel:
             results = await asyncio.gather(*[_deploy_one(i) for i in range(count)])
@@ -278,11 +289,10 @@ class DeploySimulatedModelTask(Task):
             results = []
             for i in range(count):
                 results.append(await _deploy_one(i))
-        deployed.extend(results)
-        for r in results:
-            record_created(
-                ctx, self.name, "Model", f"{r['namespace']}/{r['name']}", existed=not r["isvc_created"]
-            )
+        # Entries were appended as each model was created (possibly out of order
+        # in parallel mode); keep deployed_models in index order for the tasks
+        # that read its first entry.
+        deployed[:] = [e for e in deployed if e not in results] + results
 
         not_ready = [r["name"] for r in results if not r["ready"]]
         ctx.shared_state["task_summary"] = (
