@@ -74,7 +74,10 @@ maaspal/
 │       ├── launchForm.ts       # Launch-form helpers: autofill, show_if, required gating, plan sentence
 │       ├── scenarioTitles.ts   # Scenario id → title (incl. previous_names), name formatting
 │       ├── monacoSetup.ts      # Self-hosted, YAML-only Monaco (see Frontend Monaco Setup)
-│       ├── styles/theme.css    # Red accents, scoped to .maaspal-plugin / maaspal-* classes
+│       ├── status.ts           # Every status (run/task/check/cleanup) → tone + icon + PF Label colour
+│       ├── styles/tokens.css   # The colour tokens, light + dark (pf-v6-theme-dark) — the only file with colour literals
+│       ├── styles/colors.ts    # Typed token refs for inline styles/SVG (COLOR, toneColor, toneBg)
+│       ├── styles/theme.css    # Component styles, scoped to .maaspal-plugin / maaspal-* classes; tokens only
 │       └── components/
 │           ├── CommunityBanner.tsx/.css # [SHARED] required "Community Plugin" banner — never edit
 │           ├── MaaspalNavIcon.tsx    # Sidebar icon, exposed as ./Icon
@@ -152,6 +155,7 @@ maaspal/
 │
 ├── config/webpack.{common,dev,prod}.js # ModuleFederationPlugin (name maaspal, exposes ./extensions + ./Icon, shared singletons); dev proxies /maaspal/api → :3000
 ├── docs/
+│   ├── design/colors-and-components.md    # Colour tokens (light/dark), status mapping, component guide
 │   ├── architecture/
 │   │   ├── adrs/                          # Architecture Decision Records (ADR-001 to ADR-026)
 │   │   ├── maas-domain-reference.md       # MaaS governance objects (subscriptions, models, policies, Kuadrant, gateway) as found live
@@ -491,6 +495,10 @@ The dashboard owns the page chrome (masthead, sidebar, scroll container), so the
 ### Scenario Categories (ADR-020, regrouped by ADR-025)
 
 The **Scenarios** page (`ScenarioCatalog.tsx`) is a catalog: a left rail with search, categories (with counts), Source (Custom / Built-in, shown only when custom scenarios exist) and Type (uses your setup / creates temporary resources / read-only) filters, all kept in the URL so Back from a run restores them, and a card gallery grouped by category. The categories are organised by the user's question: Quick check, Rate limits, Access control, API keys, Usage metrics, Performance, Diagnostics. **Custom**: `GET /api/scenarios` sends `custom: true` for any scenario not in `BUILTIN_SCENARIOS` (`api/routes/scenarios.py`). A custom scenario carries a Custom label; if its `category:` is a built-in one it's listed there ahead of the built-ins, otherwise it goes in the Custom category, which comes first and only appears when non-empty. Within a category: custom first, then `kind: verify` before `explore`, then `order`. Cards show `title`, `summary` and badges (custom, uses your setup / creates temporary resources / read-only, needs extra RBAC, duration); clicking a card or Run opens the launch form. The category order lives in two places kept in sync by hand — `CATEGORY_ORDER` in `src/app/components/ScenarioCatalog.tsx` and `KNOWN_CATEGORIES` in `bff/api/routes/scenarios.py` (used by `harness/tests/test_scenarios.py`). Adding a built-in scenario means adding its name to `BUILTIN_SCENARIOS` too (`test_every_builtin_scenario_has_a_file` checks the other direction).
+
+### UI colours (light + dark)
+
+Every colour is a token in `src/app/styles/tokens.css`, with a value per dashboard theme (dark = `pf-v6-theme-dark` on `<html>`). Neutrals alias PatternFly's semantic tokens so panels match the host surface; brand/status/chart colours are MaaS:PAL's own. Components use `var(--maaspal-…)` in CSS and `COLOR`/`toneColor`/`toneBg` (`styles/colors.ts`) in TSX; statuses go through `src/app/status.ts`. `src/app/styles/noHardcodedColors.test.ts` fails on any colour literal elsewhere. Palette, status mapping, component guide and how to check both themes: [`docs/design/colors-and-components.md`](docs/design/colors-and-components.md).
 
 ### Frontend Monaco Setup
 

@@ -3,17 +3,10 @@ import { Button, Label, Spinner } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { listRuns, stopRun, type Run } from '../api/client';
 import { useScenarioTitle } from '../scenarioTitles';
+import { statusLabelColor } from '../status';
+import { toneColor } from '../styles/colors';
 
 const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING']);
-
-function statusColor(status: string): 'green' | 'red' | 'blue' | 'grey' | 'orange' {
-  const u = status.toUpperCase();
-  if (u === 'PASS') return 'green';
-  if (u === 'FAIL') return 'red';
-  if (u === 'CANCELLED') return 'orange';
-  if (u === 'RUNNING') return 'blue';
-  return 'grey';
-}
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -25,7 +18,7 @@ function formatDuration(ms: number): string {
 function StatusBadge({ status }: { status: string }) {
   return (
     <Label
-      color={statusColor(status)}
+      color={statusLabelColor(status)}
       style={{ fontWeight: 700, fontSize: '0.72rem', letterSpacing: '0.04em' }}
     >
       {status.toUpperCase()}
@@ -127,7 +120,7 @@ export function RunHistory({ onViewRun }: Props) {
                       <Button
                         variant="link"
                         isInline
-                        style={{ color: '#c62828', marginLeft: '0.75rem' }}
+                        style={{ color: toneColor('danger'), marginLeft: '0.75rem' }}
                         onClick={() => void handleStop(r.id)}
                       >
                         Stop

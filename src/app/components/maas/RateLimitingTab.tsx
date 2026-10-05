@@ -8,6 +8,7 @@ import {
   type MaasTokenRateLimitPolicy,
 } from '../../api/client';
 import { MaasUnavailableNotice } from './MaasUnavailableNotice';
+import { COLOR } from '../../styles/colors';
 
 const RawYamlModal = lazy(() =>
   import('../RawYamlModal').then((m) => ({ default: m.RawYamlModal })),
@@ -79,7 +80,7 @@ export function RateLimitingTab() {
           <Tbody>
             {!policies || policies.length === 0 ? (
               <Tr>
-                <Td colSpan={5} style={{ color: '#888', fontStyle: 'italic' }}>
+                <Td colSpan={5} className="maaspal-empty">
                   No TokenRateLimitPolicy objects found.
                 </Td>
               </Tr>
@@ -89,16 +90,16 @@ export function RateLimitingTab() {
                   <Td style={{ fontFamily: 'monospace', fontSize: '0.82rem' }}>{policy.name}</Td>
                   <Td>
                     <Label isCompact>{policy.target_kind}</Label>
-                    <div style={{ fontSize: '0.78rem', color: '#888', marginTop: '0.2rem' }}>
+                    <div style={{ fontSize: '0.78rem', color: COLOR.muted, marginTop: '0.2rem' }}>
                       {policy.target_name}
                     </div>
                   </Td>
                   <Td>
                     {policy.limit_names.length === 0 ? (
-                      <span style={{ color: '#888' }}>—</span>
+                      <span className="maaspal-text-muted">—</span>
                     ) : (
                       policy.limit_names.map((n) => (
-                        <div key={n} style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: '#555' }}>
+                        <div key={n} style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: COLOR.subtle }}>
                           {n}
                         </div>
                       ))
@@ -151,7 +152,7 @@ export function RateLimitingTab() {
           <Tbody>
             {!limitadors || limitadors.length === 0 ? (
               <Tr>
-                <Td colSpan={5} style={{ color: '#888', fontStyle: 'italic' }}>
+                <Td colSpan={5} className="maaspal-empty">
                   No Limitador object found.
                 </Td>
               </Tr>

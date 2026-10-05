@@ -10,6 +10,10 @@
   Custom category at the top.
 - **MaaS setup** is renamed **MaaS overview** (`/maaspal/overview`; the old
   `/maaspal/setup` path redirects), since it only shows the configuration.
+- Every page works in the dashboard's dark theme: all colours come from one
+  set of light/dark tokens (`src/app/styles/tokens.css`), statuses from one
+  map (`src/app/status.ts`), and a test rejects hard-coded colours. See
+  `docs/design/colors-and-components.md`.
 - The header reads **MaaS:PAL**, with a mascot logo that changes on every page,
   drawn from a light-theme or dark-theme set.
 

@@ -26,6 +26,8 @@ import {
   type TaskProgressEntry,
   type TrafficBurst,
 } from '../api/client';
+import { statusStyle } from '../status';
+import { COLOR, toneColor } from '../styles/colors';
 
 const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING']);
 // Cleanup keeps going after a run reaches its final status — keep polling the
@@ -91,13 +93,7 @@ function LogsPanel({ runId, failed }: { runId: string; failed: boolean }) {
 }
 
 function StatusDot({ status }: { status: string }) {
-  const upper = status.toUpperCase();
-  const color =
-    upper === 'PASS' ? '#2e7d32'
-    : upper === 'FAIL' ? '#c62828'
-    : upper === 'CANCELLED' ? '#b26a00'
-    : upper === 'RUNNING' ? '#1565c0'
-    : '#9e9e9e';
+  const color = toneColor(statusStyle(status).tone);
   return (
     <span
       style={{
@@ -256,7 +252,7 @@ export function RunDetail({ runId, onBack }: Props) {
               <span
                 className="maaspal-run-detail-meta__item"
                 title={runId}
-                style={{ fontFamily: 'monospace', fontSize: '0.78rem', color: '#aaa' }}
+                style={{ fontFamily: 'monospace', fontSize: '0.78rem', color: COLOR.muted }}
               >
                 {runId.slice(0, 12)}…
               </span>
@@ -316,7 +312,7 @@ export function RunDetail({ runId, onBack }: Props) {
                     </Button>
                     {run.cleanup_status === 'failed' && run.cleanup_error && (
                       <Tooltip content={run.cleanup_error}>
-                        <span style={{ color: '#c62828', marginLeft: '0.4rem' }}>cleanup failed ⓘ</span>
+                        <span style={{ color: toneColor('danger'), marginLeft: '0.4rem' }}>cleanup failed ⓘ</span>
                       </Tooltip>
                     )}
                   </span>

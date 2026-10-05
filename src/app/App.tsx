@@ -10,6 +10,7 @@ import { RunTrigger } from './components/RunTrigger';
 import { ScenarioCatalog } from './components/ScenarioCatalog';
 import { useRotatingLogo } from './logos';
 import type { Scenario } from './api/client';
+import './styles/tokens.css';
 import './styles/theme.css';
 
 // Rendered by the RHOAI dashboard at /maaspal/* (src/rhoai/extensions.ts). The

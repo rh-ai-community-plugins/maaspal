@@ -21,9 +21,9 @@ interface YamlTarget {
 
 function UserChips({ users }: { users: string[] | null }) {
   if (users === null) {
-    return <span style={{ color: '#888', fontStyle: 'italic' }}>unknown (Groups unavailable)</span>;
+    return <span className="maaspal-empty">unknown (Groups unavailable)</span>;
   }
-  if (users.length === 0) return <span style={{ color: '#888' }}>no members</span>;
+  if (users.length === 0) return <span className="maaspal-text-muted">no members</span>;
   return (
     <>
       {users.map((u) => (
@@ -45,7 +45,7 @@ function SubscriptionChips({
   subs: MaasAccessRow['subscriptions'];
   onSelect: (target: YamlTarget) => void;
 }) {
-  if (subs.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (subs.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {subs.map((s) => (
@@ -76,7 +76,7 @@ function AuthPolicyChips({
   policies: MaasAccessRow['auth_policies'];
   onSelect: (target: YamlTarget) => void;
 }) {
-  if (policies.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (policies.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {policies.map((p) => (
@@ -102,7 +102,7 @@ function AuthPolicyChips({
 
 function MismatchChips({ row }: { row: MaasAccessRow }) {
   if (row.quota_without_access.length === 0 && row.access_without_quota.length === 0) {
-    return <span style={{ color: '#888' }}>—</span>;
+    return <span className="maaspal-text-muted">—</span>;
   }
   return (
     <>
@@ -164,7 +164,7 @@ export function AccessControlTab() {
         <Tbody>
           {items.length === 0 ? (
             <Tr>
-              <Td colSpan={5} style={{ color: '#888', fontStyle: 'italic' }}>
+              <Td colSpan={5} className="maaspal-empty">
                 No groups reference a subscription or auth policy.
               </Td>
             </Tr>

@@ -3,12 +3,15 @@ import {
   Alert,
   Button,
   ExpandableSection,
+  FormSelect,
+  FormSelectOption,
   Modal,
   ModalBody,
   ModalFooter,
   ModalHeader,
   Popover,
   Switch,
+  TextInput,
 } from '@patternfly/react-core';
 import { OutlinedQuestionCircleIcon } from '@patternfly/react-icons';
 import {
@@ -36,6 +39,7 @@ import {
 } from '../launchForm';
 import { scenarioTitle } from '../scenarioTitles';
 import { ScenarioBadges } from './ScenarioCatalog';
+import { COLOR, toneColor } from '../styles/colors';
 
 interface Props {
   scenario: Scenario;
@@ -43,15 +47,7 @@ interface Props {
   onCancel: () => void;
 }
 
-const selectStyle = {
-  padding: '0.375rem 0.5rem',
-  border: '1px solid #ccc',
-  borderRadius: '4px',
-  fontFamily: 'inherit',
-  fontSize: '0.875rem',
-};
-
-const noteStyle = { color: '#888', fontSize: '0.75rem', margin: '0.25rem 0 0' };
+const noteStyle = { color: COLOR.muted, fontSize: '0.75rem', margin: '0.25rem 0 0' };
 
 export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
   const [loading, setLoading] = useState(false);
@@ -240,24 +236,25 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             </label>
             {infoFor(key)}
           </div>
-          <select
+          <FormSelect
             id="cfg-target_model"
             value={currentKey}
-            onChange={(e) => {
-              const [namespace, name] = e.target.value.split('/');
+            onChange={(_e, value) => {
+              const [namespace, name] = value.split('/');
               if (name && namespace) handleModelSelect(name, namespace);
               else
                 setValues((prev) => ({ ...prev, [_MODEL_NAME_KEY]: '', [_MODEL_NAMESPACE_KEY]: '' }));
             }}
-            style={selectStyle}
           >
-            <option value="">{blankLabel}</option>
+            <FormSelectOption value="" label={blankLabel} />
             {visibleModels.map((m) => (
-              <option key={`${m.namespace}/${m.name}`} value={`${m.namespace}/${m.name}`}>
-                {m.display_name} ({m.namespace}/{m.name}){m.ready ? '' : ' — not ready'}
-              </option>
+              <FormSelectOption
+                key={`${m.namespace}/${m.name}`}
+                value={`${m.namespace}/${m.name}`}
+                label={`${m.display_name} (${m.namespace}/${m.name})${m.ready ? '' : ' — not ready'}`}
+              />
             ))}
-          </select>
+          </FormSelect>
           {modelListNote && <p style={noteStyle}>{modelListNote}</p>}
           {help(key)}
         </div>
@@ -277,12 +274,11 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             </label>
             {infoFor(key)}
           </div>
-          <input
+          <TextInput
             id={`cfg-${key}`}
             type="text"
             value={values[key] ?? ''}
-            onChange={(e) => handleChange(key, e.target.value, false)}
-            style={selectStyle}
+            onChange={(_e, value) => handleChange(key, value, false)}
           />
           <p style={noteStyle}>
             Couldn&apos;t load models from the MaaS overview — enter the MaaSModelRef name manually (and its
@@ -301,31 +297,32 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             </label>
             {infoFor(key)}
           </div>
-          <select
+          <FormSelect
             id="cfg-subscription"
             value={selectedSubscriptionName}
-            onChange={(e) => handleSubscriptionSelect(e.target.value)}
-            style={selectStyle}
+            onChange={(_e, value) => handleSubscriptionSelect(value)}
           >
-            <option value="">
-              {inputs[_SUBSCRIPTION_KEY]?.placeholder ??
-                (requires.has(_SUBSCRIPTION_KEY)
-                  ? 'Select a subscription…'
-                  : 'Auto-select (highest eligible priority)')}
-            </option>
+            <FormSelectOption
+              value=""
+              label={
+                inputs[_SUBSCRIPTION_KEY]?.placeholder ??
+                (requires.has(_SUBSCRIPTION_KEY) ? 'Select a subscription…' : 'Auto-select (highest eligible priority)')
+              }
+            />
             {visibleSubscriptions.map((s) => {
               const notes: string[] = [];
               if (!s.ready) notes.push('not ready');
               if (!s.owner.groups.includes(_HARNESS_OWNER_GROUP)) notes.push('not eligible for this SA');
               const suffix = notes.length ? ` — ${notes.join(', ')}` : '';
               return (
-                <option key={`${s.namespace}/${s.name}`} value={s.name}>
-                  {s.display_name || s.name} ({s.namespace}/{s.name}) · priority {s.priority ?? '—'}
-                  {suffix}
-                </option>
+                <FormSelectOption
+                  key={`${s.namespace}/${s.name}`}
+                  value={s.name}
+                  label={`${s.display_name || s.name} (${s.namespace}/${s.name}) · priority ${s.priority ?? '—'}${suffix}`}
+                />
               );
             })}
-          </select>
+          </FormSelect>
           {subscriptionListNote && <p style={noteStyle}>{subscriptionListNote}</p>}
           {help(key)}
         </div>
@@ -341,12 +338,11 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             </label>
             {infoFor(key)}
           </div>
-          <input
+          <TextInput
             id={`cfg-${key}`}
             type="text"
             value={values[key] ?? ''}
-            onChange={(e) => handleChange(key, e.target.value, false)}
-            style={selectStyle}
+            onChange={(_e, value) => handleChange(key, value, false)}
           />
           <p style={noteStyle}>
             Couldn&apos;t load subscriptions from the MaaS overview — enter the MaaSSubscription name
@@ -366,18 +362,15 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             </label>
             {infoFor(key)}
           </div>
-          <select
+          <FormSelect
             id={`cfg-${key}`}
             value={String(values[key] ?? '')}
-            onChange={(e) => handleChange(key, e.target.value, false)}
-            style={selectStyle}
+            onChange={(_e, value) => handleChange(key, value, false)}
           >
             {choices.map((c) => (
-              <option key={c} value={c}>
-                {humanizeKey(c)}
-              </option>
+              <FormSelectOption key={c} value={c} label={humanizeKey(c)} />
             ))}
-          </select>
+          </FormSelect>
           {help(key)}
         </div>
       );
@@ -392,12 +385,11 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
           </label>
           {infoFor(key)}
         </div>
-        <input
+        <TextInput
           id={`cfg-${key}`}
           type={isNumber ? 'number' : key.endsWith('_token') ? 'password' : 'text'}
           value={values[key] ?? ''}
-          onChange={(e) => handleChange(key, e.target.value, isNumber)}
-          style={selectStyle}
+          onChange={(_e, value) => handleChange(key, value, isNumber)}
         />
         {help(key)}
       </div>
@@ -418,7 +410,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     >
       <ModalHeader title={scenarioTitle(scenario)} labelId="maaspal-run-trigger-title" />
       <ModalBody aria-label={`Run ${scenario.name}`}>
-      <p style={{ color: '#555', margin: '0 0 0.5rem' }}>{scenario.summary || scenario.description}</p>
+      <p style={{ color: COLOR.subtle, margin: '0 0 0.5rem' }}>{scenario.summary || scenario.description}</p>
       <div style={{ marginBottom: '0.5rem' }}>
         <ScenarioBadges scenario={scenario} />
       </div>
@@ -432,7 +424,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
               onToggle={(_e, expanded) => setShowMoreDetails(expanded)}
               style={{ marginTop: '0.35rem' }}
             >
-              <p style={{ color: '#555', fontSize: '0.85rem', margin: 0 }}>{scenario.description}</p>
+              <p style={{ color: COLOR.subtle, fontSize: '0.85rem', margin: 0 }}>{scenario.description}</p>
             </ExpandableSection>
           )}
         </Alert>
@@ -476,7 +468,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
       )}
 
       {missing.length > 0 && (
-        <p style={{ ...noteStyle, color: '#c62828', marginTop: '0.75rem' }}>
+        <p style={{ ...noteStyle, color: toneColor('danger'), marginTop: '0.75rem' }}>
           Required before launching:{' '}
           {missing
             // The model picker sets name and namespace together — one entry.

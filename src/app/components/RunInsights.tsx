@@ -15,17 +15,21 @@ import type {
 import { formatTaskName } from '../scenarioTitles';
 import { MetricsComparisonChart } from './MetricsComparisonChart';
 import { TrafficChart } from './TrafficChart';
+import { RESOURCE_STATUS, statusStyle } from '../status';
+import { COLOR, toneColor } from '../styles/colors';
 
-const VERDICT_STYLE: Record<RunVerdict['status'], { color: string; icon: string; label: string }> = {
-  PASS: { color: '#2e7d32', icon: '✓', label: 'Behaving as expected' },
-  FAIL: { color: '#c62828', icon: '✗', label: 'Not behaving as expected' },
-  CANCELLED: { color: '#b26a00', icon: '⊘', label: 'Stopped' },
+const VERDICT_LABEL: Record<RunVerdict['status'], string> = {
+  PASS: 'Behaving as expected',
+  FAIL: 'Not behaving as expected',
+  CANCELLED: 'Stopped',
 };
 
 /** One plain-language sentence summing the run up, written by the harness
  * at the end of the run (harness/runner.py:_render_verdict). */
 export function VerdictBanner({ verdict }: { verdict: RunVerdict }) {
-  const style = VERDICT_STYLE[verdict.status] ?? VERDICT_STYLE.FAIL;
+  const status = verdict.status in VERDICT_LABEL ? verdict.status : 'FAIL';
+  const { tone, icon } = statusStyle(status);
+  const style = { color: toneColor(tone), icon, label: VERDICT_LABEL[status] };
   return (
     <div
       className="maaspal-verdict"
@@ -251,27 +255,27 @@ function StepChart({
   const d = values.map((v, i) => `${i === 0 ? 'M' : 'L'}${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(' ');
   return (
     <figure style={{ margin: 0 }}>
-      <figcaption style={{ fontSize: '0.8rem', fontWeight: 600, color: '#333' }}>{title}</figcaption>
+      <figcaption style={{ fontSize: '0.8rem', fontWeight: 600, color: COLOR.text }}>{title}</figcaption>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label={`${title} by concurrency step`}>
-        <line x1={M.left} x2={W - M.right} y1={sy(0)} y2={sy(0)} stroke="#ccc" />
-        <text x={M.left - 6} y={sy(yMax / 1.15)} dy="0.32em" textAnchor="end" fontSize={11} fill="#777">
+        <line x1={M.left} x2={W - M.right} y1={sy(0)} y2={sy(0)} stroke={COLOR.border} />
+        <text x={M.left - 6} y={sy(yMax / 1.15)} dy="0.32em" textAnchor="end" fontSize={11} fill={COLOR.chart.axis}>
           {n(yMax / 1.15)}
         </text>
-        <text x={M.left - 6} y={10} textAnchor="end" fontSize={11} fill="#777">
+        <text x={M.left - 6} y={10} textAnchor="end" fontSize={11} fill={COLOR.chart.axis}>
           {unit}
         </text>
-        <path d={d} fill="none" stroke="#1565c0" strokeWidth={2} />
+        <path d={d} fill="none" stroke={COLOR.chart.series} strokeWidth={2} />
         {stages.map((st, i) => (
           <g key={st.concurrency}>
-            <circle cx={sx(i)} cy={sy(values[i])} r={4} fill="#1565c0" stroke="#fff" strokeWidth={2}>
+            <circle cx={sx(i)} cy={sy(values[i])} r={4} fill={COLOR.chart.series} stroke={COLOR.surface} strokeWidth={2}>
               <title>
                 {st.concurrency} in flight: {n(values[i], values[i] < 10 ? 1 : 0)} {unit}
               </title>
             </circle>
-            <text x={sx(i)} y={sy(values[i]) - 8} textAnchor="middle" fontSize={11} fill="#333">
+            <text x={sx(i)} y={sy(values[i]) - 8} textAnchor="middle" fontSize={11} fill={COLOR.text}>
               {n(values[i], values[i] < 10 ? 1 : 0)}
             </text>
-            <text x={sx(i)} y={H - M.bottom + 16} textAnchor="middle" fontSize={11} fill="#777">
+            <text x={sx(i)} y={H - M.bottom + 16} textAnchor="middle" fontSize={11} fill={COLOR.chart.axis}>
               {st.concurrency}
             </text>
           </g>
@@ -380,14 +384,6 @@ function TrafficLine({
   );
 }
 
-const RESOURCE_STATUS: Record<string, { label: string; color: string }> = {
-  active: { label: 'exists', color: '#6a6e73' },
-  removed: { label: 'removed ✓', color: '#2e7d32' },
-  restored: { label: 'restored ✓', color: '#2e7d32' },
-  revoked: { label: 'revoked ✓', color: '#2e7d32' },
-  'cleanup failed': { label: 'cleanup failed ✗', color: '#c62828' },
-  'left in place': { label: 'left in place', color: '#b26a00' },
-};
 
 function ResourceItem({ r }: { r: RunResource }) {
   const st = RESOURCE_STATUS[r.status ?? 'active'] ?? RESOURCE_STATUS.active;
@@ -397,7 +393,7 @@ function ResourceItem({ r }: { r: RunResource }) {
         {r.action === 'patched' ? `${r.kind} (changed)` : r.kind}
       </span>
       <code>{r.name}</code>
-      <span className="maaspal-steps__status" style={{ color: st.color }}>
+      <span className="maaspal-steps__status" style={{ color: toneColor(st.tone) }}>
         {st.label}
       </span>
       {r.subscription && <span className="maaspal-steps__meta"> · on {r.subscription}</span>}
@@ -406,24 +402,17 @@ function ResourceItem({ r }: { r: RunResource }) {
   );
 }
 
-const STEP_ICON: Record<TaskProgressEntry['status'], { icon: string; color: string }> = {
-  PENDING: { icon: '○', color: '#9e9e9e' },
-  RUNNING: { icon: '◎', color: '#1565c0' },
-  DONE: { icon: '✓', color: '#2e7d32' },
-  FAIL: { icon: '✗', color: '#c62828' },
-  CANCELLED: { icon: '⊘', color: '#b26a00' },
-};
 
 function cleanupSummary(resources: RunResource[], cleanupStatus?: string): { text: string; color: string } {
   const count = (status: string) => resources.filter((r) => r.status === status).length;
   const failed = count('cleanup failed');
   const left = count('left in place');
   const done = count('removed') + count('restored') + count('revoked');
-  if (failed) return { text: `${failed} of ${resources.length} could not be removed — use Clean Up Now, or remove them by hand.`, color: '#c62828' };
-  if (left) return { text: `${left} left in place (auto cleanup was off) — use Clean Up Now to remove them.`, color: '#b26a00' };
-  if (done === resources.length) return { text: `Everything this run created was removed or put back.`, color: '#2e7d32' };
-  if (cleanupStatus === 'cleaning') return { text: 'Cleaning up…', color: '#1565c0' };
-  return { text: 'Removed automatically when the run finishes.', color: '#6a6e73' };
+  if (failed) return { text: `${failed} of ${resources.length} could not be removed — use Clean Up Now, or remove them by hand.`, color: toneColor('danger') };
+  if (left) return { text: `${left} left in place (auto cleanup was off) — use Clean Up Now to remove them.`, color: toneColor('warning') };
+  if (done === resources.length) return { text: `Everything this run created was removed or put back.`, color: toneColor('success') };
+  if (cleanupStatus === 'cleaning') return { text: 'Cleaning up…', color: toneColor('info') };
+  return { text: 'Removed automatically when the run finishes.', color: COLOR.muted };
 }
 
 /** What happened, step by step: each task's one-line narration plus
@@ -457,7 +446,7 @@ function StepResources({ resources }: { resources: RunResource[] }) {
             {[...counts.entries()].map(([status, count]) => {
               const st = RESOURCE_STATUS[status] ?? RESOURCE_STATUS.active;
               return (
-                <span key={status} className="maaspal-steps__status" style={{ color: st.color }}>
+                <span key={status} className="maaspal-steps__status" style={{ color: toneColor(st.tone) }}>
                   {count.toLocaleString()} {st.label}
                 </span>
               );
@@ -525,7 +514,8 @@ export function RunSteps({
       <ol className="maaspal-steps">
         {tasks.map((t) => {
           const own = byTask.get(t.name) ?? [];
-          const icon = STEP_ICON[t.status];
+          const step = statusStyle(t.status);
+          const icon = { icon: step.icon, color: toneColor(step.tone) };
           return (
             <li key={t.name} className={`maaspal-steps__item maaspal-steps__item--${t.status.toLowerCase()}`}>
               <span className="maaspal-steps__icon" style={{ color: icon.color }} aria-label={t.status}>

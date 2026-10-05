@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CodeBlock, CodeBlockCode } from '@patternfly/react-core';
 import { API_BASE } from '../api/client';
+import { COLOR } from '../styles/colors';
 
 type StreamStatus = 'connecting' | 'streaming' | 'completed' | 'error';
 
@@ -117,7 +118,7 @@ export function LogStream({ runId, onLines }: Props) {
         <span className="maaspal-stream-status__dot" />
         <span>{STATUS_LABEL[status]}</span>
         {lines.length > 0 && (
-          <span style={{ marginLeft: 'auto', fontWeight: 400, fontSize: '0.75rem', color: '#888' }}>
+          <span style={{ marginLeft: 'auto', fontWeight: 400, fontSize: '0.75rem', color: COLOR.muted }}>
             {lines.length} lines
           </span>
         )}

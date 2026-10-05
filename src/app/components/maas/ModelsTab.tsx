@@ -3,6 +3,7 @@ import { Button, Label, Spinner } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { getMaasModels, type MaasModel } from '../../api/client';
 import { MaasUnavailableNotice } from './MaasUnavailableNotice';
+import { COLOR } from '../../styles/colors';
 
 // Code-split: RawYamlModal pulls in Monaco (see monacoSetup.ts) — same
 // reasoning as RunDetail.tsx's lazy-loading of RunSettingsModal, so Monaco's
@@ -21,7 +22,7 @@ interface YamlTarget {
 }
 
 function SubscriptionChips({ subs }: { subs: MaasModel['subscriptions'] }) {
-  if (subs.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (subs.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {subs.map((s) => (
@@ -52,7 +53,7 @@ function AuthPolicyCell({
   onSelect: (target: YamlTarget) => void;
 }) {
   if (hasAuthPolicy === null) {
-    return <span style={{ fontSize: '0.75rem', color: '#888' }}>unknown</span>;
+    return <span style={{ fontSize: '0.75rem', color: COLOR.muted }}>unknown</span>;
   }
   if (!hasAuthPolicy || policies.length === 0) {
     return <Label isCompact color="orange">⚠ no auth policy</Label>;
@@ -90,7 +91,7 @@ function AuthPolicyCell({
 function NamespaceCell({ model }: { model: MaasModel }) {
   return (
     <div>
-      <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: '#333' }}>
+      <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: COLOR.text }}>
         {model.namespace}
       </div>
       {model.gateway_access_label === false && (
@@ -104,7 +105,7 @@ function NamespaceCell({ model }: { model: MaasModel }) {
         </Label>
       )}
       {model.gateway_access_label === null && (
-        <div style={{ fontSize: '0.75rem', color: '#888', marginTop: '0.3rem' }}>gateway-access: unknown</div>
+        <div style={{ fontSize: '0.75rem', color: COLOR.muted, marginTop: '0.3rem' }}>gateway-access: unknown</div>
       )}
     </div>
   );
@@ -122,11 +123,11 @@ function HostingBadge({ model }: { model: MaasModel }) {
       <Label isCompact color={isExternal ? 'purple' : 'blue'}>
         {isExternal ? 'External' : 'Internal'}
       </Label>
-      <div style={{ fontSize: '0.72rem', color: '#888', marginTop: '0.3rem' }}>
+      <div style={{ fontSize: '0.72rem', color: COLOR.muted, marginTop: '0.3rem' }}>
         {model.kind ?? 'Unknown kind'}
       </div>
       {typeof model.serving?.replicas === 'number' && (
-        <div style={{ fontSize: '0.72rem', color: '#888' }}>
+        <div style={{ fontSize: '0.72rem', color: COLOR.muted }}>
           {model.serving.replicas} replica{model.serving.replicas === 1 ? '' : 's'}
         </div>
       )}
@@ -148,14 +149,14 @@ function ExternalProviderCell({
   providers: MaasModel['external_providers'];
   onSelect: (target: YamlTarget) => void;
 }) {
-  if (providers.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (providers.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {providers.map((p, i) => (
         <div key={`${p.provider_name ?? 'unknown'}-${i}`} style={{ marginBottom: '0.3rem' }}>
           <div style={{ fontSize: '0.8rem' }}>
             <strong>{p.provider_name ?? 'unknown provider'}</strong>
-            {p.target_model && <span style={{ color: '#888' }}> → {p.target_model}</span>}
+            {p.target_model && <span className="maaspal-text-muted"> → {p.target_model}</span>}
           </div>
           {p.credential_secret_name ? (
             <Label
@@ -168,7 +169,7 @@ function ExternalProviderCell({
               {p.credential_secret_label_ok === null && 'credential secret: unknown'}
             </Label>
           ) : (
-            <span style={{ fontSize: '0.72rem', color: '#888' }}>no credential secret configured</span>
+            <span style={{ fontSize: '0.72rem', color: COLOR.muted }}>no credential secret configured</span>
           )}
           {p.raw_yaml !== null && (
             <div>
@@ -225,6 +226,7 @@ export function ModelsTab() {
 
   return (
     <>
+      <div className="maaspal-table-scroll">
       <Table aria-label="MaaS models">
         <Thead>
           <Tr>
@@ -242,16 +244,16 @@ export function ModelsTab() {
         <Tbody>
           {items.length === 0 ? (
             <Tr>
-              <Td colSpan={9} style={{ color: '#888', fontStyle: 'italic' }}>
+              <Td colSpan={9} className="maaspal-empty">
                 No models found.
               </Td>
             </Tr>
           ) : (
             items.map((model) => (
               <Tr key={`${model.namespace}/${model.name}`}>
-                <Td>
+                <Td style={{ minWidth: '12rem' }}>
                   <div style={{ fontWeight: 700 }}>{model.display_name}</div>
-                  <div style={{ fontSize: '0.78rem', color: '#888' }}>{model.description}</div>
+                  <div style={{ fontSize: '0.78rem', color: COLOR.muted }}>{model.description}</div>
                 </Td>
                 <Td><NamespaceCell model={model} /></Td>
                 <Td><HostingBadge model={model} /></Td>
@@ -261,11 +263,11 @@ export function ModelsTab() {
                     {model.phase ?? (model.ready ? 'Ready' : 'Not ready')}
                   </Label>
                 </Td>
-                <Td>
+                <Td style={{ minWidth: '14rem' }}>
                   {model.endpoint ? (
-                    <span style={{ fontFamily: 'monospace', fontSize: '0.78rem' }}>{model.endpoint}</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: '0.78rem', overflowWrap: 'anywhere' }}>{model.endpoint}</span>
                   ) : (
-                    <span style={{ color: '#888' }}>—</span>
+                    <span className="maaspal-text-muted">—</span>
                   )}
                 </Td>
                 <Td><SubscriptionChips subs={model.subscriptions} /></Td>
@@ -276,7 +278,7 @@ export function ModelsTab() {
                     onSelect={setYamlTarget}
                   />
                 </Td>
-                <Td>
+                <Td style={{ whiteSpace: 'nowrap' }}>
                   <div>
                     <Button
                       variant="link"
@@ -316,6 +318,7 @@ export function ModelsTab() {
           )}
         </Tbody>
       </Table>
+      </div>
 
       {yamlTarget !== null && (
         <Suspense fallback={<Spinner size="lg" aria-label="Loading editor" />}>

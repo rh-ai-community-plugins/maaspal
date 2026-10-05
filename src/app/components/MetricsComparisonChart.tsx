@@ -1,14 +1,15 @@
 import { useRef, useState } from 'react';
 import type { MetricsChart } from '../api/client';
+import { COLOR } from '../styles/colors';
 
 // What MaaS reported vs what this run actually sent, over time, on one axis.
 // The gap closing is Prometheus catching up (it scrapes every ~30 s); a gap
 // that never closes is the real mismatch. Hand-rolled SVG like TrafficChart.
 
-const MAAS_COLOR = '#1565c0'; // solid — the thing under test
-const HARNESS_COLOR = '#555'; // dashed — the reference
-const GRID_COLOR = '#ececec';
-const AXIS_TEXT = '#777';
+const MAAS_COLOR = COLOR.chart.series; // solid — the thing under test
+const HARNESS_COLOR = COLOR.chart.reference; // dashed — the reference
+const GRID_COLOR = COLOR.chart.grid;
+const AXIS_TEXT = COLOR.chart.axis;
 
 const W = 400;
 const H = 170;
@@ -55,10 +56,10 @@ export function MetricsComparisonChart({ chart }: { chart: MetricsChart }) {
 
   return (
     <figure style={{ margin: 0 }}>
-      <figcaption style={{ fontSize: '0.8rem', fontWeight: 600, color: '#333', marginBottom: '0.2rem' }}>
+      <figcaption style={{ fontSize: '0.8rem', fontWeight: 600, color: COLOR.text, marginBottom: '0.2rem' }}>
         {chart.title}
       </figcaption>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.9rem', fontSize: '0.74rem', color: '#555' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.9rem', fontSize: '0.74rem', color: COLOR.subtle }}>
         <span>
           <svg width={18} height={8} aria-hidden="true" style={{ verticalAlign: 'middle' }}>
             <line x1={0} y1={4} x2={18} y2={4} stroke={MAAS_COLOR} strokeWidth={2} />
@@ -101,9 +102,9 @@ export function MetricsComparisonChart({ chart }: { chart: MetricsChart }) {
           <path d={line(1)} fill="none" stroke={MAAS_COLOR} strokeWidth={2} strokeLinejoin="round" />
           {hover && (
             <g pointerEvents="none">
-              <line x1={sx(hover[0])} x2={sx(hover[0])} y1={M.top} y2={H - M.bottom} stroke="#999" />
-              <circle cx={sx(hover[0])} cy={sy(hover[1])} r={4} fill={MAAS_COLOR} stroke="#fff" strokeWidth={2} />
-              <circle cx={sx(hover[0])} cy={sy(hover[2])} r={4} fill={HARNESS_COLOR} stroke="#fff" strokeWidth={2} />
+              <line x1={sx(hover[0])} x2={sx(hover[0])} y1={M.top} y2={H - M.bottom} stroke={COLOR.muted} />
+              <circle cx={sx(hover[0])} cy={sy(hover[1])} r={4} fill={MAAS_COLOR} stroke={COLOR.surface} strokeWidth={2} />
+              <circle cx={sx(hover[0])} cy={sy(hover[2])} r={4} fill={HARNESS_COLOR} stroke={COLOR.surface} strokeWidth={2} />
             </g>
           )}
         </svg>
@@ -116,7 +117,7 @@ export function MetricsComparisonChart({ chart }: { chart: MetricsChart }) {
               transform: hoverLeftPct > 55 ? 'translateX(calc(-100% - 10px))' : 'translateX(10px)',
             }}
           >
-            <div style={{ color: '#666' }}>at {fmt(hover[0])}s</div>
+            <div style={{ color: COLOR.muted }}>at {fmt(hover[0])}s</div>
             <div>
               <strong>{fmt(hover[1])}</strong> {chart.maas_label.toLowerCase()}
             </div>

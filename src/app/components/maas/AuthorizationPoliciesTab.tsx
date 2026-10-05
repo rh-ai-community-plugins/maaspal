@@ -3,6 +3,7 @@ import { Button, Label, Spinner } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { getMaasAuthPolicies, type MaasAuthPolicy } from '../../api/client';
 import { MaasUnavailableNotice } from './MaasUnavailableNotice';
+import { COLOR } from '../../styles/colors';
 
 // Code-split: RawYamlModal pulls in Monaco (see monacoSetup.ts) — same
 // reasoning as every other maas/ tab's lazy-loading, so Monaco's bundle is
@@ -25,7 +26,7 @@ function ModelRefBadge({ modelExists, modelReady }: { modelExists: boolean | nul
     );
   }
   if (modelExists === null) {
-    return <span style={{ fontSize: '0.75rem', color: '#888' }}>model: unknown</span>;
+    return <span style={{ fontSize: '0.75rem', color: COLOR.muted }}>model: unknown</span>;
   }
   if (modelReady === false) {
     return (
@@ -38,13 +39,13 @@ function ModelRefBadge({ modelExists, modelReady }: { modelExists: boolean | nul
 }
 
 function ModelRefList({ policy }: { policy: MaasAuthPolicy }) {
-  if (policy.model_refs.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (policy.model_refs.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {policy.model_refs.map((m) => (
         <div key={`${m.namespace}/${m.name}`} style={{ marginBottom: '0.3rem' }}>
           <span style={{ fontWeight: 600 }}>{m.display_name}</span>{' '}
-          <span style={{ fontFamily: 'monospace', fontSize: '0.75rem', color: '#888' }}>
+          <span style={{ fontFamily: 'monospace', fontSize: '0.75rem', color: COLOR.muted }}>
             ({m.namespace}/{m.name})
           </span>{' '}
           <ModelRefBadge modelExists={m.model_exists} modelReady={m.model_ready} />
@@ -57,7 +58,7 @@ function ModelRefList({ policy }: { policy: MaasAuthPolicy }) {
 function SubjectChips({ owner }: { owner: MaasAuthPolicy['owner'] }) {
   const groups = owner.groups ?? [];
   const users = owner.users ?? [];
-  if (groups.length === 0 && users.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (groups.length === 0 && users.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {groups.map((g) => (
@@ -118,7 +119,7 @@ export function AuthorizationPoliciesTab() {
         <Tbody>
           {items.length === 0 ? (
             <Tr>
-              <Td colSpan={5} style={{ color: '#888', fontStyle: 'italic' }}>
+              <Td colSpan={5} className="maaspal-empty">
                 No authorization policies found.
               </Td>
             </Tr>
@@ -127,7 +128,7 @@ export function AuthorizationPoliciesTab() {
               <Tr key={`${policy.namespace}/${policy.name}`}>
                 <Td>
                   <div style={{ fontWeight: 700 }}>{policy.display_name}</div>
-                  <div style={{ fontSize: '0.78rem', color: '#888' }}>{policy.description}</div>
+                  <div style={{ fontSize: '0.78rem', color: COLOR.muted }}>{policy.description}</div>
                 </Td>
                 <Td>
                   <Label isCompact color={policy.ready ? 'green' : 'grey'}>

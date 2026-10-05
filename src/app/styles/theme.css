@@ -6,7 +6,25 @@
    or to maaspal-* classes, so nothing leaks into the RHOAI dashboard host. */
 .maaspal-plugin {
   padding: 0 0 1.5rem;
+  color: var(--maaspal-text);
 }
+
+/* Inline code (resource names, ids): the host's code colour isn't set for
+   dark mode, so it vanished there. */
+/* Not inside code blocks or the log block, which style their own text. */
+.maaspal-plugin :not(pre) > code:not([class*='pf-v6-c-code-block']):not(.maaspal-logs-panel__preview),
+.maaspal-modal :not(pre) > code:not([class*='pf-v6-c-code-block']) {
+  color: var(--maaspal-text);
+  background: var(--maaspal-surface-raised);
+  border-radius: 3px;
+  padding: 0 0.25em;
+}
+
+/* ---------- Text utilities (see docs/design/colors-and-components.md) ---------- */
+.maaspal-text-subtle { color: var(--maaspal-text-subtle); }
+.maaspal-text-muted { color: var(--maaspal-text-muted); }
+/* "No X found", "Waiting for …": muted italic. */
+.maaspal-empty { color: var(--maaspal-text-muted); font-style: italic; }
 
 /* ---------- Page header (the dashboard owns the masthead and sidebar) ---------- */
 .maaspal-page-header {
@@ -38,7 +56,7 @@
 
 .maaspal-page-intro__text {
   margin: 0.25rem 0 0;
-  color: var(--pf-t--global--text--color--subtle);
+  color: var(--maaspal-text-subtle);
 }
 
 /* ---------- Primary button — red ---------- */
@@ -46,13 +64,13 @@
    .maaspal-modal themselves. */
 .maaspal-plugin .pf-v6-c-button.pf-m-primary,
 .maaspal-modal .pf-v6-c-button.pf-m-primary {
-  --pf-v6-c-button--m-primary--BackgroundColor: #c62828;
+  --pf-v6-c-button--m-primary--BackgroundColor: var(--maaspal-accent);
   /* The dark theme's default primary text colour is dark, unreadable on red. */
-  --pf-v6-c-button--m-primary--Color: #fff;
-  --pf-v6-c-button--m-primary--hover--Color: #fff;
-  --pf-v6-c-button--m-primary--clicked--Color: #fff;
-  --pf-v6-c-button--m-primary--hover--BackgroundColor: #b71c1c;
-  --pf-v6-c-button--m-primary--clicked--BackgroundColor: #9b1818;
+  --pf-v6-c-button--m-primary--Color: var(--maaspal-on-accent);
+  --pf-v6-c-button--m-primary--hover--Color: var(--maaspal-on-accent);
+  --pf-v6-c-button--m-primary--clicked--Color: var(--maaspal-on-accent);
+  --pf-v6-c-button--m-primary--hover--BackgroundColor: var(--maaspal-accent-hover);
+  --pf-v6-c-button--m-primary--clicked--BackgroundColor: var(--maaspal-accent-active);
 }
 
 /* ---------- Scenario catalog: filter rail + card gallery ---------- */
@@ -89,24 +107,24 @@
   border: 0;
   border-left: 3px solid transparent;
   background: none;
-  color: var(--pf-t--global--text--color--regular);
+  color: var(--maaspal-text);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .maaspal-catalog__category:hover {
-  background: var(--pf-t--global--background--color--secondary--hover);
+  background: var(--maaspal-hover);
 }
 
 .maaspal-catalog__category[aria-current='true'] {
-  border-left-color: #c62828;
-  background: var(--pf-t--global--background--color--secondary--default);
+  border-left-color: var(--maaspal-accent);
+  background: var(--maaspal-surface-raised);
   font-weight: 600;
 }
 
 .maaspal-catalog__count {
-  color: var(--pf-t--global--text--color--subtle);
+  color: var(--maaspal-text-subtle);
   font-weight: 400;
 }
 
@@ -125,28 +143,28 @@
 
 .maaspal-catalog__blurb {
   margin: 0 0 0.75rem;
-  color: var(--pf-t--global--text--color--subtle);
+  color: var(--maaspal-text-subtle);
   font-size: 0.85rem;
 }
 
 .maaspal-catalog-card {
   cursor: pointer;
-  border-top: 3px solid #c62828;
+  border-top: 3px solid var(--maaspal-accent);
   transition: box-shadow 0.15s ease, transform 0.1s ease;
 }
 
 .maaspal-catalog-card[data-custom='true'] {
-  border-top-color: #8476d1;
+  border-top-color: var(--maaspal-custom);
 }
 
 .maaspal-catalog-card:hover {
-  box-shadow: 0 4px 14px rgba(198, 40, 40, 0.18);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--maaspal-accent) 22%, transparent);
   transform: translateY(-1px);
 }
 
 .maaspal-catalog-card__summary {
   margin: 0;
-  color: var(--pf-t--global--text--color--subtle);
+  color: var(--maaspal-text-subtle);
   font-size: 0.85rem;
   line-height: 1.45;
   display: -webkit-box;
@@ -164,7 +182,7 @@
 
 .maaspal-catalog__note {
   margin: 2rem 0 0;
-  color: var(--pf-t--global--text--color--subtle);
+  color: var(--maaspal-text-subtle);
   font-size: 0.8rem;
 }
 
@@ -187,11 +205,11 @@
     gap: 0.4rem;
     width: auto;
     padding: 0.2rem 0.7rem;
-    border: 1px solid var(--pf-t--global--border--color--default);
+    border: 1px solid var(--maaspal-border);
     border-radius: 999px;
   }
   .maaspal-catalog__category[aria-current='true'] {
-    border-color: #c62828;
+    border-color: var(--maaspal-accent);
   }
 }
 
@@ -202,13 +220,13 @@
 
 /* ---------- Log block (dark terminal look) ---------- */
 .maaspal-log-block .pf-v6-c-code-block {
-  background: #1a1a1a !important;
-  border: 1px solid #2a2a2a;
+  background: var(--maaspal-log-bg) !important;
+  border: 1px solid var(--maaspal-log-border);
   border-radius: 6px;
 }
 
 .maaspal-log-block .pf-v6-c-code-block__content {
-  color: #d4d4d4 !important;
+  color: var(--maaspal-log-text) !important;
   font-family: 'Cascadia Code', 'Fira Code', 'Menlo', 'Consolas', monospace;
   font-size: 0.82rem;
   line-height: 1.6;
@@ -234,26 +252,26 @@
 }
 
 .maaspal-stream-status--connecting .maaspal-stream-status__dot {
-  background: #f0a500;
+  background: var(--maaspal-warning);
   animation: maaspal-pulse 1.2s infinite;
 }
-.maaspal-stream-status--connecting { color: #f0a500; }
+.maaspal-stream-status--connecting { color: var(--maaspal-warning); }
 
 .maaspal-stream-status--streaming .maaspal-stream-status__dot {
-  background: #0d6efd;
+  background: var(--maaspal-info);
   animation: maaspal-pulse 0.8s infinite;
 }
-.maaspal-stream-status--streaming { color: #6ea8fe; }
+.maaspal-stream-status--streaming { color: var(--maaspal-info); }
 
 .maaspal-stream-status--completed .maaspal-stream-status__dot {
-  background: #3e8a3e;
+  background: var(--maaspal-success);
 }
-.maaspal-stream-status--completed { color: #75c475; }
+.maaspal-stream-status--completed { color: var(--maaspal-success); }
 
 .maaspal-stream-status--error .maaspal-stream-status__dot {
-  background: #c62828;
+  background: var(--maaspal-danger);
 }
-.maaspal-stream-status--error { color: #ef9a9a; }
+.maaspal-stream-status--error { color: var(--maaspal-danger); }
 
 @keyframes maaspal-pulse {
   0%, 100% { opacity: 1; }
@@ -263,13 +281,13 @@
 /* ---------- Assertion cards ---------- */
 .maaspal-assertion-card {
   border-radius: 6px;
-  border: 1px solid #ddd;
+  border: 1px solid var(--maaspal-border-subtle);
   padding: 0.75rem 1rem;
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  border-top: 3px solid var(--assertion-color, #6c757d);
-  background: var(--assertion-bg, #f8f8f8);
+  border-top: 3px solid var(--assertion-color, var(--maaspal-neutral));
+  background: var(--assertion-bg, var(--maaspal-surface-raised));
   transition: border-color 0.25s ease;
 }
 
@@ -278,19 +296,19 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #555;
+  color: var(--maaspal-text-subtle);
 }
 
 .maaspal-assertion-card__value {
   font-size: 1.7rem;
   font-weight: 800;
   line-height: 1.1;
-  color: var(--assertion-color, #444);
+  color: var(--assertion-color, var(--maaspal-text-subtle));
 }
 
 .maaspal-assertion-card__expr {
   font-size: 0.78rem;
-  color: #888;
+  color: var(--maaspal-text-muted);
   font-family: 'Cascadia Code', 'Fira Code', monospace;
 }
 
@@ -299,18 +317,12 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--assertion-color, #6c757d);
+  color: var(--assertion-color, var(--maaspal-neutral));
   display: flex;
   align-items: center;
   gap: 0.3rem;
   margin-top: 0.2rem;
 }
-
-/* ---------- Run history status ---------- */
-.maaspal-status-pass  { --pf-v6-c-label--BackgroundColor: #e6f4ea; color: #2e7d32 !important; }
-.maaspal-status-fail  { --pf-v6-c-label--BackgroundColor: #fdecea; color: #c62828 !important; }
-.maaspal-status-run   { --pf-v6-c-label--BackgroundColor: #e8f0fe; color: #1565c0 !important; }
-.maaspal-status-pend  { --pf-v6-c-label--BackgroundColor: #f5f5f5; color: #616161 !important; }
 
 /* ---------- Run detail back bar ---------- */
 .maaspal-run-detail-bar {
@@ -318,7 +330,7 @@
   align-items: center;
   gap: 1.5rem;
   padding: 0.75rem 0;
-  border-bottom: 1px solid #e0e0e0;
+  border-bottom: 1px solid var(--maaspal-border-subtle);
   margin-bottom: 1rem;
 }
 
@@ -337,11 +349,11 @@
 
 .maaspal-run-detail-meta__item {
   font-size: 0.82rem;
-  color: #555;
+  color: var(--maaspal-text-subtle);
 }
 
 .maaspal-run-detail-meta__item strong {
-  color: #111;
+  color: var(--maaspal-text);
 }
 
 /* ---------- Section headings ---------- */
@@ -350,7 +362,7 @@
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--pf-t--global--text--color--subtle);
+  color: var(--maaspal-text-subtle);
   margin-bottom: 0.6rem;
 }
 
@@ -360,9 +372,9 @@
   bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
-  background: #1a1a2e;
-  color: #6ea8fe;
-  border: 1px solid #1565c0;
+  background: var(--maaspal-info);
+  color: var(--maaspal-surface);
+  border: 1px solid var(--maaspal-info);
   border-radius: 20px;
   padding: 0.3rem 0.9rem;
   font-size: 0.78rem;
@@ -374,9 +386,7 @@
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .maaspal-log-newlines-badge:hover {
-  background: #0d1b38;
-  border-color: #90caf9;
-  color: #90caf9;
+  background: color-mix(in srgb, var(--maaspal-info) 85%, var(--maaspal-text));
 }
 
 /* ---------- Task progress pipeline ---------- */
@@ -387,12 +397,12 @@
   gap: 0.25rem;
   padding: 0.75rem 0;
   margin-bottom: 0.75rem;
-  border-bottom: 1px solid #e0e0e0;
+  border-bottom: 1px solid var(--maaspal-border-subtle);
 }
 
 .maaspal-task-pipeline__arrow {
   font-size: 1rem;
-  color: #bbb;
+  color: var(--maaspal-text-muted);
   align-self: center;
   flex-shrink: 0;
 }
@@ -403,31 +413,31 @@
   gap: 0.2rem;
   padding: 0.4rem 0.75rem;
   border-radius: 6px;
-  border: 1.5px solid var(--task-color, #9e9e9e);
-  background: color-mix(in srgb, var(--task-color, #9e9e9e) 8%, white);
+  border: 1.5px solid var(--task-color, var(--maaspal-neutral));
+  background: color-mix(in srgb, var(--task-color, var(--maaspal-neutral)) 8%, var(--maaspal-surface));
   min-width: 120px;
   transition: background 0.3s ease, border-color 0.3s ease;
 }
 
 .maaspal-task-chip--done {
-  background: #e8f5e9;
+  background: var(--maaspal-success-bg);
 }
 
 .maaspal-task-chip--fail {
-  background: #fdecea;
+  background: var(--maaspal-danger-bg);
 }
 
 .maaspal-task-chip--running {
-  background: #e8f0fe;
+  background: var(--maaspal-info-bg);
 }
 
 .maaspal-task-chip--cancelled {
-  background: #fff3e0;
+  background: var(--maaspal-warning-bg);
 }
 
 .maaspal-task-chip__icon {
   font-size: 0.9rem;
-  color: var(--task-color, #9e9e9e);
+  color: var(--task-color, var(--maaspal-neutral));
   line-height: 1;
 }
 
@@ -440,8 +450,8 @@
   display: inline-block;
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(21, 101, 192, 0.25);
-  border-top-color: #1565c0;
+  border: 2px solid color-mix(in srgb, var(--maaspal-info) 25%, transparent);
+  border-top-color: var(--maaspal-info);
   border-radius: 50%;
   animation: maaspal-spin 0.75s linear infinite;
   flex-shrink: 0;
@@ -450,13 +460,13 @@
 .maaspal-task-chip__name {
   font-size: 0.78rem;
   font-weight: 600;
-  color: #333;
+  color: var(--maaspal-text);
   white-space: nowrap;
 }
 
 .maaspal-task-chip__duration {
   font-size: 0.7rem;
-  color: #888;
+  color: var(--maaspal-text-muted);
   font-family: 'Cascadia Code', 'Fira Code', monospace;
   white-space: nowrap;
 }
@@ -470,7 +480,7 @@
 
 .maaspal-task-chip__progress-bar {
   height: 4px;
-  background: #e0e0e0;
+  background: var(--maaspal-border-subtle);
   border-radius: 2px;
   overflow: hidden;
   min-width: 80px;
@@ -478,14 +488,14 @@
 
 .maaspal-task-chip__progress-fill {
   height: 100%;
-  background: var(--task-color, #1565c0);
+  background: var(--task-color, var(--maaspal-info));
   border-radius: 2px;
   transition: width 0.3s ease;
 }
 
 .maaspal-task-chip__progress-label {
   font-size: 0.7rem;
-  color: #888;
+  color: var(--maaspal-text-muted);
   font-family: 'Cascadia Code', 'Fira Code', monospace;
 }
 
@@ -500,7 +510,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 2px solid #ddd;
+  border-bottom: 2px solid var(--maaspal-border-subtle);
   padding-bottom: 0.3rem;
   margin-bottom: 0.1rem;
 }
@@ -510,7 +520,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  color: #444;
+  color: var(--maaspal-text-subtle);
 }
 
 .maaspal-assertion-group__status {
@@ -546,18 +556,18 @@
 .maaspal-config-form__label {
   font-size: 0.8rem;
   font-weight: 600;
-  color: #444;
+  color: var(--maaspal-text-subtle);
 }
 
 /* ---------- Assertion card: target, description, details ---------- */
 .maaspal-assertion-card__target {
   font-size: 0.78rem;
-  color: #555;
+  color: var(--maaspal-text-subtle);
 }
 
 .maaspal-assertion-card__desc {
   font-size: 0.74rem;
-  color: #777;
+  color: var(--maaspal-text-muted);
   line-height: 1.35;
 }
 
@@ -567,7 +577,7 @@
   border: none;
   padding: 0;
   font-size: 0.72rem;
-  color: #1565c0;
+  color: var(--maaspal-info);
   cursor: pointer;
 }
 
@@ -599,15 +609,15 @@
 
 .maaspal-run-narrative__task {
   font-weight: 600;
-  color: #333;
+  color: var(--maaspal-text);
 }
 
 .maaspal-run-narrative__text {
-  color: #555;
+  color: var(--maaspal-text-subtle);
 }
 
 .maaspal-run-narrative__item--pending .maaspal-run-narrative__text {
-  color: #999;
+  color: var(--maaspal-text-muted);
 }
 
 @media (max-width: 640px) {
@@ -627,41 +637,41 @@
   padding: 0.85rem 1rem;
   margin: 0 0 1.25rem;
   border-radius: 6px;
-  border-left: 4px solid var(--verdict-color, #9e9e9e);
-  background: color-mix(in srgb, var(--verdict-color, #9e9e9e) 7%, white);
+  border-left: 4px solid var(--verdict-color, var(--maaspal-neutral));
+  background: color-mix(in srgb, var(--verdict-color, var(--maaspal-neutral)) 7%, var(--maaspal-surface));
 }
 
 .maaspal-verdict__icon {
   font-size: 1.25rem;
   line-height: 1.2;
-  color: var(--verdict-color, #9e9e9e);
+  color: var(--verdict-color, var(--maaspal-neutral));
 }
 
 .maaspal-verdict__text {
   font-size: 0.95rem;
-  color: #222;
+  color: var(--maaspal-text);
   line-height: 1.45;
 }
 
 .maaspal-verdict__checks {
   font-size: 0.78rem;
-  color: #666;
+  color: var(--maaspal-text-muted);
   margin-top: 0.15rem;
 }
 
 /* ---------- Run detail panels (traffic, resources, tables) ---------- */
 .maaspal-panel {
-  border: 1px solid #e3e3e3;
+  border: 1px solid var(--maaspal-border-subtle);
   border-radius: 6px;
   padding: 0.85rem 1rem;
-  background: #fff;
+  background: var(--maaspal-surface);
   margin-bottom: 1rem;
 }
 
 .maaspal-panel__title {
   font-size: 0.85rem;
   font-weight: 700;
-  color: #333;
+  color: var(--maaspal-text);
   margin: 0 0 0.6rem;
 }
 
@@ -676,19 +686,19 @@
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #777;
+  color: var(--maaspal-text-muted);
 }
 
 .maaspal-stat__value {
   font-size: 1.05rem;
   font-weight: 600;
-  color: #222;
+  color: var(--maaspal-text);
   font-variant-numeric: tabular-nums;
 }
 
 .maaspal-stat__sub {
   font-size: 0.72rem;
-  color: #888;
+  color: var(--maaspal-text-muted);
 }
 
 .maaspal-resource-list {
@@ -704,7 +714,7 @@
 .maaspal-resource-list__kind {
   display: inline-block;
   min-width: 8.5rem;
-  color: #777;
+  color: var(--maaspal-text-muted);
 }
 
 .maaspal-resource-list code {
@@ -721,7 +731,7 @@
 .maaspal-detail-table td {
   text-align: left;
   padding: 0.35rem 0.6rem 0.35rem 0;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--maaspal-border-subtle);
   vertical-align: top;
 }
 
@@ -729,7 +739,7 @@
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #777;
+  color: var(--maaspal-text-muted);
   font-weight: 600;
 }
 
@@ -748,7 +758,7 @@
   background: none;
   border: none;
   padding: 0;
-  color: #6a6e73;
+  color: var(--maaspal-text-muted);
   cursor: pointer;
   line-height: 1;
   font-size: 0.85rem;
@@ -756,7 +766,7 @@
 
 .maaspal-config-form__info:hover,
 .maaspal-config-form__info:focus-visible {
-  color: #1565c0;
+  color: var(--maaspal-info);
 }
 
 /* ---------- Run steps ("What happened") ---------- */
@@ -779,16 +789,16 @@
 
 .maaspal-steps__task {
   font-weight: 600;
-  color: #333;
+  color: var(--maaspal-text);
   margin-right: 0.6rem;
 }
 
 .maaspal-steps__text {
-  color: #555;
+  color: var(--maaspal-text-subtle);
 }
 
 .maaspal-steps__text--muted {
-  color: #999;
+  color: var(--maaspal-text-muted);
 }
 
 .maaspal-steps__resources {
@@ -802,7 +812,7 @@
 }
 
 .maaspal-steps__meta {
-  color: #777;
+  color: var(--maaspal-text-muted);
 }
 
 .maaspal-steps__status {
@@ -813,10 +823,10 @@
 
 /* ---------- Findings ---------- */
 .maaspal-finding {
-  border: 1px solid #c5d6ea;
-  border-left: 4px solid #1565c0;
+  border: 1px solid var(--maaspal-border-subtle);
+  border-left: 4px solid var(--maaspal-info);
   border-radius: 6px;
-  background: #f4f8fd;
+  background: var(--maaspal-info-bg);
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
 }
@@ -826,7 +836,7 @@
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #1565c0;
+  color: var(--maaspal-info);
   font-weight: 700;
 }
 
@@ -834,13 +844,13 @@
   margin: 0.15rem 0 0.25rem;
   font-size: 1.05rem;
   font-weight: 700;
-  color: #222;
+  color: var(--maaspal-text);
 }
 
 .maaspal-finding__text {
   margin: 0;
   font-size: 0.85rem;
-  color: #444;
+  color: var(--maaspal-text-subtle);
 }
 
 /* ---------- Compact traffic line ---------- */
@@ -849,17 +859,17 @@
   flex-wrap: wrap;
   gap: 0.25rem 0.75rem;
   font-size: 0.82rem;
-  color: #555;
+  color: var(--maaspal-text-subtle);
   padding: 0.5rem 0.75rem;
-  border: 1px solid #e3e3e3;
+  border: 1px solid var(--maaspal-border-subtle);
   border-radius: 6px;
-  background: #fff;
+  background: var(--maaspal-surface);
   margin-bottom: 0.5rem;
 }
 
 .maaspal-traffic-line__name {
   font-weight: 600;
-  color: #333;
+  color: var(--maaspal-text);
 }
 
 /* ---------- Charts ---------- */
@@ -872,12 +882,12 @@
 .maaspal-chart-tooltip {
   position: absolute;
   top: 4px;
-  background: #fff;
-  border: 1px solid #ddd;
+  background: var(--maaspal-surface-floating);
+  border: 1px solid var(--maaspal-border);
   border-radius: 4px;
   padding: 0.3rem 0.5rem;
   font-size: 0.75rem;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 6px var(--maaspal-shadow);
   pointer-events: none;
   white-space: nowrap;
 }
@@ -899,8 +909,8 @@
 .maaspal-logs-panel__preview {
   display: block;
   font-size: 0.78rem;
-  color: #555;
-  background: #f6f6f6;
+  color: var(--maaspal-text-subtle);
+  background: var(--maaspal-surface-raised);
   border-radius: 4px;
   padding: 0.35rem 0.6rem;
   white-space: nowrap;
@@ -913,8 +923,8 @@
   list-style: none;
   margin: 0 0 0.75rem;
   padding: 0.5rem 0.75rem;
-  border-left: 3px solid #d03b3b;
-  background: #fdf3f3;
+  border-left: 3px solid var(--maaspal-danger);
+  background: var(--maaspal-danger-bg);
   font-size: 0.8rem;
   display: flex;
   flex-direction: column;
@@ -922,18 +932,18 @@
 }
 
 .maaspal-error-samples__timing {
-  color: #6a6e73;
+  color: var(--maaspal-text-muted);
 }
 
 .maaspal-stages__retries {
   margin: 0 0 0.75rem;
   font-size: 0.8rem;
-  color: #6a6e73;
+  color: var(--maaspal-text-muted);
 }
 
 .maaspal-traffic-line__error {
   flex-basis: 100%;
-  color: #c62828;
+  color: var(--maaspal-danger);
   font-size: 0.78rem;
 }
 

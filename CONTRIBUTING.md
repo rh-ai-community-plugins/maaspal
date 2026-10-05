@@ -16,10 +16,14 @@ OpenShift AI Dashboard.
 3. Changes to scenarios, tasks or the run page: also check them against a live
    cluster (see "Verification" in `CLAUDE.md`), and record what you confirmed in
    `docs/architecture/empirical-verification-checklist.md`.
-4. Adding a scenario that should ship with MaaS:PAL: add its name to
+4. UI changes: use the colour tokens and components in
+   [`docs/design/colors-and-components.md`](docs/design/colors-and-components.md)
+   (no colour literals — a test enforces it), and check the change in both the
+   light and the dark dashboard theme.
+5. Adding a scenario that should ship with MaaS:PAL: add its name to
    `BUILTIN_SCENARIOS` in `bff/api/routes/scenarios.py`, or the catalog labels
    it Custom.
-5. Submit a pull request with a clear description of the change.
+6. Submit a pull request with a clear description of the change.
 
 ## Reporting Issues
 

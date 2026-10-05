@@ -1,37 +1,14 @@
 import { useState } from 'react';
 import type { AssertionState, TaskProgressEntry } from '../api/client';
 import { formatTaskName } from '../scenarioTitles';
+import { statusStyle } from '../status';
+import { COLOR, toneBg, toneColor } from '../styles/colors';
 
 interface Props {
   assertions: AssertionState[];
   taskProgress: TaskProgressEntry[];
 }
 
-const ASSERTION_COLORS: Record<AssertionState['status'], string> = {
-  PENDING: '#9e9e9e',
-  PASSING: '#2e7d32',
-  FAILING: '#c62828',
-};
-
-const ASSERTION_BG: Record<AssertionState['status'], string> = {
-  PENDING: '#f5f5f5',
-  PASSING: '#f1f8f1',
-  FAILING: '#fdf3f3',
-};
-
-const STATUS_ICON: Record<AssertionState['status'], string> = {
-  PENDING: '○',
-  PASSING: '✓',
-  FAILING: '✗',
-};
-
-const TASK_STATUS_COLOR: Record<TaskProgressEntry['status'], string> = {
-  PENDING: '#9e9e9e',
-  RUNNING: '#1565c0',
-  DONE: '#2e7d32',
-  FAIL: '#c62828',
-  CANCELLED: '#b26a00',
-};
 
 function formatValue(v: number | null): string {
   if (v === null) return '—';
@@ -58,8 +35,9 @@ function formatName(name: string): string {
 
 
 function AssertionCard({ a, muted }: { a: AssertionState; muted: boolean }) {
-  const color = ASSERTION_COLORS[a.status];
-  const bg = ASSERTION_BG[a.status];
+  const { tone, icon } = statusStyle(a.status);
+  const color = toneColor(tone);
+  const bg = toneBg(tone);
   const [showDetails, setShowDetails] = useState(false);
   return (
     <div
@@ -96,7 +74,7 @@ function AssertionCard({ a, muted }: { a: AssertionState; muted: boolean }) {
         </>
       )}
       <span className="maaspal-assertion-card__status">
-        <span>{STATUS_ICON[a.status]}</span>
+        <span>{icon}</span>
         <span>{a.status}</span>
       </span>
     </div>
@@ -114,7 +92,7 @@ function AssertionGroup({
   assertions: AssertionState[];
   muted: boolean;
 }) {
-  const borderColor = taskStatus ? TASK_STATUS_COLOR[taskStatus] : '#bbb';
+  const borderColor = taskStatus ? toneColor(statusStyle(taskStatus).tone) : COLOR.borderSubtle;
   const statusLabel = taskStatus
     ? taskStatus.charAt(0) + taskStatus.slice(1).toLowerCase()
     : null;
@@ -149,7 +127,7 @@ export function AssertionPanel({ assertions, taskProgress }: Props) {
     return (
       <div>
         <p className="maaspal-section-heading">Assertions</p>
-        <p style={{ color: '#aaa', fontSize: '0.85rem', fontStyle: 'italic' }}>
+        <p className="maaspal-empty" style={{ fontSize: '0.85rem' }}>
           Waiting for assertion data…
         </p>
       </div>

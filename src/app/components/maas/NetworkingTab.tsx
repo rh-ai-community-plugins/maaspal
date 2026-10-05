@@ -8,6 +8,7 @@ import {
   type MaasHttpRoute,
 } from '../../api/client';
 import { MaasUnavailableNotice } from './MaasUnavailableNotice';
+import { COLOR } from '../../styles/colors';
 
 const RawYamlModal = lazy(() =>
   import('../RawYamlModal').then((m) => ({ default: m.RawYamlModal })),
@@ -76,7 +77,7 @@ export function NetworkingTab() {
           <Tbody>
             {!gateways || gateways.length === 0 ? (
               <Tr>
-                <Td colSpan={5} style={{ color: '#888', fontStyle: 'italic' }}>
+                <Td colSpan={5} className="maaspal-empty">
                   No Gateway objects found.
                 </Td>
               </Tr>
@@ -130,7 +131,7 @@ export function NetworkingTab() {
           <Tbody>
             {!routes || routes.length === 0 ? (
               <Tr>
-                <Td colSpan={5} style={{ color: '#888', fontStyle: 'italic' }}>
+                <Td colSpan={5} className="maaspal-empty">
                   No HTTPRoute objects found.
                 </Td>
               </Tr>
@@ -143,17 +144,17 @@ export function NetworkingTab() {
                     {route.parent_gateway ? (
                       <>
                         <span style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{route.parent_gateway}</span>
-                        <div style={{ fontSize: '0.72rem', color: '#888' }}>{route.parent_gateway_namespace}</div>
+                        <div style={{ fontSize: '0.72rem', color: COLOR.muted }}>{route.parent_gateway_namespace}</div>
                       </>
                     ) : (
-                      <span style={{ color: '#888' }}>—</span>
+                      <span className="maaspal-text-muted">—</span>
                     )}
                   </Td>
                   <Td>
                     {route.owning_model ? (
                       <Label isCompact color="blue">{route.owning_model}</Label>
                     ) : (
-                      <span style={{ color: '#888' }}>—</span>
+                      <span className="maaspal-text-muted">—</span>
                     )}
                   </Td>
                   <Td>

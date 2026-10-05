@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import type { TrafficOutcome, TrafficPoint } from '../api/client';
+import { COLOR } from '../styles/colors';
 
 // Cumulative successful tokens over time for one or more send_requests
 // bursts, with each non-OK request marked where it happened and the
@@ -9,11 +10,11 @@ import type { TrafficOutcome, TrafficPoint } from '../api/client';
 // starts from 0 again (a new window or a different user's budget), and the
 // time between them is shaded. Hand-rolled SVG (no chart library in this app).
 
-const LINE_COLOR = '#1565c0'; // the app's own running/info blue — one measure, named by the title
-const GRID_COLOR = '#ececec';
-const AXIS_TEXT = '#777';
-const LIMIT_COLOR = '#555';
-const GAP_FILL = '#f2f2f2';
+const LINE_COLOR = COLOR.chart.series; // the app's own running/info blue — one measure, named by the title
+const GRID_COLOR = COLOR.chart.grid;
+const AXIS_TEXT = COLOR.chart.axis;
+const LIMIT_COLOR = COLOR.chart.reference;
+const GAP_FILL = COLOR.chart.gap;
 
 // Reserved status colours (dataviz reference palette), each paired with its
 // own marker shape and a text label — colour never carries the meaning alone.
@@ -21,11 +22,11 @@ const OUTCOMES: Record<
   Exclude<TrafficOutcome, 'ok'>,
   { label: string; color: string; shape: 'circle' | 'square' | 'cross' | 'diamond' }
 > = {
-  throttled: { label: 'Throttled (429)', color: '#ec835a', shape: 'circle' },
-  denied: { label: 'Denied (401/403)', color: '#d03b3b', shape: 'square' },
-  not_found: { label: 'Not found (404)', color: '#d03b3b', shape: 'diamond' },
-  server_error: { label: 'Server error (5xx)', color: '#d03b3b', shape: 'cross' },
-  error: { label: 'Other error', color: '#d03b3b', shape: 'cross' },
+  throttled: { label: 'Throttled (429)', color: COLOR.chart.throttled, shape: 'circle' },
+  denied: { label: 'Denied (401/403)', color: COLOR.chart.error, shape: 'square' },
+  not_found: { label: 'Not found (404)', color: COLOR.chart.error, shape: 'diamond' },
+  server_error: { label: 'Server error (5xx)', color: COLOR.chart.error, shape: 'cross' },
+  error: { label: 'Other error', color: COLOR.chart.error, shape: 'cross' },
 };
 const OK_LABEL = 'OK';
 
@@ -70,7 +71,7 @@ function Marker({ x, y, outcome }: { x: number; y: number; outcome: Exclude<Traf
   const { color, shape } = OUTCOMES[outcome];
   // 2px surface ring keeps overlapping markers legible against the line.
   if (shape === 'square') {
-    return <rect x={x - 4} y={y - 4} width={8} height={8} rx={1.5} fill={color} stroke="#fff" strokeWidth={2} />;
+    return <rect x={x - 4} y={y - 4} width={8} height={8} rx={1.5} fill={color} stroke={COLOR.surface} strokeWidth={2} />;
   }
   if (shape === 'diamond') {
     return (
@@ -80,7 +81,7 @@ function Marker({ x, y, outcome }: { x: number; y: number; outcome: Exclude<Traf
         width={8}
         height={8}
         fill={color}
-        stroke="#fff"
+        stroke={COLOR.surface}
         strokeWidth={2}
         transform={`rotate(45 ${x} ${y})`}
       />
@@ -94,7 +95,7 @@ function Marker({ x, y, outcome }: { x: number; y: number; outcome: Exclude<Traf
       </g>
     );
   }
-  return <circle cx={x} cy={y} r={4.5} fill={color} stroke="#fff" strokeWidth={2} />;
+  return <circle cx={x} cy={y} r={4.5} fill={color} stroke={COLOR.surface} strokeWidth={2} />;
 }
 
 function LegendSwatch({ outcome }: { outcome: Exclude<TrafficOutcome, 'ok'> }) {
@@ -183,10 +184,10 @@ export function TrafficChart({ timeline, segments, limit, title = 'Tokens served
 
   return (
     <figure style={{ margin: 0 }}>
-      <figcaption style={{ fontSize: '0.8rem', fontWeight: 600, color: '#333', marginBottom: '0.25rem' }}>
+      <figcaption style={{ fontSize: '0.8rem', fontWeight: 600, color: COLOR.text, marginBottom: '0.25rem' }}>
         {title}
       </figcaption>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.9rem', fontSize: '0.74rem', color: '#555', marginBottom: '0.25rem' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.9rem', fontSize: '0.74rem', color: COLOR.subtle, marginBottom: '0.25rem' }}>
         {[...present].map((o) => (
           <span key={o}>
             <LegendSwatch outcome={o} /> {OUTCOMES[o].label}
@@ -203,7 +204,7 @@ export function TrafficChart({ timeline, segments, limit, title = 'Tokens served
         {gaps.length > 0 && (
           <span>
             <svg width={14} height={10} aria-hidden="true" style={{ verticalAlign: 'middle' }}>
-              <rect width={14} height={10} fill={GAP_FILL} stroke="#ddd" />
+              <rect width={14} height={10} fill={GAP_FILL} stroke={COLOR.border} />
             </svg>{' '}
             Waiting between bursts
           </span>
@@ -296,7 +297,7 @@ export function TrafficChart({ timeline, segments, limit, title = 'Tokens served
                   textAnchor={i === segs.length - 1 && i > 0 ? 'end' : 'start'}
                   fontSize={11}
                   fontWeight={600}
-                  fill="#333"
+                  fill={COLOR.text}
                 >
                   {seg.label}
                 </text>
@@ -309,8 +310,8 @@ export function TrafficChart({ timeline, segments, limit, title = 'Tokens served
 
           {hover && (
             <g pointerEvents="none">
-              <line x1={sx(hover.x)} x2={sx(hover.x)} y1={M.top} y2={H - M.bottom} stroke="#999" strokeWidth={1} />
-              <circle cx={sx(hover.x)} cy={sy(hover.tokens)} r={4} fill={LINE_COLOR} stroke="#fff" strokeWidth={2} />
+              <line x1={sx(hover.x)} x2={sx(hover.x)} y1={M.top} y2={H - M.bottom} stroke={COLOR.muted} strokeWidth={1} />
+              <circle cx={sx(hover.x)} cy={sy(hover.tokens)} r={4} fill={LINE_COLOR} stroke={COLOR.surface} strokeWidth={2} />
             </g>
           )}
         </svg>
@@ -323,8 +324,8 @@ export function TrafficChart({ timeline, segments, limit, title = 'Tokens served
               transform: hoverLeftPct > 60 ? 'translateX(calc(-100% - 10px))' : 'translateX(10px)',
             }}
           >
-            <div style={{ fontWeight: 700, color: '#222' }}>{fmt(hover.tokens)} tokens</div>
-            <div style={{ color: '#666' }}>
+            <div style={{ fontWeight: 700, color: COLOR.text }}>{fmt(hover.tokens)} tokens</div>
+            <div style={{ color: COLOR.muted }}>
               {multi && segs[hover.segment].label ? `${segs[hover.segment].label} · ` : ''}
               at {fmt(hover.x)}s · {hover.outcome === 'ok' ? OK_LABEL : OUTCOMES[hover.outcome].label} ·{' '}
               {fmt(hover.latency)} ms

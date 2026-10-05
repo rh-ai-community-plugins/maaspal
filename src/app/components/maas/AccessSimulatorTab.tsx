@@ -27,6 +27,7 @@ import {
   type MaasSubscription,
 } from '../../api/client';
 import { MaasUnavailableNotice } from './MaasUnavailableNotice';
+import { COLOR } from '../../styles/colors';
 
 const POLL_INTERVAL_MS = 25000;
 
@@ -334,7 +335,7 @@ export function AccessSimulatorTab() {
 
   return (
     <>
-      <p style={{ color: '#555', marginBottom: '0.75rem' }}>
+      <p style={{ color: COLOR.subtle, marginBottom: '0.75rem' }}>
         Enter a candidate set of groups and/or users to see which subscription would win by
         priority for each model, and whether that set can actually reach it — the same resolution
         MaaS itself performs, computed here from live subscriptions and auth policies. Start typing
@@ -350,7 +351,7 @@ export function AccessSimulatorTab() {
       </div>
 
       {candidates.length === 0 ? (
-        <p style={{ color: '#888', fontStyle: 'italic' }}>
+        <p className="maaspal-empty">
           Enter one or more group/user names above to simulate access resolution.
         </p>
       ) : (
@@ -368,7 +369,7 @@ export function AccessSimulatorTab() {
               <Tr key={modelKey(row.model.namespace, row.model.name)}>
                 <Td>
                   <div style={{ fontWeight: 700 }}>{row.model.display_name}</div>
-                  <div style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: '#888' }}>
+                  <div style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: COLOR.muted }}>
                     {row.model.namespace}
                   </div>
                 </Td>
@@ -379,19 +380,19 @@ export function AccessSimulatorTab() {
                         {row.winningSubscription.display_name} (p{row.winningSubscription.priority ?? '—'})
                       </Label>
                       {row.matchingSubscriptions.length > 1 && (
-                        <div style={{ fontSize: '0.72rem', color: '#888', marginTop: '0.2rem' }}>
+                        <div style={{ fontSize: '0.72rem', color: COLOR.muted, marginTop: '0.2rem' }}>
                           beat {row.matchingSubscriptions.length - 1} other matching subscription
                           {row.matchingSubscriptions.length > 2 ? 's' : ''}
                         </div>
                       )}
                     </>
                   ) : (
-                    <span style={{ color: '#888' }}>no quota for this group set</span>
+                    <span className="maaspal-text-muted">no quota for this group set</span>
                   )}
                 </Td>
                 <Td>
                   {row.matchingPolicies.length === 0 ? (
-                    <span style={{ color: '#888' }}>none</span>
+                    <span className="maaspal-text-muted">none</span>
                   ) : (
                     row.matchingPolicies.map((p) => (
                       <Label key={p.name} isCompact color="blue" style={{ marginRight: '0.3rem', marginBottom: '0.2rem' }}>

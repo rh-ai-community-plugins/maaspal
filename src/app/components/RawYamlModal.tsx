@@ -44,7 +44,7 @@ export function RawYamlModal({
           copyButtonSuccessTooltipText="Copied!"
         />
       ) : (
-        <p style={{ color: '#888', fontStyle: 'italic' }}>{emptyMessage}</p>
+        <p className="maaspal-empty">{emptyMessage}</p>
       )}
       </ModalBody>
       <ModalFooter>

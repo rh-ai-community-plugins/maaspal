@@ -1,0 +1,99 @@
+/* ============================================================
+   MaaS:PAL colour tokens — the only file allowed to hold colour literals.
+   See docs/design/colors-and-components.md for what each token is for.
+
+   - Neutrals (surfaces, text, borders) alias PatternFly's semantic tokens, so
+     panels match whatever surface the dashboard draws them on (page, modal,
+     popover) in both themes.
+   - Brand, status, label and chart colours are MaaS:PAL's own, with a value
+     per theme. Every text colour is at least 4.5:1 on the light (#fff, #f2f2f2)
+     and dark (#1f1f1f, #292929, #383838) surfaces.
+
+   Modals, popovers and tooltips render in document.body, outside
+   .maaspal-plugin, so they carry .maaspal-modal / .maaspal-popover to get the
+   tokens too. Dark values apply when the dashboard puts pf-v6-theme-dark on
+   <html>.
+   ============================================================ */
+
+.maaspal-plugin,
+.maaspal-modal,
+.maaspal-popover {
+  /* ---- Neutrals (follow the dashboard) ---- */
+  --maaspal-surface: var(--pf-t--global--background--color--primary--default, #fff);
+  --maaspal-surface-raised: var(--pf-t--global--background--color--secondary--default, #f2f2f2);
+  --maaspal-surface-floating: var(--pf-t--global--background--color--floating--default, #fff);
+  --maaspal-text: var(--pf-t--global--text--color--regular, #151515);
+  --maaspal-text-subtle: var(--pf-t--global--text--color--subtle, #4d4d4d);
+  --maaspal-border: var(--pf-t--global--border--color--default, #c7c7c7);
+  --maaspal-border-subtle: color-mix(in srgb, var(--maaspal-border) 55%, transparent);
+  --maaspal-hover: var(--pf-t--global--background--color--secondary--hover, #e0e0e0);
+  --maaspal-shadow: rgba(0, 0, 0, 0.12);
+
+  /* Quieter than text-subtle: hints, placeholders, "—", empty states. */
+  --maaspal-text-muted: #6a6e73;
+
+  /* ---- Brand ---- */
+  --maaspal-accent: #c62828; /* buttons, card stripes, active filter */
+  --maaspal-accent-hover: #b71c1c;
+  --maaspal-accent-active: #9b1818;
+  --maaspal-on-accent: #fff;
+
+  /* ---- Status: icon/stripe colour, text colour, tinted background ---- */
+  --maaspal-success: #2e7d32;
+  --maaspal-danger: #c62828;
+  --maaspal-warning: #a35200; /* also "cancelled" and "left in place" */
+  --maaspal-info: #1565c0; /* also "running" and links inside our own widgets */
+  --maaspal-neutral: #6a6e73; /* pending / not started */
+  --maaspal-success-bg: color-mix(in srgb, var(--maaspal-success) 10%, var(--maaspal-surface));
+  --maaspal-danger-bg: color-mix(in srgb, var(--maaspal-danger) 10%, var(--maaspal-surface));
+  --maaspal-warning-bg: color-mix(in srgb, var(--maaspal-warning) 10%, var(--maaspal-surface));
+  --maaspal-info-bg: color-mix(in srgb, var(--maaspal-info) 10%, var(--maaspal-surface));
+  --maaspal-neutral-bg: color-mix(in srgb, var(--maaspal-neutral) 8%, var(--maaspal-surface));
+
+  /* ---- Labels ---- */
+  --maaspal-custom: #6b4fbb; /* "Custom" scenarios */
+
+  /* ---- Charts ---- */
+  --maaspal-chart-series: var(--maaspal-info); /* the measured line (tokens, MaaS-reported) */
+  --maaspal-chart-reference: #555; /* harness-sent reference (dashed), limit line */
+  --maaspal-chart-grid: color-mix(in srgb, var(--maaspal-text) 10%, transparent);
+  --maaspal-chart-axis: var(--maaspal-text-muted);
+  --maaspal-chart-gap: color-mix(in srgb, var(--maaspal-text) 6%, transparent); /* shaded waits */
+  --maaspal-chart-throttled: #b04a12; /* 429 markers (circle) */
+  --maaspal-chart-error: var(--maaspal-danger); /* other failures (square/diamond/cross) */
+
+  /* ---- Log / terminal block: dark in both themes ---- */
+  --maaspal-log-bg: #1a1a1a;
+  --maaspal-log-border: #333;
+  --maaspal-log-text: #d4d4d4;
+}
+
+:root.pf-v6-theme-dark .maaspal-plugin,
+:root.pf-v6-theme-dark .maaspal-modal,
+:root.pf-v6-theme-dark .maaspal-popover {
+  --maaspal-shadow: rgba(0, 0, 0, 0.45);
+  --maaspal-text-muted: #a3a3a3;
+
+  /* Buttons keep the same red (white text is 5.6:1 on it); hover lightens. */
+  --maaspal-accent-hover: #d43a3a;
+  --maaspal-accent-active: #e04b4b;
+
+  --maaspal-success: #63c174;
+  --maaspal-danger: #f78a8a;
+  --maaspal-warning: #f0ab4b;
+  --maaspal-info: #7aaef0;
+  --maaspal-neutral: #a3a3a3;
+  --maaspal-success-bg: color-mix(in srgb, var(--maaspal-success) 14%, var(--maaspal-surface));
+  --maaspal-danger-bg: color-mix(in srgb, var(--maaspal-danger) 14%, var(--maaspal-surface));
+  --maaspal-warning-bg: color-mix(in srgb, var(--maaspal-warning) 14%, var(--maaspal-surface));
+  --maaspal-info-bg: color-mix(in srgb, var(--maaspal-info) 14%, var(--maaspal-surface));
+  --maaspal-neutral-bg: color-mix(in srgb, var(--maaspal-neutral) 10%, var(--maaspal-surface));
+
+  --maaspal-custom: #b3a3ee;
+
+  --maaspal-chart-reference: #b8b8b8;
+  --maaspal-chart-throttled: #f2925f;
+
+  --maaspal-log-bg: #151515;
+  --maaspal-log-border: #444;
+}

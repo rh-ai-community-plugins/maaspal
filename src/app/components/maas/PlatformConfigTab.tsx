@@ -3,6 +3,7 @@ import { Button, Card, CardBody, Label, Spinner } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { getMaasPlatform, type MaasPlatform } from '../../api/client';
 import { MaasUnavailableNotice } from './MaasUnavailableNotice';
+import { COLOR } from '../../styles/colors';
 
 const RawYamlModal = lazy(() =>
   import('../RawYamlModal').then((m) => ({ default: m.RawYamlModal })),
@@ -65,7 +66,7 @@ export function PlatformConfigTab() {
           <Tbody>
             {tenants.items.length === 0 ? (
               <Tr>
-                <Td colSpan={6} style={{ color: '#888', fontStyle: 'italic' }}>
+                <Td colSpan={6} className="maaspal-empty">
                   No Tenant objects found.
                 </Td>
               </Tr>
@@ -109,14 +110,14 @@ export function PlatformConfigTab() {
       {!dsc.available ? (
         <MaasUnavailableNotice reason={dsc.reason} />
       ) : !dsc.item ? (
-        <Card><CardBody style={{ color: '#888', fontStyle: 'italic' }}>No DataScienceCluster found.</CardBody></Card>
+        <Card><CardBody className="maaspal-empty">No DataScienceCluster found.</CardBody></Card>
       ) : (
         <Card>
           <CardBody>
             <Label isCompact color={dsc.item.maas_management_state === 'Managed' ? 'green' : 'red'}>
               MaaS: {dsc.item.maas_management_state ?? 'not configured'}
             </Label>
-            <div style={{ fontSize: '0.78rem', color: '#888', marginTop: '0.3rem', fontFamily: 'monospace' }}>
+            <div style={{ fontSize: '0.78rem', color: COLOR.muted, marginTop: '0.3rem', fontFamily: 'monospace' }}>
               {dsc.item.maas_field_path ?? 'no known MaaS field found on this DataScienceCluster'}
             </div>
             <Button
@@ -141,7 +142,7 @@ export function PlatformConfigTab() {
       {!odh.available ? (
         <MaasUnavailableNotice reason={odh.reason} />
       ) : !odh.item ? (
-        <Card><CardBody style={{ color: '#888', fontStyle: 'italic' }}>No OdhDashboardConfig found.</CardBody></Card>
+        <Card><CardBody className="maaspal-empty">No OdhDashboardConfig found.</CardBody></Card>
       ) : (
         <Card>
           <CardBody>

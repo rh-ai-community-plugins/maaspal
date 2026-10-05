@@ -3,6 +3,7 @@ import { Button, Label, Spinner } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { getMaasSubscriptions, type MaasSubscription } from '../../api/client';
 import { MaasUnavailableNotice } from './MaasUnavailableNotice';
+import { COLOR } from '../../styles/colors';
 
 // Code-split: RawYamlModal pulls in Monaco (see monacoSetup.ts) — same
 // reasoning as RunDetail.tsx's lazy-loading of RunSettingsModal, so Monaco's
@@ -21,7 +22,7 @@ const POLL_INTERVAL_MS = 25000;
 // since each maas/ tab is otherwise self-contained.
 function AuthPolicyBadge({ hasAuthPolicy }: { hasAuthPolicy: boolean | null }) {
   if (hasAuthPolicy === null) {
-    return <span style={{ fontSize: '0.75rem', color: '#888' }}>auth policy: unknown</span>;
+    return <span style={{ fontSize: '0.75rem', color: COLOR.muted }}>auth policy: unknown</span>;
   }
   return (
     <Label isCompact color={hasAuthPolicy ? 'green' : 'orange'}>
@@ -43,7 +44,7 @@ function ModelRefBadge({ modelExists, modelReady }: { modelExists: boolean | nul
     );
   }
   if (modelExists === null) {
-    return <span style={{ fontSize: '0.75rem', color: '#888' }}>model: unknown</span>;
+    return <span style={{ fontSize: '0.75rem', color: COLOR.muted }}>model: unknown</span>;
   }
   if (modelReady === false) {
     return (
@@ -56,14 +57,14 @@ function ModelRefBadge({ modelExists, modelReady }: { modelExists: boolean | nul
 }
 
 function ModelRefCoverageList({ sub }: { sub: MaasSubscription }) {
-  if (sub.model_refs.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (sub.model_refs.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {sub.model_refs.map((m) => (
         <div key={`${m.namespace}/${m.name}`} style={{ marginBottom: '0.5rem' }}>
           <div>
             <span style={{ fontWeight: 600 }}>{m.display_name}</span>{' '}
-            <span style={{ fontFamily: 'monospace', fontSize: '0.75rem', color: '#888' }}>
+            <span style={{ fontFamily: 'monospace', fontSize: '0.75rem', color: COLOR.muted }}>
               ({m.namespace}/{m.name})
             </span>
           </div>
@@ -85,7 +86,7 @@ function ModelRefCoverageList({ sub }: { sub: MaasSubscription }) {
 function OwnerChips({ owner }: { owner: MaasSubscription['owner'] }) {
   const groups = owner.groups ?? [];
   const users = owner.users ?? [];
-  if (groups.length === 0 && users.length === 0) return <span style={{ color: '#888' }}>—</span>;
+  if (groups.length === 0 && users.length === 0) return <span className="maaspal-text-muted">—</span>;
   return (
     <>
       {groups.map((g) => (
@@ -147,7 +148,7 @@ export function SubscriptionsTab() {
         <Tbody>
           {items.length === 0 ? (
             <Tr>
-              <Td colSpan={6} style={{ color: '#888', fontStyle: 'italic' }}>
+              <Td colSpan={6} className="maaspal-empty">
                 No subscriptions found.
               </Td>
             </Tr>
@@ -156,7 +157,7 @@ export function SubscriptionsTab() {
               <Tr key={`${sub.namespace}/${sub.name}`}>
                 <Td>
                   <div style={{ fontWeight: 700 }}>{sub.display_name}</div>
-                  <div style={{ fontSize: '0.78rem', color: '#888' }}>{sub.description}</div>
+                  <div style={{ fontSize: '0.78rem', color: COLOR.muted }}>{sub.description}</div>
                   {sub.priority_conflict && (
                     <Label isCompact color="orange" style={{ marginTop: '0.2rem' }}>
                       ⚠ priority conflict

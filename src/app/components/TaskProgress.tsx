@@ -1,26 +1,13 @@
 import { useEffect, useState } from 'react';
 import type { TaskProgressEntry } from '../api/client';
 import { formatTaskName } from '../scenarioTitles';
+import { statusStyle } from '../status';
+import { toneColor } from '../styles/colors';
 
 interface Props {
   tasks: TaskProgressEntry[];
 }
 
-const STATUS_ICON: Record<TaskProgressEntry['status'], string> = {
-  PENDING: '○',
-  RUNNING: '◎',
-  DONE: '✓',
-  FAIL: '✗',
-  CANCELLED: '⊘',
-};
-
-const STATUS_COLOR: Record<TaskProgressEntry['status'], string> = {
-  PENDING: '#9e9e9e',
-  RUNNING: '#1565c0',
-  DONE: '#2e7d32',
-  FAIL: '#c62828',
-  CANCELLED: '#b26a00',
-};
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -40,11 +27,6 @@ function useTick(active: boolean): void {
   }, [active]);
 }
 
-const ASSERTION_BADGE_COLOR: Record<string, string> = {
-  PASSING: '#2e7d32',
-  FAILING: '#c62828',
-  PENDING: '#9e9e9e',
-};
 
 
 export function TaskProgress({ tasks }: Props) {
@@ -56,7 +38,7 @@ export function TaskProgress({ tasks }: Props) {
     <>
     <div className="maaspal-task-pipeline">
       {tasks.map((task, i) => {
-        const color = STATUS_COLOR[task.status];
+        const color = toneColor(statusStyle(task.status).tone);
         const isRunning = task.status === 'RUNNING';
         const total = task.progress?.total ?? null;
         // A DONE task's bar is full only when its total was the plan (N of N
@@ -75,7 +57,7 @@ export function TaskProgress({ tasks }: Props) {
             : `${task.progress.current.toLocaleString()}${unit || ' sent'}`
           : null;
         const badgeColor = task.assertions_status
-          ? ASSERTION_BADGE_COLOR[task.assertions_status]
+          ? toneColor(statusStyle(task.assertions_status).tone)
           : null;
         const durationLabel =
           typeof task.duration_ms === 'number'
@@ -96,7 +78,7 @@ export function TaskProgress({ tasks }: Props) {
                 {isRunning ? (
                   <span className="maaspal-task-chip__spinner" />
                 ) : (
-                  <span className="maaspal-task-chip__icon">{STATUS_ICON[task.status]}</span>
+                  <span className="maaspal-task-chip__icon">{statusStyle(task.status).icon}</span>
                 )}
                 <span className="maaspal-task-chip__name">{formatTaskName(task.name)}</span>
                 {durationLabel && (
