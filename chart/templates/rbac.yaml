@@ -1,0 +1,72 @@
+# The harness ServiceAccount's own-namespace grants: run Jobs, follow their
+# pods' logs, and Stop them (patch suspends the Job — see api/k8s.py:stop_run).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "maaspal.fullname" . }}
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "maaspal.fullname" . }}
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "maaspal.serviceAccountName" . }}
+    namespace: {{ include "maaspal.namespace" . }}
+roleRef:
+  kind: Role
+  name: {{ include "maaspal.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+---
+# Who may use MaaS:PAL (api/auth.py, ADR-026). A virtual permission: nothing
+# serves this resource, so it grants no real cluster access — the BFF checks it
+# with a SelfSubjectAccessReview made with the dashboard user's own token.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "maaspal.fullname" . }}-user
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["maaspal.rh-ai-community-plugins.io"]
+    resources: ["harness"]
+    verbs: ["use"]
+{{- if or .Values.access.users .Values.access.groups }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "maaspal.fullname" . }}-user
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+subjects:
+  {{- range .Values.access.users }}
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ . | quote }}
+  {{- end }}
+  {{- range .Values.access.groups }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ . | quote }}
+  {{- end }}
+roleRef:
+  kind: Role
+  name: {{ include "maaspal.fullname" . }}-user
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

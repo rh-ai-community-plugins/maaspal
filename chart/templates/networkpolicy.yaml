@@ -1,0 +1,26 @@
+{{- if and .Values.bff.enabled .Values.networkPolicy.enabled }}
+# The BFF acts with the harness ServiceAccount's rights; only the RHOAI
+# dashboard (which forwards each user's token for the access check) should
+# reach it — not other pods in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "maaspal.fullname" . }}-bff
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "maaspal.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: bff
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dashboardNamespace }}
+      ports:
+        - port: {{ .Values.bff.service.targetPort }}
+          protocol: TCP
+{{- end }}

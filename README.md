@@ -1,16 +1,28 @@
 # MaaS:PAL
-The testing harness that fights for you (to destruction)
 
-MaaS:PAL tests a Red Hat OpenShift AI **Models as a Service (MaaS)** setup
-against a live cluster. It answers questions like "is my subscription's rate
-limit actually enforced?" or "does my subscription reach every model it
-covers?". It acts through MaaS's own user-facing APIs, the way a real user
-would.
+The testing harness that fights for you (to destruction).
 
-You pick a scenario in the web UI, adjust its settings and launch it. The run
-executes in the cluster as a Kubernetes Job, and its page shows what happened
-step by step: live progress, traffic charts, the checks, a plain-language
-verdict, and what the run created and cleaned up.
+MaaS:PAL is a community plugin for the **Red Hat OpenShift AI (RHOAI) Dashboard**
+that tests a **Models as a Service (MaaS)** setup on a live cluster. It answers
+questions like "is my subscription's rate limit actually enforced?" or "does my
+subscription reach every model it covers?". It acts through MaaS's own
+user-facing APIs, the way a real user would.
+
+In the dashboard, open **Community plugins → MaaS:PAL**. Pick a scenario under
+**Test runs**, adjust its settings and launch it. The run executes in the
+cluster as a Kubernetes Job, and its page shows what happened step by step:
+live progress, traffic charts, the checks, a plain-language verdict, and what
+the run created and cleaned up. **MaaS setup** shows the cluster's MaaS
+configuration (models, subscriptions, auth policies, rate limiting, networking).
+
+## What's Inside
+
+| Part | What it is |
+|---|---|
+| Frontend (`src/`) | React + PatternFly 6, loaded by the dashboard at runtime through Webpack Module Federation (`remoteEntry.js`, served by nginx) |
+| BFF (`bff/`) | FastAPI backend behind the dashboard's `proxyService` (`/maaspal/api` → `/api`). Launches and stops runs, captures their logs, keeps run history (SQLite on a PVC) and reads the MaaS setup. Every request is checked against the dashboard user's own token. |
+| Harness (`bff/harness/`) | The test runner. Each run is a Kubernetes Job using the BFF image. Scenarios are YAML files in `bff/scenarios/`. |
+| Helm chart (`chart/`) | Deploys the frontend, the BFF, the PVC and the RBAC the harness needs |
 
 ## Scenarios
 
@@ -34,46 +46,126 @@ verdict, and what the run created and cleaned up.
 "Verify" scenarios use your existing setup and only create API keys.
 "Explore" scenarios create temporary models, subscriptions or identities to
 probe how MaaS behaves. Everything a run creates is removed afterwards, unless
-you turn auto cleanup off. Scenarios are YAML files in `scenarios/`; drop in a
-new one and it appears in the UI under "Custom".
+you turn auto cleanup off. A new YAML file in `bff/scenarios/` appears in the UI
+under "Custom" (scenarios are baked into the BFF image, so rebuild it).
 
-## Deploy
+## Quick Start
 
-Requires `oc` logged in to the cluster with permission to create the
-`maaspal` namespace and the RBAC below.
+**Prerequisites:** Helm, `oc` logged in with cluster-admin (the chart creates
+ClusterRoles, and registering the plugin edits the dashboard Deployment), and
+RHOAI with MaaS enabled.
 
-1. Set your cluster's URLs in `deploy/configmap-global.yaml`: `MAAS_API_URL`,
-   and `MAAS_METRICS_URL` (Thanos Querier, for the MaaS metrics checks).
-2. Build and push the image (UI and backend in one image):
-   `make push IMAGE=<registry>/maaspal:<tag>`
-3. Deploy: `make deploy`. This runs `oc apply -k .` and restarts the API server.
-4. Open the `maaspal` Route in the `maaspal` namespace.
+### 1. Install
 
-### Permissions
+```bash
+helm install maaspal oci://quay.io/rh-ai-community-plugins/maaspal-chart \
+  --version 0.1.0 \
+  --namespace cp-maaspal \
+  --create-namespace
 
-`make deploy` applies **every** RBAC file below (they're all listed in
-`kustomization.yaml`). Review them before deploying on a shared cluster. To
-leave a grant out, remove its line from `kustomization.yaml`; the scenarios
-that need it will then fail with a permission error.
+oc label namespace cp-maaspal maas.opendatahub.io/gateway-access=true --overwrite
+```
 
-| File | Grants | Needed by |
+Or from a checkout: `helm install maaspal chart/ -n cp-maaspal --create-namespace`
+(or `make deploy`).
+
+The MaaS URL (`https://maas.<apps domain>`) and the Thanos Querier URL are read
+from the cluster at install time; override them with `--set maas.apiUrl=…` and
+`--set maas.metricsUrl=…`. The namespace label lets the MaaS gateway accept the
+throwaway models some scenarios deploy there.
+
+### 2. Register with the RHOAI Dashboard
+
+```bash
+oc get configmap federation-config \
+  -n redhat-ods-applications \
+  -o jsonpath='{.data.module-federation-config\.json}' \
+| python3 -c "
+import json, sys
+config = json.load(sys.stdin)
+config.append({
+  'name': 'maaspal',
+  'backend': {
+    'remoteEntry': '/remoteEntry.js',
+    'authorize': False,
+    'tls': False,
+    'service': {'name': 'maaspal', 'namespace': 'cp-maaspal', 'port': 8080}
+  },
+  'proxyService': [{
+    'path': '/maaspal/api',
+    'pathRewrite': '/api',
+    'authorize': True,
+    'tls': False,
+    'service': {'name': 'maaspal-bff', 'namespace': 'cp-maaspal', 'port': 3000}
+  }]
+})
+print(json.dumps(config))
+" > /tmp/mf-config-extended.json
+
+oc set env deployment/rhods-dashboard \
+  -n redhat-ods-applications \
+  "MODULE_FEDERATION_CONFIG=$(cat /tmp/mf-config-extended.json)"
+```
+
+After the dashboard pods roll out (about two minutes), reload the dashboard:
+**Community plugins → MaaS:PAL** appears in the sidebar.
+
+### 3. Give people access
+
+Cluster-admins can use MaaS:PAL straight away. Anyone else needs the chart's
+`maaspal-user` Role in the plugin namespace:
+
+```bash
+oc create rolebinding maaspal-users -n cp-maaspal --role=maaspal-user --group=<group>
+```
+
+or install with `--set access.groups[0]=<group>`. Without it, the plugin's pages
+show "You don't have access to MaaS:PAL".
+
+See [Deploying on OpenShift](docs/deployment/OPENSHIFT_DEPLOY.md) for the full
+guide: chart values, permissions, upgrading and uninstalling.
+
+## Permissions
+
+The harness acts with its own ServiceAccount (`maaspal`), which needs
+cluster-wide grants. Each is a chart value, so you can leave one out; scenarios
+that need it then fail with a permission error.
+
+| Value | Grants | Needed by |
 |---|---|---|
-| `rbac.yaml` | Jobs, pods and logs in `maaspal` (incl. `patch` on Jobs, for Stop) | everything |
-| `rbac-maas-readonly.yaml` | Cluster-wide read of MaaS, Kuadrant, Gateway API and KServe resources, plus `get` on individual Secrets (to check an external provider's credential Secret is labelled correctly; never their contents) | MaaS Setup tab, model health, reading subscription limits |
-| `rbac-maas-subscription-write.yaml` | Create/patch/delete MaaS subscriptions and auth policies | scenarios that create temporary subscriptions or auth policies |
-| `rbac-model-write.yaml` | Create/delete LLMInferenceServices, MaaSModelRefs and Routes | scenarios that deploy throwaway models |
-| `rbac-monitoring.yaml` | `cluster-monitoring-view` (Thanos) | MaaS metrics checks |
-| `rbac-user-provisioning.yaml` | Create ServiceAccounts and mint their tokens in `maaspal` | multi-user scenarios. **The most sensitive grant here.** |
+| (always) | Jobs, pods and logs in the plugin namespace (incl. `patch` on Jobs, for Stop) | everything |
+| `rbac.maasReadonly` | Cluster-wide read of MaaS, Kuadrant, Gateway API and KServe resources, plus `get` on individual Secrets (to check an external provider's credential Secret is labelled correctly; never their contents) | MaaS setup pages, model health, reading subscription limits |
+| `rbac.subscriptionWrite` | Create/patch/delete MaaS subscriptions and auth policies | scenarios that create temporary subscriptions or auth policies |
+| `rbac.modelWrite` | Create/delete LLMInferenceServices, MaaSModelRefs and Routes | scenarios that deploy throwaway models |
+| `rbac.monitoring` | `cluster-monitoring-view` (Thanos) | MaaS metrics checks |
+| `rbac.userProvisioning` (off by default) | Create ServiceAccounts and mint their tokens in the plugin namespace | `rate_limit_per_user_or_shared`. **The most sensitive grant here.** |
 
-`make deploy` also labels the `maaspal` namespace
-`maas.opendatahub.io/gateway-access=true`.
+Because the backend holds these rights, every API call checks the dashboard
+user's token (a SelfSubjectAccessReview for the `maaspal-user` Role's virtual
+permission), and a NetworkPolicy only lets the dashboard reach the backend. See
+[ADR-026](docs/architecture/adrs/ADR-026-rhoai-community-plugin.md).
 
 ## Develop
 
+Developing a dashboard plugin is easiest with a running RHOAI dashboard
+connected to a real cluster (see the seed project's
+[local setup guide](https://github.com/rh-ai-community-plugins/hello-world/blob/main/docs/development/LOCAL_SETUP.md)).
+For work on the plugin's own pages, the standalone mode is enough:
+
 ```bash
-make dev    # FastAPI + Vite dev servers
-make test   # pytest (harness + API) and Jest (UI)
-make lint   # ruff, mypy, eslint
+make install           # npm ci + pip install -e "bff[dev]" (use a virtualenv)
+make dev-bff           # FastAPI on :3000, access check off
+make dev-standalone    # webpack dev server on :9500 — open http://localhost:9500/maaspal
+make dev               # same, but proxying the rest of /maaspal to a dashboard on :8443
+```
+
+Running real scenarios locally needs the cluster env vars the chart's
+ConfigMap provides (`MAAS_API_URL`, …) and `oc` access.
+
+```bash
+make validate          # tsc + eslint + jest, ruff + mypy + pytest, helm lint
+make build             # dist/remoteEntry.js
+make image-build       # both container images
 ```
 
 `CLAUDE.md` is the detailed reference: architecture, the scenario YAML format,
@@ -81,3 +173,7 @@ every task, how assertions work, and how to verify changes.
 `docs/architecture/adrs/` records the design decisions, and
 `docs/architecture/empirical-verification-checklist.md` tracks which claims
 have been confirmed against a live cluster.
+
+## License
+
+Apache-2.0

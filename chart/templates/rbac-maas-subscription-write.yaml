@@ -1,0 +1,36 @@
+{{- if .Values.rbac.subscriptionWrite }}
+# Grants the harness SA write access to MaaSSubscription CRs (for
+# rate_limit_validation, harness/tasks/subscription.py) and MaaSAuthPolicy CRs
+# (for subscription_without_authpolicy, harness/tasks/access_policy.py). Cluster-scoped
+# ClusterRole/ClusterRoleBinding, NOT the maaspal namespace's own Role
+# (templates/rbac.yaml) — both CRDs only get reconciled by the MaaS controller
+# when they live in the install's actual tenant namespace (e.g.
+# models-as-a-service), which is install-specific and not the maaspal
+# namespace the harness itself runs in. A namespaced Role bound to `maaspal`
+# would let the harness create a syntactically-valid CR that the MaaS
+# controller never even looks at — see docs/architecture/adrs/ADR-009's
+# Update section for the incident this fixes (same reasoning applies
+# identically to MaaSAuthPolicy, so it shares this grant rather than getting
+# its own file).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-maas-subscription-write
+rules:
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maassubscriptions", "maasauthpolicies"]
+    verbs: ["get", "list", "create", "patch", "delete", "replace"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-maas-subscription-write
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "maaspal.serviceAccountName" . }}
+    namespace: {{ include "maaspal.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "maaspal.clusterPrefix" . }}-maas-subscription-write
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

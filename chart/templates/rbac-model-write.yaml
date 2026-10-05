@@ -1,0 +1,37 @@
+{{- if .Values.rbac.modelWrite }}
+# Grants the harness SA write access to LLMInferenceService CRs
+# (serving.kserve.io) for deploy_simulated_model (harness/tasks/model.py).
+# Cluster-scoped ClusterRole/ClusterRoleBinding — LLMInferenceServices must
+# live in a namespace the KServe/llmisvc controller watches (e.g. llm), not
+# in the maaspal namespace the harness itself runs in. Same reasoning as
+# rbac-maas-subscription-write.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-model-write
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["llminferenceservices"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasmodelrefs"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # expose_model_route: a Route straight to a throwaway model's workload
+  # Service, bypassing the MaaS gateway (scenarios/gateway_overhead.yaml).
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "maaspal.clusterPrefix" . }}-model-write
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "maaspal.serviceAccountName" . }}
+    namespace: {{ include "maaspal.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "maaspal.clusterPrefix" . }}-model-write
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

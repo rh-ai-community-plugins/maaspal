@@ -1,0 +1,20 @@
+# Cluster-level settings for the BFF and, via envFrom, every harness Job (the
+# lowest config level a scenario sees — see harness/config.py).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "maaspal.fullname" . }}-global-config
+  namespace: {{ include "maaspal.namespace" . }}
+  labels:
+    {{- include "maaspal.labels" . | nindent 4 }}
+data:
+  MAAS_API_URL: {{ include "maaspal.maasApiUrl" . | quote }}
+  MAAS_METRICS_URL: {{ include "maaspal.metricsUrl" . | quote }}
+  DEFAULT_MODEL: {{ .Values.maas.defaultModel | quote }}
+  DEFAULT_SUBSCRIPTION: {{ .Values.maas.defaultSubscription | quote }}
+  NAMESPACE: {{ include "maaspal.namespace" . | quote }}
+  MAASPAL_IMAGE: {{ include "maaspal.bffImage" . | quote }}
+  MAASPAL_SERVICE_ACCOUNT: {{ include "maaspal.serviceAccountName" . | quote }}
+  MAASPAL_GLOBAL_CONFIGMAP: "{{ include "maaspal.fullname" . }}-global-config"
+  MAASPAL_DATA_PVC: "{{ include "maaspal.fullname" . }}-data"
+  MAASPAL_STOP_GRACE_PERIOD_S: {{ .Values.maas.stopGracePeriodSeconds | quote }}
