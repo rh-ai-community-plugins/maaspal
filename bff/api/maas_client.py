@@ -1,5 +1,5 @@
 """Read-only access to the live MaaS domain model (subscriptions, models) and
-the resources they reference, for the "MaaS Setup" overview in the UI.
+the resources they reference, for the MaaS overview page in the UI.
 
 Every list/get call is wrapped so a missing CRD or missing RBAC degrades to
 an ``unavailable`` result for just that resource type rather than raising —

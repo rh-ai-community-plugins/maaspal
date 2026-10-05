@@ -15,7 +15,7 @@ from harness.tasks.registry import REGISTRY
 
 
 def _find_subscription(name: str) -> dict:
-    """The subscription as the MaaS Setup tab shows it (api/maas_client.py —
+    """The subscription as the MaaS overview page shows it (api/maas_client.py —
     same image, same ServiceAccount), including each modelRef's configured
     tokenRateLimits."""
     from api.maas_client import list_subscriptions

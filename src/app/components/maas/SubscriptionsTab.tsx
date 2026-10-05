@@ -7,7 +7,7 @@ import { MaasUnavailableNotice } from './MaasUnavailableNotice';
 // Code-split: RawYamlModal pulls in Monaco (see monacoSetup.ts) — same
 // reasoning as RunDetail.tsx's lazy-loading of RunSettingsModal, so Monaco's
 // bundle is only fetched when a row's "View YAML" is actually clicked, not on
-// every visit to the MaaS Setup tab.
+// every visit to the MaaS overview page.
 const RawYamlModal = lazy(() =>
   import('../RawYamlModal').then((m) => ({ default: m.RawYamlModal })),
 );

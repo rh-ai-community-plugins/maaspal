@@ -1,7 +1,7 @@
 # Empirical MaaS Verification Checklist
 
 MaaS:PAL has two surfaces that make *claims* about live MaaS cluster state: the
-"MaaS Setup" UI (ADR-017, pure read-only CR inspection) and the scenario
+MaaS overview UI (ADR-017, pure read-only CR inspection) and the scenario
 runner's assertions (which mix genuine cross-checks with harness-side-only
 numbers, see ADR-014/ADR-015). Neither surface is automatically correct just
 because it reads a CR or computes a number — a CR's `status.conditions` can

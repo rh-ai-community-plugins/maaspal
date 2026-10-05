@@ -39,7 +39,7 @@ _MATCHING_ROUTE = {
 
 @pytest.fixture(autouse=True)
 def _no_model_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default: the MaaS Setup catalog is unreadable — tests that need it
+    """Default: the MaaS overview catalog is unreadable — tests that need it
     patch _list_maas_models themselves."""
     monkeypatch.setattr("harness.tasks.platform_health._list_maas_models", lambda: None)
 

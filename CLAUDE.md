@@ -17,7 +17,7 @@ Tests are composed of atomic **tasks** (e.g., provision API key, send inference 
                   - Live log polling (REST, 1s interval) with smart scroll
                   - Live assertion status panel (2s poll, independent of logs)
                   - Task progress pipeline (2s poll)
-                  - Results history + per-run detail view; routes /maaspal/scenarios, /maaspal/runs[/<id>], /maaspal/setup
+                  - Results history + per-run detail view; routes /maaspal/scenarios, /maaspal/runs[/<id>], /maaspal/overview (/maaspal/setup redirects)
                   - Run page narration: verdict/finding, steps with per-resource
                     cleanup status, traffic and metrics charts, collapsible logs
                           |  /maaspal/api/*  → dashboard proxyService (authorize: true,
@@ -30,7 +30,7 @@ Tests are composed of atomic **tasks** (e.g., provision API key, send inference 
                   - GET  /api/runs, /api/runs/{id}
                   - POST /api/runs/{id}/stop                  (graceful stop, see below)
                   - POST /api/runs/{id}/auto-cleanup, /cleanup (toggle; manual "Clean Up Now")
-                  - GET  /api/maas/*                         (read-only MaaS Setup tab, ADR-017)
+                  - GET  /api/maas/*                         (read-only MaaS overview page, ADR-017)
                   - GET  /api/runs/{id}/logs/lines?offset=N  (REST poll)
                   - GET  /api/runs/{id}/assertions            (reads PVC file)
                   - GET  /api/runs/{id}/progress              (reads PVC file)
@@ -65,10 +65,10 @@ maaspal/
 ├── src/                        # Frontend: Module Federation remote (React 18 + TypeScript + PatternFly 6), built by webpack to dist/
 │   ├── index.ts → bootstrap.tsx # Standalone dev entry only: mounts App at /maaspal/* like the dashboard does
 │   ├── rhoai/
-│   │   ├── extensions.ts       # Exposed as ./extensions: Community plugins section (shared), MaaS:PAL section, "Scenarios"/"Runs"/"MaaS setup" links, /maaspal/* route
+│   │   ├── extensions.ts       # Exposed as ./extensions: Community plugins section (shared), MaaS:PAL section, "Scenarios"/"Runs"/"MaaS overview" links, /maaspal/* route
 │   │   └── CommunityNavIcon.tsx # [SHARED] community plugins icon — never edit
 │   └── app/
-│       ├── App.tsx             # react-router routes under /maaspal: scenarios, runs, runs/:runId, setup; "MaaS:PAL" header; CommunityBanner; no <Page> (the dashboard owns the chrome)
+│       ├── App.tsx             # react-router routes under /maaspal: scenarios, runs, runs/:runId, overview (setup → overview redirect); "MaaS:PAL" header; CommunityBanner; no <Page> (the dashboard owns the chrome)
 │       ├── logos.ts            # Header mascot: light/dark logo sets (assets/logos/), follows the dashboard's pf-v6-theme-dark class, new pick on every page
 │       ├── api/client.ts       # Typed fetch wrappers + types for every route; API_BASE = /maaspal/api (the dashboard's proxyService)
 │       ├── launchForm.ts       # Launch-form helpers: autofill, show_if, required gating, plan sentence
@@ -88,8 +88,8 @@ maaspal/
 │           ├── MetricsComparisonChart.tsx # MaaS-reported vs sent over time
 │           ├── AssertionPanel.tsx    # Check cards (label, value, target, details)
 │           ├── LogStream.tsx         # 1 s log polling, smart scroll
-│           ├── RunSettingsModal.tsx, RawYamlModal.tsx # Read-only Monaco YAML views (run settings; CRs in the MaaS Setup tab)
-│           └── maas/                 # MaaS Setup tab (ADR-017): Models, Subscriptions, Authorization Policies, Access Control, Access Simulator, Rate Limiting, Networking, Platform Config
+│           ├── RunSettingsModal.tsx, RawYamlModal.tsx # Read-only Monaco YAML views (run settings; CRs in the MaaS overview page)
+│           └── maas/                 # MaaS overview page (ADR-017): Models, Subscriptions, Authorization Policies, Access Control, Access Simulator, Rate Limiting, Networking, Platform Config
 │
 ├── bff/                        # Python project: FastAPI BFF + the harness (same image, bff/Containerfile)
 │   ├── pyproject.toml
@@ -135,7 +135,7 @@ maaspal/
 │   │   ├── db.py                   # SQLite (aiosqlite)
 │   │   ├── k8s.py                  # create_job (backoffLimit 0), stop_run (suspends the Job), run_job_state, delete_stopped_job, log capture to PVC
 │   │   ├── cleanup.py              # Manual "Clean Up Now": re-runs task cleanup() from persisted state
-│   │   ├── maas_client.py          # Read-only MaaS domain model for the MaaS Setup tab (also reused by harness tasks — same image)
+│   │   ├── maas_client.py          # Read-only MaaS domain model for the MaaS overview page (also reused by harness tasks — same image)
 │   │   └── routes/
 │   │       ├── scenarios.py        # GET /api/scenarios (config defaults + display/launch metadata)
 │   │       ├── runs.py             # POST /api/runs, GET /api/runs[/{id}], POST /api/runs/{id}/stop|auto-cleanup|cleanup
@@ -374,7 +374,7 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
 - `get` on `pods/log`
 - `get`, `list`, `create`, `patch`, `delete` on `maassubscriptions` and `maasauthpolicies` (`maas.opendatahub.io/v1alpha1`, `chart/templates/rbac-maas-subscription-write.yaml`) — for every scenario that creates temporary subscriptions or auth policies
 - `get`, `list`, `create`, `patch`, `delete` on `llminferenceservices`/`maasmodelrefs`, and `get`/`create`/`delete` on `routes` (`chart/templates/rbac-model-write.yaml`) — for scenarios that deploy throwaway models (`denied_without_auth_policy`, `gateway_overhead`, `multi_model_load`)
-- Cluster-wide read of MaaS/Kuadrant/Gateway API/KServe resources plus `get` on Secrets (`chart/templates/rbac-maas-readonly.yaml`, ADR-017) — the MaaS Setup tab, `check_model_health`, `read_subscription_limits`, `discover_subscription_models`
+- Cluster-wide read of MaaS/Kuadrant/Gateway API/KServe resources plus `get` on Secrets (`chart/templates/rbac-maas-readonly.yaml`, ADR-017) — the MaaS overview page, `check_model_health`, `read_subscription_limits`, `discover_subscription_models`
 - (`tokenratelimitpolicies` read, part of the read-only grant above, is also what `check_model_health` and `provision_subscriptions_distributed`'s readiness wait use)
 - `cluster-monitoring-view` ClusterRole binding (`chart/templates/rbac-monitoring.yaml`, cluster-scoped — the only cluster-scoped grant the SA needs beyond its own namespace) — for querying Thanos Querier (background MaaS metrics polling)
 - `create`, `delete`, `get`, `list` on `serviceaccounts` and `create` on `serviceaccounts/token`, scoped to the plugin namespace (`chart/templates/rbac-user-provisioning.yaml`, off unless `rbac.userProvisioning=true`) — for `create_user`/`provision_keys_for_users` (ADR-023). **Meaningfully more sensitive than any other grant this harness holds** — minting a ServiceAccount token is a real elevated capability; review deliberately before applying, not as routine.
@@ -493,7 +493,7 @@ The **Scenarios** page (`ScenarioCatalog.tsx`) is a catalog: a left rail with se
 
 ### Frontend Monaco Setup
 
-`RunSettingsModal.tsx`'s and the MaaS setup pages' read-only YAML views (`RawYamlModal.tsx`, see Results Storage above) are the only places this app uses Monaco. Deliberate choices in `src/app/monacoSetup.ts`, because the plugin bundles everything into its own image and avoids external runtime dependencies:
+`RunSettingsModal.tsx`'s and the MaaS overview pages' read-only YAML views (`RawYamlModal.tsx`, see Results Storage above) are the only places this app uses Monaco. Deliberate choices in `src/app/monacoSetup.ts`, because the plugin bundles everything into its own image and avoids external runtime dependencies:
 - **Self-hosted, not CDN-loaded.** `@monaco-editor/react` defaults to lazy-fetching Monaco's AMD bundle from a public CDN at runtime — a real risk for an app meant to run inside OpenShift clusters that may have restricted egress. `monacoSetup.ts` imports `monaco-editor` directly and points `@monaco-editor/react`'s `loader.config({ monaco })` at it instead, plus configures `self.MonacoEnvironment.getWorker` to use a webpack-bundled worker (`new Worker(new URL('monaco-editor/editor/editor.worker.js', import.meta.url))`, webpack 5's native worker syntax) rather than one Monaco would otherwise fetch itself. With `publicPath: 'auto'`, the worker and chunks are served from the plugin's own path (`/_mf/maaspal/` inside the dashboard).
 - **Trimmed to YAML only.** Importing the full `monaco-editor` package entry pulls in tokenizers for every one of its ~80 bundled languages (pushed the lazy chunk over 4MB) when this app only ever displays YAML. `monacoSetup.ts` instead imports the slim core (`monaco-editor/editor/editor.api.js`) plus just the YAML language definition (`monaco-editor/languages/definitions/yaml/register.js`) — both resolved through `monaco-editor`'s package.json `exports` map, which already implies the `esm/vs/` path prefix (a doubled-prefix import path is a common mistake here). `tsconfig.json` uses `"moduleResolution": "bundler"` so TypeScript follows that map too.
 - `RawYamlModal` is loaded via `React.lazy()` everywhere (not a static import) so Monaco's bundle is only fetched when a user actually opens a YAML view — confirmed in the build: the app chunks contain no Monaco code.
@@ -580,6 +580,6 @@ Run from the dashboard's MaaS:PAL pages (or `POST /api/runs` through the dashboa
 ### Cross-cutting live checks
 - **Stop** (**confirmed 2026-10-02** on `load_test`): the pod is gone within seconds, the run shows `CANCELLED` and stays there, the Job is deleted after finalization, and temporary resources are removed. Needs `patch` on Jobs (`chart/templates/rbac.yaml`). A run whose harness dies without a result is finalized by the API backstop (confirmed: it finalized a previously stuck run).
 - **Cleanup**: run page lists every created object as removed/restored; with auto cleanup off they show "left in place", then "removed ✓" after Clean Up Now. Spot-check with `oc get maassubscriptions -n models-as-a-service` and the MaaS key search.
-- **As a dashboard plugin** (**confirmed 2026-10-05**, RHOAI 3.5.1, dashboard at `rh-ai.<apps domain>` behind `data-science-gateway`): `/_mf/maaspal/` serves `remoteEntry.js` and every chunk incl. Monaco's worker; `/maaspal/api/*` reaches the BFF with the user's token; no token → OpenShift login redirect; an identity without `maaspal-user` gets the 403 detail on every API route, and gets in once bound; every MaaS setup section `available: true`; from another namespace the BFF times out (NetworkPolicy) while the frontend answers. The `MODULE_FEDERATION_CONFIG` env override survived the first operator reconcile.
+- **As a dashboard plugin** (**confirmed 2026-10-05**, RHOAI 3.5.1, dashboard at `rh-ai.<apps domain>` behind `data-science-gateway`): `/_mf/maaspal/` serves `remoteEntry.js` and every chunk incl. Monaco's worker; `/maaspal/api/*` reaches the BFF with the user's token; no token → OpenShift login redirect; an identity without `maaspal-user` gets the 403 detail on every API route, and gets in once bound; every MaaS overview section `available: true`; from another namespace the BFF times out (NetworkPolicy) while the frontend answers. The `MODULE_FEDERATION_CONFIG` env override survived the first operator reconcile.
 - **UI**: single page scrollbar; launch form shows ⓘ help, an Advanced section, "What this run will do" with "More details", autofilled limit/window/route from the pickers; run history shows titles, including for runs of renamed scenarios.
 - **CR-based scenarios** need `harness/main.py:_load_kube_config()` (ADR-009 update) — without it every `CustomObjectsApi` call fails with `LocationValueError: No host specified`. Fixed and confirmed live; if CR tasks start failing that way again, check this first.

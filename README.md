@@ -13,7 +13,7 @@ the **Scenarios** catalog (search, or filter by category, custom/built-in and
 type), adjust its settings and launch it. **Runs** lists every run. The run executes in the
 cluster as a Kubernetes Job, and its page shows what happened step by step:
 live progress, traffic charts, the checks, a plain-language verdict, and what
-the run created and cleaned up. **MaaS setup** shows the cluster's MaaS
+the run created and cleaned up. **MaaS overview** shows the cluster's MaaS
 configuration (models, subscriptions, auth policies, rate limiting, networking).
 
 ## What's Inside
@@ -135,7 +135,7 @@ that need it then fail with a permission error.
 | Value | Grants | Needed by |
 |---|---|---|
 | (always) | Jobs, pods and logs in the plugin namespace (incl. `patch` on Jobs, for Stop) | everything |
-| `rbac.maasReadonly` | Cluster-wide read of MaaS, Kuadrant, Gateway API and KServe resources, plus `get` on individual Secrets (to check an external provider's credential Secret is labelled correctly; never their contents) | MaaS setup pages, model health, reading subscription limits |
+| `rbac.maasReadonly` | Cluster-wide read of MaaS, Kuadrant, Gateway API and KServe resources, plus `get` on individual Secrets (to check an external provider's credential Secret is labelled correctly; never their contents) | MaaS overview pages, model health, reading subscription limits |
 | `rbac.subscriptionWrite` | Create/patch/delete MaaS subscriptions and auth policies | scenarios that create temporary subscriptions or auth policies |
 | `rbac.modelWrite` | Create/delete LLMInferenceServices, MaaSModelRefs and Routes | scenarios that deploy throwaway models |
 | `rbac.monitoring` | `cluster-monitoring-view` (Thanos) | MaaS metrics checks |

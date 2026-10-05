@@ -8,6 +8,8 @@
 - Scenarios that aren't shipped with MaaS:PAL are labelled **Custom** and listed
   first: under their own `category:` if it's a built-in one, otherwise in a
   Custom category at the top.
+- **MaaS setup** is renamed **MaaS overview** (`/maaspal/overview`; the old
+  `/maaspal/setup` path redirects), since it only shows the configuration.
 - The header reads **MaaS:PAL**, with a mascot logo that changes on every page,
   drawn from a light-theme or dark-theme set.
 

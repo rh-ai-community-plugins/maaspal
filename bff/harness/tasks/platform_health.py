@@ -25,7 +25,7 @@ def _condition_true(conditions: list[dict], condition_type: str) -> bool:
 
 
 def _list_maas_models() -> list[dict] | None:
-    """The MaaS Setup tab's own merged model catalog (api/maas_client.py —
+    """The MaaS overview page's own merged model catalog (api/maas_client.py —
     shipped in this same image, run as this same ServiceAccount), reused so
     the governance checks below (Ready, subscriptions, auth policy, namespace
     gateway-access label) mean exactly what the UI shows. None if unreadable

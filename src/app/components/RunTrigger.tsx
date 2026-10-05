@@ -265,7 +265,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     }
 
     // Fallback: plain text inputs — used for every other field, and for
-    // target_model_name/target_model_namespace too when the MaaS Setup
+    // target_model_name/target_model_namespace too when the MaaS overview
     // models list isn't available (RBAC/network issue) or came back empty,
     // so the scenario stays usable by hand.
     if (key === _MODEL_NAME_KEY && needsModelPicker && modelsUnavailable) {
@@ -285,7 +285,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             style={selectStyle}
           />
           <p style={noteStyle}>
-            Couldn&apos;t load models from MaaS Setup — enter the MaaSModelRef name manually (and its
+            Couldn&apos;t load models from the MaaS overview — enter the MaaSModelRef name manually (and its
             namespace below).
           </p>
         </div>
@@ -349,7 +349,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             style={selectStyle}
           />
           <p style={noteStyle}>
-            Couldn&apos;t load subscriptions from MaaS Setup — enter the MaaSSubscription name
+            Couldn&apos;t load subscriptions from the MaaS overview — enter the MaaSSubscription name
             manually, or leave blank for auto-selection.
           </p>
         </div>

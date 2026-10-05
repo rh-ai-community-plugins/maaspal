@@ -342,7 +342,7 @@ export async function getAssertions(runId: string): Promise<AssertionState[]> {
 }
 
 // ---------------------------------------------------------------------------
-// MaaS Setup — live cluster visibility (see ADR-017 /
+// MaaS overview — live cluster visibility (see ADR-017 /
 // docs/architecture/maas-domain-reference.md). Every endpoint here degrades
 // to { available: false, reason } instead of a 4xx/5xx when the SA lacks
 // RBAC for a given CRD or it isn't installed on this cluster — callers

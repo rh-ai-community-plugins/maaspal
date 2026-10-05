@@ -60,6 +60,9 @@ const MUTATES_LABEL: Record<string, string> = {
   routes: 'routes',
 };
 
+// min() keeps a card from overflowing a very narrow screen.
+const CARD_WIDTH = 'min(100%, 300px)';
+
 type Source = 'custom' | 'builtin';
 type ScenarioType = 'setup' | 'temporary' | 'readonly';
 
@@ -367,7 +370,10 @@ export function ScenarioCatalog({ onRun }: Props) {
                 {category} <span className="maaspal-catalog__count">{items.length}</span>
               </h2>
               {CATEGORY_BLURB[category] && <p className="maaspal-catalog__blurb">{CATEGORY_BLURB[category]}</p>}
-              <Gallery hasGutter minWidths={{ default: '260px' }}>
+              {/* Fixed-width cards: with stretchy columns, a page scrollbar
+                  appearing (the long "All" view) could drop a column and widen
+                  every card, so cards looked bigger under All than elsewhere. */}
+              <Gallery hasGutter minWidths={{ default: CARD_WIDTH }} maxWidths={{ default: CARD_WIDTH }}>
                 {items.map((s) => (
                   <ScenarioCard key={s.name} scenario={s} onRun={onRun} />
                 ))}

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { PageSection, Tab, Tabs, TabTitleText } from '@patternfly/react-core';
+import { PageIntro } from '../PageIntro';
 import { AccessControlTab } from './AccessControlTab';
 import { AccessSimulatorTab } from './AccessSimulatorTab';
 import { AuthorizationPoliciesTab } from './AuthorizationPoliciesTab';
@@ -25,11 +26,14 @@ export function MaasOverviewPage() {
   return (
     <>
       <PageSection>
-        <p className="maaspal-section-heading">MaaS Setup</p>
+        <PageIntro title="MaaS overview">
+          A read-only view of how MaaS is configured on this cluster: subscriptions, models, access and rate
+          limiting. Nothing here changes the cluster.
+        </PageIntro>
         <Tabs
           activeKey={activeTab}
           onSelect={(_evt, key) => setActiveTab(key as TabKey)}
-          aria-label="MaaS setup sections"
+          aria-label="MaaS overview sections"
         >
           <Tab eventKey="subscriptions" title={<TabTitleText>Subscriptions</TabTitleText>}>
             <div style={{ marginTop: '1rem' }}>

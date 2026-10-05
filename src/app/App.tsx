@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Button, PageSection, Title } from '@patternfly/react-core';
 import CommunityBanner from './components/CommunityBanner';
+import { PageIntro } from './components/PageIntro';
 import { MaasOverviewPage } from './components/maas/MaasOverviewPage';
 import { RunDetail } from './components/RunDetail';
 import { RunHistory } from './components/RunHistory';
@@ -13,11 +14,12 @@ import './styles/theme.css';
 
 // Rendered by the RHOAI dashboard at /maaspal/* (src/rhoai/extensions.ts). The
 // dashboard owns the page chrome — masthead, sidebar (where "Scenarios",
-// "Runs" and "MaaS setup" live) and the scroll container — so this renders
+// "Runs" and "MaaS overview" live) and the scroll container — so this renders
 // content only. Paths are absolute so they work under the host's router and
 // the standalone dev router (basename /maaspal) alike.
 const SCENARIOS_PATH = '/maaspal/scenarios';
 const RUNS_PATH = '/maaspal/runs';
+const OVERVIEW_PATH = '/maaspal/overview';
 
 function PageHeader() {
   // A different mascot on every page, from the set that shows up on the
@@ -29,18 +31,6 @@ function PageHeader() {
       <Title headingLevel="h1" size="2xl" className="maaspal-page-header__title">
         MaaS:PAL
       </Title>
-    </div>
-  );
-}
-
-function PageIntro({ title, children, actions }: { title: string; children: ReactNode; actions?: ReactNode }) {
-  return (
-    <div className="maaspal-page-intro">
-      <div>
-        <Title headingLevel="h2" size="xl">{title}</Title>
-        <p className="maaspal-page-intro__text">{children}</p>
-      </div>
-      {actions}
     </div>
   );
 }
@@ -108,7 +98,9 @@ function App() {
           <Route path="scenarios" element={<ScenariosPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
-          <Route path="setup/*" element={<MaasOverviewPage />} />
+          <Route path="overview/*" element={<MaasOverviewPage />} />
+          {/* The MaaS overview's old path, kept for bookmarks. */}
+          <Route path="setup/*" element={<Navigate to={OVERVIEW_PATH} replace />} />
           <Route path="*" element={<Navigate to={SCENARIOS_PATH} replace />} />
         </Routes>
       </div>

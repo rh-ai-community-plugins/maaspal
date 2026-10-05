@@ -13,7 +13,7 @@ interface Props {
 
 // Shared read-only YAML viewer — mirrors OpenShift console's own "View YAML"
 // (same underlying component family: PatternFly CodeEditor / Monaco). Used by
-// RunSettingsModal (a run's resolved config) and the MaaS Setup tabs (a raw
+// RunSettingsModal (a run's resolved config) and the MaaS overview pages (a raw
 // cluster object), so both look and behave identically.
 export function RawYamlModal({
   title,

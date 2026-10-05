@@ -10,7 +10,7 @@ description: >-
   spread across the subscriptions, and R requests spread across the keys —
   each key sending to a model its subscription actually covers. Set Requests
   to 0 (and turn auto-cleanup off) to just stand the environment up for
-  manual exploration in the MaaS Setup tab.
+  manual exploration in the MaaS overview page.
 category: "Performance"
 kind: explore
 mutates: [api_keys, subscriptions, auth_policies, models]

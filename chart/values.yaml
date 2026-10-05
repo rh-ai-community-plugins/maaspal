@@ -95,7 +95,7 @@ access:
 
 # --- Optional grants the harness ServiceAccount holds ---
 rbac:
-  # Read MaaS / Kuadrant / Gateway API / KServe objects (MaaS setup pages,
+  # Read MaaS / Kuadrant / Gateway API / KServe objects (MaaS overview pages,
   # model health checks).
   maasReadonly: true
   # Create/patch/delete MaaSSubscriptions and MaaSAuthPolicies (most
