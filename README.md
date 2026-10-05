@@ -47,8 +47,13 @@ configuration (models, subscriptions, auth policies, rate limiting, networking).
 "Verify" scenarios use your existing setup and only create API keys.
 "Explore" scenarios create temporary models, subscriptions or identities to
 probe how MaaS behaves. Everything a run creates is removed afterwards, unless
-you turn auto cleanup off. A new YAML file in `bff/scenarios/` appears in the UI
-under "Custom" (scenarios are baked into the BFF image, so rebuild it).
+you turn auto cleanup off.
+
+**Your own scenarios:** a new YAML file in `bff/scenarios/` shows up in the
+Scenarios catalog with a **Custom** label, ahead of the built-in ones. Give it
+one of the categories above (`category: "Rate limits"`) to list it there, or
+leave `category:` out and it goes in a Custom category at the top. Scenarios are
+baked into the BFF image, so rebuild it.
 
 ## Quick Start
 

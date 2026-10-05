@@ -67,5 +67,7 @@ See `docs/architecture/maas-domain-reference.md` for the full information catalo
 - `list_models()` now also does one `CoreV1Api().read_namespace()` per unique model namespace, one `_list()` for `maasauthpolicies`, one `_list()` for `externalproviders`, and one `CoreV1Api().read_namespaced_secret()` per external provider with a credential ref (all cached/scoped within a single call where repetition is possible) — several more RBAC-gated read paths on top of the original two, all optional in the sense that failure degrades that field to `None` rather than the whole endpoint, but still more that can partially fail on a given cluster.
 - The new `secrets` `get` grant in `deploy/rbac-maas-readonly.yaml`, despite being scoped as tightly as RBAC allows (verb-limited to `get`, no `list`/`watch`), is still the most sensitive permission this feature has ever requested — worth specifically re-reviewing if this ADR's RBAC list is ever audited, even though the code path never reads Secret `data`.
 
+**Update (2026-10-05):** the page is now called **MaaS overview** (`/maaspal/overview`, sidebar entry "MaaS overview"; the old `/maaspal/setup` path redirects). "Setup" read as if the page configured MaaS; it only ever reads it.
+
 **Neutral:**
 - Introduces `api/maas_client.py` as a new, independent module rather than extending `api/k8s.py` — the two share no state and are called from different route groups.

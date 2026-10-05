@@ -78,6 +78,7 @@ maaspal/
 │       └── components/
 │           ├── CommunityBanner.tsx/.css # [SHARED] required "Community Plugin" banner — never edit
 │           ├── MaaspalNavIcon.tsx    # Sidebar icon, exposed as ./Icon
+│           ├── PageIntro.tsx         # Page title + one-line explanation (Scenarios, Runs, MaaS overview)
 │           ├── ScenarioCatalog.tsx   # Scenarios page: filter rail (search, categories, custom/built-in, type) + card gallery, filters in the URL
 │           ├── RunTrigger.tsx        # Launch modal: labelled inputs, ⓘ help, Advanced section, autofill, "What this run will do"
 │           ├── RunHistory.tsx        # Past runs (titles via scenarioTitles)
@@ -221,7 +222,7 @@ title: "Does access come back after the rate-limit window?"   # what the UI show
 summary: "Uses up a small token budget, waits for its window to pass, and checks requests succeed again."
 description: >-                     # shown under "More details" in the launch form
   Creates a temporary subscription with a small limit over a short window...
-category: "Rate limits"             # optional — omitted or unknown lands in "Custom"
+category: "Rate limits"             # optional — omitted or unknown lands in "Custom" (a scenario not in BUILTIN_SCENARIOS is also labelled Custom)
 kind: explore                       # verify = uses your setup (API keys only); explore = creates temporary resources
 mutates: [api_keys, subscriptions]
 requires: [target_model_name, target_model_namespace]   # gates Launch
@@ -485,7 +486,7 @@ Below the chips, `RunDetail.tsx` renders the rest of the page from the same prog
 - **Traffic**: per burst, a one-line summary or the full panel (stats, error reasons, `TrafficChart.tsx`), switchable either way ("Show chart" / "Show summary"). Bursts in one `chart_group` share a timeline with the waits between them shaded. Step-load bursts show a per-step table plus throughput and p95-by-step charts. `MetricsComparisonChart.tsx` plots MaaS-reported vs sent counts.
 - **Tables** tasks publish, the **checks** (`AssertionPanel.tsx`) on the right, and a **Logs** panel at the bottom: line count, last-line preview, a Show/Hide button, open automatically on failure.
 
-The dashboard owns the page chrome (masthead, sidebar, scroll container), so the plugin renders no `<Page>` of its own — only the required `CommunityBanner`, a small logo header and its routes.
+The dashboard owns the page chrome (masthead, sidebar, scroll container), so the plugin renders no `<Page>` of its own — only the required `CommunityBanner`, a "MaaS:PAL" header (with a mascot logo that changes on every page, from a light- or dark-theme set — `src/app/logos.ts`) and its routes. Scenarios, Runs and MaaS overview each open with a title and one-line explanation (`components/PageIntro.tsx`).
 
 ### Scenario Categories (ADR-020, regrouped by ADR-025)
 
@@ -581,5 +582,5 @@ Run from the dashboard's MaaS:PAL pages (or `POST /api/runs` through the dashboa
 - **Stop** (**confirmed 2026-10-02** on `load_test`): the pod is gone within seconds, the run shows `CANCELLED` and stays there, the Job is deleted after finalization, and temporary resources are removed. Needs `patch` on Jobs (`chart/templates/rbac.yaml`). A run whose harness dies without a result is finalized by the API backstop (confirmed: it finalized a previously stuck run).
 - **Cleanup**: run page lists every created object as removed/restored; with auto cleanup off they show "left in place", then "removed ✓" after Clean Up Now. Spot-check with `oc get maassubscriptions -n models-as-a-service` and the MaaS key search.
 - **As a dashboard plugin** (**confirmed 2026-10-05**, RHOAI 3.5.1, dashboard at `rh-ai.<apps domain>` behind `data-science-gateway`): `/_mf/maaspal/` serves `remoteEntry.js` and every chunk incl. Monaco's worker; `/maaspal/api/*` reaches the BFF with the user's token; no token → OpenShift login redirect; an identity without `maaspal-user` gets the 403 detail on every API route, and gets in once bound; every MaaS overview section `available: true`; from another namespace the BFF times out (NetworkPolicy) while the frontend answers. The `MODULE_FEDERATION_CONFIG` env override survived the first operator reconcile.
-- **UI**: single page scrollbar; launch form shows ⓘ help, an Advanced section, "What this run will do" with "More details", autofilled limit/window/route from the pickers; run history shows titles, including for runs of renamed scenarios.
+- **UI**: sidebar shows Scenarios / Runs / MaaS overview, and `/maaspal/setup` redirects to the overview; the Scenarios catalog's filters survive Back from a run, cards are the same width under All as in one category (a page scrollbar used to change the column count), custom scenarios carry a Custom label and come first; the header logo changes per page and switches set with the dashboard theme (**catalog and header seen live 2026-10-05**; the card-width fix and the overview rename only locally so far); single page scrollbar; launch form shows ⓘ help, an Advanced section, "What this run will do" with "More details", autofilled limit/window/route from the pickers; run history shows titles, including for runs of renamed scenarios.
 - **CR-based scenarios** need `harness/main.py:_load_kube_config()` (ADR-009 update) — without it every `CustomObjectsApi` call fails with `LocationValueError: No host specified`. Fixed and confirmed live; if CR tasks start failing that way again, check this first.
