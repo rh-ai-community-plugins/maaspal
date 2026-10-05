@@ -1158,3 +1158,158 @@ async def test_failed_attempts_the_sdk_retried_are_counted_and_described() -> No
     assert r["retried_failed_attempts"] == 3
     assert r["attempt_error_samples"][0]["message"] == "HTTP 500 Internal Server Error"
     assert r["attempt_error_samples"][0]["count"] == 3
+
+
+# --- Request API / Streaming (the launch form's advanced settings) ---------
+
+
+def _usage(prompt: int, completion: int) -> MagicMock:
+    u = MagicMock()
+    u.prompt_tokens, u.completion_tokens, u.total_tokens = prompt, completion, prompt + completion
+    return u
+
+
+class _Stream:
+    """An async iterator standing in for the SDK's AsyncStream."""
+
+    def __init__(self, chunks: list) -> None:
+        self._chunks = chunks
+
+    def __aiter__(self) -> "_Stream":
+        self._it = iter(self._chunks)
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+def _chunk(text: str | None = None, usage: MagicMock | None = None, *, completions: bool = False) -> MagicMock:
+    c = MagicMock()
+    if text is None:
+        c.choices = []
+    else:
+        choice = MagicMock()
+        if completions:
+            choice.text = text
+        else:
+            choice.delta.content = text
+        c.choices = [choice]
+    c.usage = usage
+    return c
+
+
+async def _run(params: dict, client: MagicMock, config: dict | None = None) -> dict:
+    with patch("harness.tasks.inference.AsyncOpenAI", return_value=client):
+        ctx = _make_ctx()
+        ctx.config.update(config or {})
+        await SendRequestsTask(
+            "send_requests", {"count": "2", "concurrency": "1", "url": "http://m.test", "token": "sk-t", **params}
+        ).run(ctx)
+    return ctx.shared_state["inference_results"]
+
+
+async def test_completions_api_sends_prompt_and_counts_usage() -> None:
+    m = MagicMock()
+    m.completions.create = AsyncMock(return_value=MagicMock(usage=_usage(4, 6)))
+    ir = await _run({"api": "completions"}, m)
+    assert m.completions.create.await_args.kwargs["prompt"] == "Hello"
+    assert ir["api"] == "completions" and ir["stream"] is False
+    assert ir["total_tokens_sent"] == 20 and ir["completion_tokens_sent"] == 12
+
+
+async def test_batched_completions_send_a_list_of_prompts() -> None:
+    m = MagicMock()
+    m.completions.create = AsyncMock(return_value=MagicMock(usage=_usage(4, 6)))
+    await _run({"api": "completions", "batch_size": "3", "prompt": "p"}, m)
+    assert m.completions.create.await_args.kwargs["prompt"] == ["p", "p", "p"]
+
+
+async def test_streamed_chat_counts_usage_from_the_final_chunk_and_times_first_token() -> None:
+    m = MagicMock()
+    m.chat.completions.create = AsyncMock(
+        side_effect=lambda **kw: _Stream([_chunk(""), _chunk("Hi"), _chunk(" there"), _chunk(None, _usage(5, 2))])
+    )
+    ir = await _run({"api": "chat_completions", "stream": "true"}, m)
+    kwargs = m.chat.completions.create.await_args.kwargs
+    assert kwargs["stream"] is True and kwargs["stream_options"] == {"include_usage": True}
+    assert ir["stream"] is True
+    assert ir["total_tokens_sent"] == 14 and ir["success_count"] == 2
+    assert "p50_ttft_ms" in ir and ir["usage_missing_count"] == 0
+
+
+async def test_streamed_completions_without_usage_are_counted_as_missing() -> None:
+    m = MagicMock()
+    m.completions.create = AsyncMock(side_effect=lambda **kw: _Stream([_chunk("Hi", completions=True)]))
+    ir = await _run({"api": "completions", "stream": "true"}, m)
+    assert ir["success_count"] == 2
+    assert ir["total_tokens_sent"] == 0 and ir["usage_missing_count"] == 2
+
+
+async def test_streamed_responses_read_usage_from_the_completed_event() -> None:
+    delta = MagicMock(type="response.output_text.delta")
+    done = MagicMock(type="response.completed")
+    done.response.usage = MagicMock(input_tokens=3, output_tokens=4, total_tokens=7)
+    m = MagicMock()
+    m.responses.create = AsyncMock(side_effect=lambda **kw: _Stream([delta, done]))
+    ir = await _run({"api": "responses", "stream": "true"}, m)
+    assert ir["total_tokens_sent"] == 14 and ir["prompt_tokens_sent"] == 6
+    assert "p50_ttft_ms" in ir
+
+
+async def test_embeddings_never_stream() -> None:
+    m = MagicMock()
+    usage = MagicMock(prompt_tokens=5, total_tokens=5, spec=["prompt_tokens", "total_tokens"])
+    m.embeddings.create = AsyncMock(return_value=MagicMock(usage=usage))
+    ir = await _run({"api": "embeddings", "stream": "true"}, m)
+    assert ir["stream"] is False and ir["total_tokens_sent"] == 10
+    assert "stream" not in m.embeddings.create.await_args.kwargs
+
+
+async def test_request_api_falls_back_to_the_launch_settings() -> None:
+    """A step that builds its own params (send_requests_to_each_model) still
+    follows the scenario's Request API / Streaming settings."""
+    m = MagicMock()
+    m.completions.create = AsyncMock(side_effect=lambda **kw: _Stream([_chunk(None, _usage(1, 1))]))
+    ir = await _run({}, m, config={"request_api": "completions", "stream": "True"})
+    assert ir["api"] == "completions" and ir["stream"] is True
+
+
+async def test_unknown_request_api_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Unknown request api"):
+        await _run({"api": "batches"}, MagicMock())
+
+
+async def test_failed_requests_record_who_answered() -> None:
+    request = httpx.Request("POST", "http://m.test/v1/completions")
+    response = httpx.Response(404, request=request, json={"object": "error", "message": "nope"})
+    exc = APIStatusError("404", response=response, body=None)  # type: ignore[arg-type]
+    m = MagicMock()
+    m.completions.create = AsyncMock(side_effect=exc)
+    ir = await _run({"api": "completions"}, m)
+    assert ir["failure_origins"] == {"model": 2}
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "text", "origin"),
+    [
+        (403, {"x-ext-auth-reason": "no policy"}, "", "gateway"),
+        (429, {}, "", "gateway"),
+        (404, {"server": "fasthttp"}, "Not Found", "model"),
+        (400, {"server": "uvicorn"}, "bad", "model"),
+        (404, {"server": "istio-envoy"}, "", "gateway"),
+        (404, {}, '{"object": "error", "message": "x"}', "model"),
+        (404, {}, '{"detail": "Not Found"}', "model"),
+        (400, {}, '{"error": {"message": "bad", "type": "BadRequestError"}}', "model"),
+        (401, {}, '{"error": "denied"}', "gateway"),
+        (404, {}, "", "gateway"),
+        (503, {}, "no healthy upstream", "unknown"),
+        (400, {}, '{"something": "else"}', "unknown"),
+    ],
+)
+def test_failure_origin(status: int, headers: dict, text: str, origin: str) -> None:
+    from harness.tasks.inference import failure_origin
+
+    assert failure_origin(status, headers, text)[0] == origin

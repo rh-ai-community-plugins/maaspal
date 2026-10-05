@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   Alert,
   Button,
+  Checkbox,
   ExpandableSection,
   FormSelect,
   FormSelectOption,
@@ -92,6 +93,10 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
       cancelled = true;
     };
   }, [needsSubscriptionPicker]);
+
+  function handleCheck(key: string, checked: boolean) {
+    setValues((prev) => ({ ...prev, [key]: checked }));
+  }
 
   function handleChange(key: string, raw: string, isNumber: boolean) {
     setValues((prev) => ({
@@ -277,7 +282,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
           <TextInput
             id={`cfg-${key}`}
             type="text"
-            value={values[key] ?? ''}
+            value={String(values[key] ?? '')}
             onChange={(_e, value) => handleChange(key, value, false)}
           />
           <p style={noteStyle}>
@@ -341,13 +346,30 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
           <TextInput
             id={`cfg-${key}`}
             type="text"
-            value={values[key] ?? ''}
+            value={String(values[key] ?? '')}
             onChange={(_e, value) => handleChange(key, value, false)}
           />
           <p style={noteStyle}>
             Couldn&apos;t load subscriptions from the MaaS overview — enter the MaaSSubscription name
             manually, or leave blank for auto-selection.
           </p>
+        </div>
+      );
+    }
+
+    if (typeof defaultVal === 'boolean') {
+      return (
+        <div key={key} className="maaspal-config-form__field">
+          <div className="maaspal-config-form__label-row">
+            <Checkbox
+              id={`cfg-${key}`}
+              label={labelFor(key)}
+              isChecked={Boolean(values[key])}
+              onChange={(_e, checked) => handleCheck(key, checked)}
+            />
+            {infoFor(key)}
+          </div>
+          {help(key)}
         </div>
       );
     }
@@ -368,7 +390,7 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             onChange={(_e, value) => handleChange(key, value, false)}
           >
             {choices.map((c) => (
-              <FormSelectOption key={c} value={c} label={humanizeKey(c)} />
+              <FormSelectOption key={c} value={c} label={inputs[key]?.choice_labels?.[c] ?? humanizeKey(c)} />
             ))}
           </FormSelect>
           {help(key)}
@@ -388,7 +410,8 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
         <TextInput
           id={`cfg-${key}`}
           type={isNumber ? 'number' : key.endsWith('_token') ? 'password' : 'text'}
-          value={values[key] ?? ''}
+          value={String(values[key] ?? '')}
+          placeholder={inputs[key]?.placeholder}
           onChange={(_e, value) => handleChange(key, value, isNumber)}
         />
         {help(key)}

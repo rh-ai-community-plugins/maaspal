@@ -26,10 +26,30 @@ inputs:
   prompt:
     advanced: true
     help: "The chat message sent in every request."
+  request_api:
+    label: "Request API"
+    advanced: true
+    choices: [chat_completions, completions, responses, embeddings]
+    choice_labels:
+      chat_completions: "/v1/chat/completions"
+      completions: "/v1/completions"
+      responses: "/v1/responses"
+      embeddings: "/v1/embeddings"
+    help: >-
+      Which OpenAI-compatible endpoint the requests use. Embeddings only work
+      on an embedding model.
+  stream:
+    label: "Streaming"
+    advanced: true
+    help: >-
+      Stream each reply. Tokens are counted from the final usage chunk, and
+      the time to the first token is reported.
 config:
   subscription: ""
   requests_per_model: 3
   prompt: "Hello, world!"
+  request_api: chat_completions
+  stream: false
 verdict:
   pass: >-
     All ${harness.subscription_check.model_count} models this subscription covers answered with its key.
@@ -57,6 +77,8 @@ tasks:
         expect: "== 1"
   - name: send_requests_to_each_model
     params:
+      api: "${config.request_api}"
+      stream: "${config.stream}"
       requests_per_model: "${config.requests_per_model}"
       prompt: "${config.prompt}"
     assertions:

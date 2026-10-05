@@ -40,6 +40,7 @@ BUILTIN_SCENARIOS = frozenset(
         "multi_model_load",
         "rate_limit_per_user_or_shared",
         "rate_limit_window_recovery",
+        "request_types",
         "smoke_test",
         "subscription_auto_selection",
         "usage_metrics_accuracy",

@@ -46,6 +46,24 @@ inputs:
   prompt:
     advanced: true
     help: "The chat message sent in every request."
+  request_api:
+    label: "Request API"
+    advanced: true
+    choices: [chat_completions, completions, responses, embeddings]
+    choice_labels:
+      chat_completions: "/v1/chat/completions"
+      completions: "/v1/completions"
+      responses: "/v1/responses"
+      embeddings: "/v1/embeddings"
+    help: >-
+      Which OpenAI-compatible endpoint the requests use. Embeddings only work
+      on an embedding model.
+  stream:
+    label: "Streaming"
+    advanced: true
+    help: >-
+      Stream each reply. Tokens are counted from the final usage chunk, and
+      the time to the first token is reported.
 config:
   request_count: 50
   max_overhead_ms: 500
@@ -54,6 +72,8 @@ config:
   model_ready_timeout: 180
   subscription_namespace: "models-as-a-service"
   prompt: "Hello, world!"
+  request_api: chat_completions
+  stream: false
 verdict:
   pass: >-
     MaaS added about ${harness.metrics.gateway_overhead_p50_ms} ms: median
@@ -93,6 +113,8 @@ tasks:
       models_from_shared_state: "deployed_models"
   - name: send_requests
     params:
+      api: "${config.request_api}"
+      stream: "${config.stream}"
       url_from_shared_state: "deployed_models"
       skip_unless: "direct_probe.reachable"
       # Passthrough Route: the model's own self-signed certificate.
@@ -109,6 +131,8 @@ tasks:
         expect: "< 5"
   - name: send_requests_via_maas
     params:
+      api: "${config.request_api}"
+      stream: "${config.stream}"
       model_from_shared_state: "deployed_models"
       count: "${config.request_count}"
       concurrency: "${config.concurrency}"

@@ -407,3 +407,44 @@ test('help text lives in an info popover, and the description under "More detail
   fireEvent.click(screen.getByRole('button', { name: 'More details' }));
   expect(screen.getByText('How it works text')).toBeInTheDocument();
 });
+
+const requestApiScenario: Scenario = {
+  name: 'smoke_test',
+  description: 'test',
+  category: 'Quick check',
+  inputs: {
+    request_api: {
+      label: 'Request API',
+      advanced: true,
+      choices: ['chat_completions', 'completions'],
+      choice_labels: { chat_completions: '/v1/chat/completions', completions: '/v1/completions' },
+    },
+    stream: { label: 'Streaming', advanced: true },
+  },
+  config: { request_count: 3, request_api: 'chat_completions', stream: false },
+};
+
+test('Request API shows endpoint paths, Streaming is a checkbox, and both are sent as typed values', async () => {
+  mockFetch();
+
+  await act(async () => {
+    render(<RunTrigger scenario={requestApiScenario} onConfirm={jest.fn()} onCancel={jest.fn()} />);
+  });
+  fireEvent.click(screen.getByRole('button', { name: /advanced settings/i }));
+
+  const api = screen.getByLabelText('Request API') as HTMLSelectElement;
+  expect(screen.getByRole('option', { name: '/v1/chat/completions' })).toBeInTheDocument();
+  fireEvent.change(api, { target: { value: 'completions' } });
+
+  const stream = screen.getByLabelText('Streaming') as HTMLInputElement;
+  expect(stream.type).toBe('checkbox');
+  expect(stream.checked).toBe(false);
+  fireEvent.click(stream);
+
+  fireEvent.click(screen.getByRole('button', { name: /launch run/i }));
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledWith('/maaspal/api/runs', expect.anything()));
+  const [, init] = (global.fetch as jest.Mock).mock.calls.find(([url]) => url === '/maaspal/api/runs')!;
+  const body = JSON.parse(init.body as string);
+  expect(body.config_overrides.request_api).toBe('completions');
+  expect(body.config_overrides.stream).toBe(true);
+});

@@ -1,0 +1,88 @@
+name: request_types
+title: "Which request types does my model support?"
+summary: >-
+  Tries every request type (chat, completions, responses, embeddings,
+  streamed and batched) and reports which work, and for each that doesn't,
+  whether MaaS or the model refused it.
+description: >-
+  Creates one API key and sends a few requests of each type to the model
+  through MaaS: chat completions, completions, and responses (each plain and
+  streamed), completions with a batch of prompts in one call, embeddings, and
+  vLLM's Anthropic-style messages, tokenize and rerank endpoints. A type that
+  fails never fails the run; the results table says what worked. To tell
+  whether MaaS or the model refused a type, the same requests also go
+  straight to the model's own in-cluster service (nothing is created for
+  this). If that service can't be reached, for example because a
+  NetworkPolicy blocks it, the answer comes from the error responses alone
+  and is marked "likely". Embeddings and rerank only work on embedding and
+  reranker models, so a chat model is expected to fail them.
+category: "Quick check"
+kind: verify
+order: 3
+mutates: [api_keys]
+requires: [target_model_name, target_model_namespace]
+est_duration: "~1 min"
+plan_template: >-
+  Create 1 API key and send ${config.requests_per_type} requests of each
+  request type to ${model}, through MaaS and directly to the model.
+inputs:
+  target_model_name:
+    label: "Model"
+  requests_per_type:
+    label: "Requests per type"
+  types:
+    label: "Request types"
+    advanced: true
+    placeholder: "all"
+    help: >-
+      Comma-separated, or blank for all: chat, chat_stream, completions,
+      completions_stream, completions_batch, responses, responses_stream,
+      embeddings, messages, tokenize, rerank.
+  batch_size:
+    label: "Prompts per batched request"
+    advanced: true
+    help: "How many prompts the batched completions request carries in one call."
+  compare_direct:
+    label: "Compare with a direct call to the model"
+    advanced: true
+    help: >-
+      Also send each request type straight to the model's in-cluster service,
+      skipping MaaS, to tell whether MaaS or the model refused a failing type.
+  prompt:
+    advanced: true
+    help: "The text sent in every request."
+config:
+  target_model_name: ""
+  target_model_namespace: ""
+  requests_per_type: 3
+  types: ""
+  batch_size: 4
+  compare_direct: true
+  prompt: "Hello, world!"
+verdict:
+  pass: "${harness.request_types.supported_count} of ${harness.request_types.selected_count} request types work through MaaS."
+  fail: "Not every request type could be tried — see the step that failed below."
+tasks:
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-request-types-key"
+      count: 1
+  - name: send_requests_each_type
+    params:
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      types: "${config.types}"
+      requests_per_type: "${config.requests_per_type}"
+      batch_size: "${config.batch_size}"
+      compare_direct: "${config.compare_direct}"
+      prompt: "${config.prompt}"
+    assertions:
+      tried_count:
+        label: "Request types tried"
+        unit: "types"
+        description: >-
+          Every selected type was attempted. Whether each one works is in
+          the Request types table; a type that fails doesn't fail the run.
+        promql: "${harness.request_types.tried_count}"
+        expect: ">= 1"
+cleanup: automatic

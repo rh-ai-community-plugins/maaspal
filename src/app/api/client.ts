@@ -25,6 +25,9 @@ export interface ScenarioInput {
   advanced?: boolean;
   // Rendered as a select instead of a free-text input.
   choices?: string[];
+  // Display text per choice (e.g. "/v1/chat/completions" for
+  // chat_completions); a choice without one is humanized.
+  choice_labels?: Record<string, string>;
   // The blank option's text on the model/subscription pickers, e.g. "All
   // models" when leaving it blank means "every model".
   placeholder?: string;
@@ -112,7 +115,7 @@ export async function listScenarios(): Promise<Scenario[]> {
 
 export async function createRun(
   scenario: string,
-  config_overrides: Record<string, string | number> = {},
+  config_overrides: Record<string, string | number | boolean> = {},
   auto_cleanup = true,
 ): Promise<CreateRunResponse> {
   const r = await fetch(`${API_BASE}/runs`, {

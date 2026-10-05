@@ -1,10 +1,14 @@
 import asyncio
 import contextlib
+import json
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
+from openai.types.chat import ChatCompletionMessageParam
 
 from harness.durations import parse_duration_s
 from harness.result import TaskResult
@@ -132,6 +136,9 @@ def _summary_line(r: dict, planned: int | None) -> str:
     """One-line human narration of a send_requests burst, shown under its chip."""
     sent = f"{r['total_requests']}/{planned}" if planned else str(r["total_requests"])
     parts = [f"{sent} requests", f"{r['success_count']} OK"]
+    api = r.get("api") or _DEFAULT_API
+    if api != _DEFAULT_API or r.get("stream"):
+        parts.insert(0, API_PATHS.get(api, api) + (", streamed" if r.get("stream") else ""))
     if r["rate_limited_count"]:
         parts.append(f"{r['rate_limited_count']} throttled (429)")
     if r["unauthorized_count"]:
@@ -143,6 +150,10 @@ def _summary_line(r: dict, planned: int | None) -> str:
     if r["other_error_count"]:
         parts.append(f"{r['other_error_count']} other errors")
     parts.append(f"{r['total_tokens_sent']} tokens")
+    if r.get("usage_missing_count"):
+        parts.append(f"{r['usage_missing_count']} replies without token usage")
+    if "p50_ttft_ms" in r:
+        parts.append(f"first token p50 {r['p50_ttft_ms']:,.0f} ms")
     if "tokens_before_first_429" in r:
         parts.append(f"first 429 after {r['tokens_before_first_429']} tokens")
     samples = r.get("error_samples") or []
@@ -244,6 +255,147 @@ def _percentiles(latencies: Sequence[float]) -> dict[str, float]:
     }
 
 
+# The OpenAI-compatible endpoints a send_requests step can use — the launch
+# form's "Request API" setting (`request_api` config / `api` param).
+API_PATHS = {
+    "chat_completions": "/v1/chat/completions",
+    "completions": "/v1/completions",
+    "responses": "/v1/responses",
+    "embeddings": "/v1/embeddings",
+}
+_DEFAULT_API = "chat_completions"
+
+
+def _truthy(value: object) -> bool:
+    return str(value).lower() in ("true", "1", "yes")
+
+
+@dataclass
+class _Reply:
+    """What one successful request reported: token usage (None when the
+    server sent none — a stream without a usage chunk) and, when streamed,
+    the time to the first generated text."""
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    ttft_ms: float | None = None
+
+
+def _int_attr(obj: object, *names: str) -> int | None:
+    for name in names:
+        value = getattr(obj, name, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+    return None
+
+
+def _reply_from_usage(usage: object, ttft_ms: float | None = None) -> _Reply:
+    """Chat/completions/embeddings report prompt/completion/total tokens;
+    the Responses API reports input/output/total."""
+    if usage is None:
+        return _Reply(ttft_ms=ttft_ms)
+    prompt_tokens = _int_attr(usage, "prompt_tokens", "input_tokens")
+    completion_tokens = _int_attr(usage, "completion_tokens", "output_tokens")
+    total = _int_attr(usage, "total_tokens")
+    if total is None and prompt_tokens is not None:
+        total = prompt_tokens + (completion_tokens or 0)
+    return _Reply(prompt_tokens, completion_tokens, total, ttft_ms)
+
+
+async def _send_one(
+    client: AsyncOpenAI, *, api: str, stream: bool, model: str, prompt: str, batch_size: int, t0: float
+) -> _Reply:
+    """One request on the chosen endpoint. A streamed reply is read to the
+    end (asking for a final usage chunk), so a request only counts as OK once
+    the whole answer arrived. `batch_size` > 1 sends that many prompts in one
+    /v1/completions or /v1/embeddings call."""
+    many: str | list[str] = [prompt] * batch_size if batch_size > 1 else prompt
+    reply: Any
+    if api == "embeddings":
+        reply = await client.embeddings.create(model=model, input=many)
+        return _reply_from_usage(getattr(reply, "usage", None))
+    if api == "completions":
+        if not stream:
+            reply = await client.completions.create(model=model, prompt=many)
+            return _reply_from_usage(getattr(reply, "usage", None))
+        reply = await client.completions.create(
+            model=model, prompt=many, stream=True, stream_options={"include_usage": True}
+        )
+        return await _read_stream(reply, t0, lambda c: bool(c.choices and c.choices[0].text))
+    if api == "responses":
+        if not stream:
+            reply = await client.responses.create(model=model, input=prompt)
+            return _reply_from_usage(getattr(reply, "usage", None))
+        reply = await client.responses.create(model=model, input=prompt, stream=True)
+        ttft_ms: float | None = None
+        usage = None
+        async for event in reply:
+            kind = getattr(event, "type", "")
+            if ttft_ms is None and kind == "response.output_text.delta":
+                ttft_ms = (time.monotonic() - t0) * 1000
+            if kind == "response.completed":
+                usage = getattr(getattr(event, "response", None), "usage", None)
+        return _reply_from_usage(usage, ttft_ms)
+    messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": prompt}]
+    if not stream:
+        reply = await client.chat.completions.create(model=model, messages=messages)
+        return _reply_from_usage(getattr(reply, "usage", None))
+    reply = await client.chat.completions.create(
+        model=model, messages=messages, stream=True, stream_options={"include_usage": True}
+    )
+    return await _read_stream(reply, t0, lambda c: bool(c.choices and c.choices[0].delta.content))
+
+
+async def _read_stream(chunks: Any, t0: float, has_text: Callable[[Any], bool]) -> _Reply:
+    ttft_ms: float | None = None
+    usage = None
+    async for chunk in chunks:
+        if ttft_ms is None and has_text(chunk):
+            ttft_ms = (time.monotonic() - t0) * 1000
+        if getattr(chunk, "usage", None) is not None:
+            usage = chunk.usage
+    return _reply_from_usage(usage, ttft_ms)
+
+
+def failure_origin(status: int | None, headers: Mapping[str, str], text: str) -> tuple[str, str]:
+    """Who answered a failed request: ("gateway" | "model" | "unknown",
+    evidence), from the response alone — used when the model can't be called
+    directly to compare. Confirmed live (2026-10-05, RHOAI 3.5.1): responses
+    the model sends pass through the MaaS gateway with the model server's own
+    `server` header (llm-d-inference-sim "fasthttp", vLLM "uvicorn"), while
+    the gateway's own errors carry none — an unknown route or model is a bare
+    404 with an empty body, an auth denial a 403 with x-ext-auth-reason."""
+    lowered = {k.lower(): v for k, v in headers.items()}
+    reason = lowered.get("x-ext-auth-reason")
+    if reason:
+        return "gateway", f"the MaaS auth layer denied it ({reason[:80]})"
+    if status == 429:
+        return "gateway", "throttled by the MaaS rate limit (429)"
+    server = lowered.get("server", "")
+    if server and "envoy" not in server.lower():
+        return "model", f"answered by the model server itself (server: {server[:40]})"
+    body: object = None
+    with contextlib.suppress(ValueError):
+        body = json.loads(text) if text.strip() else None
+    if isinstance(body, dict) and (
+        body.get("object") == "error" or "detail" in body or isinstance(body.get("error"), dict)
+    ):
+        return "model", "error body in vLLM's format"
+    if status in (401, 403):
+        return "gateway", f"{status} with no model error body — the MaaS auth layer"
+    if not text.strip() and status is not None:
+        return "gateway", f"HTTP {status} with an empty body and no server header — from the gateway"
+    return "unknown", f"HTTP {status}"
+
+
+def _exc_failure_origin(exc: APIStatusError) -> tuple[str, str]:
+    response = exc.response
+    return failure_origin(
+        exc.status_code, dict(getattr(response, "headers", {}) or {}), getattr(response, "text", "") or ""
+    )
+
+
 class SendRequestsTask(Task):
     async def run(self, ctx: TaskContext) -> TaskResult:
         start = time.monotonic()
@@ -252,6 +404,17 @@ class SendRequestsTask(Task):
         concurrency = int(self.params.get("concurrency", 5))
         prompt = str(self.params.get("prompt", "Hello"))
         result_key = str(self.params.get("result_key", "inference_results"))
+        # Which endpoint, and whether to stream: the step's own params, else
+        # the launch form's Request API / Streaming settings — so a step that
+        # builds its own params (send_requests_to_each_model) still follows them.
+        api = str(self.params.get("api") or ctx.config.get("request_api") or _DEFAULT_API)
+        if api not in API_PATHS:
+            raise ValueError(f"Unknown request api {api!r} — one of {', '.join(API_PATHS)}")
+        stream_param = self.params.get("stream")
+        stream = _truthy(ctx.config.get("stream", False) if stream_param in (None, "") else stream_param)
+        if api == "embeddings":
+            stream = False  # embeddings have no streaming form
+        batch_size = max(1, int(self.params.get("batch_size") or 1))
 
         # `skip_unless: "ns.key"` — only send if that shared_state value is
         # truthy (e.g. "direct_probe.reachable"): a precondition that failed
@@ -468,7 +631,7 @@ class SendRequestsTask(Task):
             print(
                 f"[send_requests] base_url={url} model={model} "
                 f"keys=[{', '.join(_redact(k) for k in key_strings)}] "
-                f"count={count} concurrency={concurrency}",
+                f"count={count} concurrency={concurrency} api={API_PATHS[api]} stream={stream}",
                 flush=True,
             )
         else:
@@ -476,7 +639,8 @@ class SendRequestsTask(Task):
             clients = [_client(token, url)]
             print(
                 f"[send_requests] base_url={url} model={model} "
-                f"token={_redact(token)} count={count} concurrency={concurrency}",
+                f"token={_redact(token)} count={count} concurrency={concurrency} "
+                f"api={API_PATHS[api]} stream={stream}",
                 flush=True,
             )
 
@@ -498,6 +662,16 @@ class SendRequestsTask(Task):
         total_tokens_sent = 0
         prompt_tokens_sent = 0
         completion_tokens_sent = 0
+        # Successful replies that carried no token usage (a stream without a
+        # final usage chunk) — their tokens are missing from the totals, so
+        # token checks would read low rather than wrong-but-plausible.
+        usage_missing_count = 0
+        # Time to the first generated text, per streamed reply.
+        ttfts: list[float] = []
+        # Who answered each failed HTTP request (failure_origin), and one
+        # example of the evidence per origin.
+        failure_origins: dict[str, int] = {}
+        failure_origin_evidence: dict[str, str] = {}
         # Cumulative total_tokens_sent at the moment of the FIRST 429 — lets
         # a scenario assert the rate limit actually triggered around the
         # configured budget (with an expected spillover margin for whichever
@@ -565,7 +739,7 @@ class SendRequestsTask(Task):
             nonlocal first_rate_limited_at_tokens, requests_before_first_429
             nonlocal seconds_to_first_429, successes_after_first_429, skipped
             nonlocal first_429_at, concurrency_at_first_429, max_tokens_per_request
-            nonlocal final_http_failures
+            nonlocal final_http_failures, usage_missing_count
             async with sem:
                 if (stop_after_429s and rate_limited_count >= stop_after_429s) or stop_reason:
                     skipped += 1
@@ -575,10 +749,16 @@ class SendRequestsTask(Task):
                 status_class = "ok"
                 error_message: str | None = None
                 effective_model = (key_models[client_idx] if key_models else None) or model
+                reply: _Reply | None = None
                 try:
-                    response = await clients[client_idx].chat.completions.create(
+                    reply = await _send_one(
+                        clients[client_idx],
+                        api=api,
+                        stream=stream,
                         model=effective_model,
-                        messages=[{"role": "user", "content": prompt}],
+                        prompt=prompt,
+                        batch_size=batch_size,
+                        t0=t0,
                     )
                     success += 1
                     # Leakage = admitted AFTER MaaS had already throttled. A
@@ -586,21 +766,22 @@ class SendRequestsTask(Task):
                     # was admitted before it, so doesn't count.
                     if first_429_at is not None and t0 > first_429_at:
                         successes_after_first_429 += 1
-                    usage = getattr(response, "usage", None)
-                    tokens = getattr(usage, "total_tokens", None)
-                    if isinstance(tokens, (int, float)):
-                        total_tokens_sent += int(tokens)
-                        max_tokens_per_request = max(max_tokens_per_request, int(tokens))
-                    prompt_tokens = getattr(usage, "prompt_tokens", None)
-                    if isinstance(prompt_tokens, (int, float)):
-                        prompt_tokens_sent += int(prompt_tokens)
-                    completion_tokens = getattr(usage, "completion_tokens", None)
-                    if isinstance(completion_tokens, (int, float)):
-                        completion_tokens_sent += int(completion_tokens)
+                    if reply.total_tokens is None:
+                        usage_missing_count += 1
+                    else:
+                        total_tokens_sent += reply.total_tokens
+                        max_tokens_per_request = max(max_tokens_per_request, reply.total_tokens)
+                    prompt_tokens_sent += reply.prompt_tokens or 0
+                    completion_tokens_sent += reply.completion_tokens or 0
+                    if reply.ttft_ms is not None:
+                        ttfts.append(reply.ttft_ms)
                 except APIStatusError as exc:
                     fail += 1
                     final_http_failures += 1
                     status_class = _status_class(exc.status_code)
+                    origin, evidence = _exc_failure_origin(exc)
+                    failure_origins[origin] = failure_origins.get(origin, 0) + 1
+                    failure_origin_evidence.setdefault(origin, evidence)
                     if exc.status_code == 429:
                         rate_limited_count += 1
                         if first_rate_limited_at_tokens is None:
@@ -643,7 +824,7 @@ class SendRequestsTask(Task):
                     acc["latencies"].append(latency_ms)
                     if status_class == "ok":
                         acc["ok"] += 1
-                        acc["tokens"] += int(getattr(getattr(response, "usage", None), "total_tokens", 0) or 0)
+                        acc["tokens"] += (reply.total_tokens if reply else 0) or 0
                     elif status_class == "throttled":
                         acc["throttled"] += 1
                     else:
@@ -690,8 +871,17 @@ class SendRequestsTask(Task):
                     "total_tokens_sent": total_tokens_sent,
                     "prompt_tokens_sent": prompt_tokens_sent,
                     "completion_tokens_sent": completion_tokens_sent,
+                    "usage_missing_count": usage_missing_count,
+                    "api": api,
+                    "stream": stream,
+                    "failure_origins": dict(failure_origins),
+                    "failure_origin_evidence": dict(failure_origin_evidence),
                     **_percentiles(latencies),
                 }
+                if ttfts:
+                    ttft_pct = _percentiles(ttfts)
+                    result_data["p50_ttft_ms"] = ttft_pct["p50_latency_ms"]
+                    result_data["p95_ttft_ms"] = ttft_pct["p95_latency_ms"]
                 # Only present once a 429 has actually happened — an absent
                 # key (not a 0/None placeholder) is what keeps a referencing
                 # assertion honestly PENDING instead of misreading "not yet

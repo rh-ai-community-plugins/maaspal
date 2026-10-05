@@ -4,7 +4,7 @@ import type { MaasModel, MaasSubscription, Scenario, ScenarioInput } from './api
 // out of the component file so they're testable on their own and the
 // component module only exports components (React fast refresh).
 
-export type ConfigValues = Record<string, string | number>;
+export type ConfigValues = Record<string, string | number | boolean>;
 
 // Fields a MaaSModelRef-backed scenario uses to target a specific model CR —
 // these two always travel together, so they get one combined picker instead
@@ -26,7 +26,7 @@ export const _HARNESS_OWNER_GROUP = 'system:authenticated';
 export function initValues(config: Scenario['config']): ConfigValues {
   const out: ConfigValues = {};
   for (const [k, v] of Object.entries(config)) {
-    out[k] = v as string | number;
+    out[k] = v;
   }
   return out;
 }

@@ -114,6 +114,7 @@ maaspal/
 │   │       ├── inference.py        # send_requests: fixed bursts, until_throttled ramp, step load (stages)
 │   │       ├── subscription.py     # apply_rate_limit_subscription, apply_priority_test_subscriptions, provision_subscriptions_distributed
 │   │       ├── subscription_check.py # read_subscription_limits, discover_subscription_models, send_requests_to_each_model (ADR-025)
+│   │       ├── request_types.py    # send_requests_each_type: every request type via MaaS + direct, "Failed at" MaaS or model
 │   │       ├── access_policy.py    # apply_auth_policy (ADR-018)
 │   │       ├── model.py            # deploy_simulated_model (ADR-024), expose_model_route + probe_direct_endpoint (gateway_overhead)
 │   │       ├── platform_health.py  # check_platform_health (REST smoke), check_model_health (read-only model wiring, one or all models)
@@ -122,7 +123,7 @@ maaspal/
 │   │       └── stubs.py            # pause (production: waits out rate-limit windows), stub_pass/stub_fail (tests)
 │   │
 │   ├── scenarios/                  # Scenario YAMLs (baked into the BFF image) — see "Scenarios" below
-│   │   ├── smoke_test.yaml, verify_subscription.yaml                         # Quick check
+│   │   ├── smoke_test.yaml, verify_subscription.yaml, request_types.yaml     # Quick check
 │   │   ├── verify_subscription_rate_limit.yaml, keys_share_user_budget.yaml,
 │   │   │   rate_limit_window_recovery.yaml, subscription_auto_selection.yaml,
 │   │   │   rate_limit_per_user_or_shared.yaml                                # Rate limits
@@ -436,6 +437,10 @@ See ADR-016 for the full reasoning behind pod-delete-with-grace-period vs. Job-d
   - **Direct calls**: `url_from_shared_state` reads a deployed model's `direct_url` (set by `expose_model_route`); `insecure_tls` for its self-signed certificate.
   - Aliases: `send_requests_after_window`, `send_requests_via_maas`, `verify_other_keys_still_work`, `verify_revoked_key_denied`, `send_requests_as_second_user`.
 
+- **Request API / Streaming** (`send_requests`): `api: chat_completions|completions|responses|embeddings` (default chat), `stream` (asks for a final usage chunk, reads the stream to the end, records `p50/p95_ttft_ms`; ignored for embeddings), `batch_size` (> 1 sends a list of prompts to completions/embeddings). Both fall back to `ctx.config["request_api"]`/`["stream"]`, so `send_requests_to_each_model` follows them too. Every scenario with a send-requests-family step declares `request_api: chat_completions` + `stream: false` in `config:`, as advanced `inputs` (`choice_labels` shows endpoint paths; a boolean default renders as a checkbox), and passes `api: "${config.request_api}"`/`stream: "${config.stream}"` to each such step — enforced by `test_send_requests_steps_follow_request_api_settings`. Results add `api`, `stream`, `usage_missing_count` (replies with no usage; their tokens are not guessed) and `failure_origins`/`failure_origin_evidence` (`failure_origin()`: who answered a failed request — `gateway` from `x-ext-auth-reason`/429/an empty body with no `server` header, `model` from the model server's own `server` header (`fasthttp`, `uvicorn`) or a vLLM-style JSON error body; confirmed live 2026-10-05). Streaming through MaaS is token-counted even when a client omits `include_usage`: MaaS's payload-processing `stream-usage-enforcer` adds it (confirmed live).
+
+- **`send_requests_each_type`** (`harness/tasks/request_types.py`): for each selected type (`types`, blank = all: chat, completions, responses — each plain and streamed —, completions batched, embeddings, and plain-HTTP probes for vLLM's `/v1/messages`, `/tokenize`, `/v1/rerank`) sends `requests_per_type` requests through MaaS with the scenario's key and, when `compare_direct` and the model's in-cluster workload Service (`<name>-kserve-workload-svc.<ns>.svc:8000`, no Route, nothing created) answers, the same requests directly using the model server's own name from its `/v1/models` (MaaS's id, e.g. `publishers/llm/models/…`, is rewritten by the gateway and unknown to the model). Every type, probes included, gets a traffic card. `attribute()` decides **Failed at**: works direct but not via MaaS → MaaS gateway; fails both with a real HTTP answer → model; direct unusable → the MaaS responses' `failure_origins`, marked "(likely)". Never fails on a type: writes `shared_state["request_types"]` counts, a "Request types" table, a finding and `_verdict_text`.
+
 - **`expose_model_route` / `probe_direct_endpoint`** (`harness/tasks/model.py`): a passthrough-TLS OpenShift Route straight to a just-deployed model's workload Service (`<name>-kserve-workload-svc`, port `https`), so a latency comparison enters through cluster ingress both ways. `LLMInferenceService.status.addresses` only ever lists MaaS gateway URLs (confirmed live). The probe checks the route answers before timing, records `direct_probe.reachable`, and never fails the run. If unreachable it records a finding, and the MaaS leg still runs. Needs `routes` in `chart/templates/rbac-model-write.yaml`.
 
 - **Per-resource cleanup status (ADR-025)**: tasks call `harness/tasks/base.py:record_created(ctx, task, kind, name, existed=…)` for every cluster object they create or patch (names only — never key values/tokens). The runner marks each with its owning task's `cleanup()` outcome (`removed`/`restored`/`cleanup failed`, or `left in place` with auto cleanup off; mid-run `revoked` for keys), via `harness/cleanup_state.py`, which `api/cleanup.py`'s manual "Clean Up Now" also uses.
@@ -515,6 +520,7 @@ Every scenario answers one question of the form "is my MaaS behaving the way I e
 | Scenario (Category, kind) | Question | Key checks | Notes |
 |---|---|---|---|
 | `smoke_test` (Quick check, verify) | Is MaaS working end to end? | models listed ≥ 1; key created; error rate < 5% | REST + gateway only. Revocation/search moved to `api_key_lifecycle`. Formerly `platform_health_check`. |
+| `request_types` (Quick check, verify) | Which request types does my model support? | request types tried ≥ 1 (a failing type never fails the run) | `send_requests_each_type`: every type N times via MaaS and directly; a "Request types" table with Failed at (MaaS gateway / model / likely), and a finding listing supported, blocked by MaaS and unsupported types. |
 | `verify_subscription` (Quick check, verify) | Does my subscription work for every model it covers? | covers ≥ 1 model; key bound to it; models that didn't answer == 0 | Visible steps: `discover_subscription_models` → `provision_api_key` (pinned) → `send_requests_to_each_model`. Reachability only — limits are the Rate limits scenarios' job. |
 | `verify_subscription_rate_limit` (Rate limits, verify) | Is my subscription's rate limit enforced? | throttled at all; `tokens_before_first_429` between the subscription's own limit and limit + `allowed_overshoot`; successes after first 429 == 0; Limitador `limited_calls` delta > 0 | Existing subscription only. `read_subscription_limits` reads the real limit and window; `until_throttled` ramps concurrency to use it up within one window. Max concurrency / duration / requests are advanced settings; if the limit can't be reached, a finding names the bottleneck. **Confirmed live 2026-10-02** on `simulator-premium` (100,000 / 1m): throttled at 100,009 tokens at concurrency 4. Merged from `rate_limit_validation` + `_existing_subscription`. |
 | `keys_share_user_budget` (Rate limits, explore) | Do all my keys share one budget? | combined tokens before first 429 within [limit, limit + `allowed_overshoot`]; no key succeeds after the first 429 | Own temporary subscription (100 tokens / 24h), N keys round-robin, until throttled. Not yet run live. |
@@ -573,6 +579,7 @@ Run from the dashboard's MaaS:PAL pages (or `POST /api/runs` through the dashboa
 |---|---|---|
 | `smoke_test` | models listed, key created, inference < 5% errors | earlier form (as `platform_health_check`) |
 | `verify_subscription` | pick a subscription: table lists its models, each answers | not run live |
+| `request_types` | table fills for every type; direct comparison reachable (or the reason it isn't); Failed at matches what `curl` shows via MaaS and direct | not run live |
 | `verify_subscription_rate_limit` | throttled within [limit, limit + overshoot], 0 successes after, Limitador denials = harness 429s; on a huge limit, an "Inconclusive" finding naming the bottleneck | **confirmed 2026-10-02** (`simulator-premium`, 100k/1m: 100,009 tokens, concurrency 4, 6 denials = 6 429s) |
 | `keys_share_user_budget` | combined tokens at first 429 ≈ one limit; no key gets through after | not run live |
 | `rate_limit_window_recovery` | throttled, wait, access back; one chart with the wait shaded | not run live |

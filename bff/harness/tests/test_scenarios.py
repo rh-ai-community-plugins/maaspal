@@ -28,9 +28,9 @@ _KNOWN_KINDS = {"verify", "explore"}
 _KNOWN_MUTATES = {"api_keys", "subscriptions", "auth_policies", "models", "service_accounts", "routes"}
 
 
-def test_exactly_fourteen_production_scenarios() -> None:
-    assert len(_SCENARIO_PATHS) == 14, (
-        f"Expected 14 scenario files, found {len(_SCENARIO_PATHS)}: "
+def test_exactly_fifteen_production_scenarios() -> None:
+    assert len(_SCENARIO_PATHS) == 15, (
+        f"Expected 15 scenario files, found {len(_SCENARIO_PATHS)}: "
         f"{[p.name for p in _SCENARIO_PATHS]}"
     )
 
@@ -129,6 +129,33 @@ def test_scenario_ui_metadata_references_real_config_keys(path: pathlib.Path) ->
             dep_choices = (inputs.get(dep) or {}).get("choices")
             if dep_choices:
                 assert str(value) in dep_choices, f"{path.name}: when {dep}={value!r} isn't a choice"
+
+
+@pytest.mark.parametrize("path", _SCENARIO_PATHS, ids=[p.stem for p in _SCENARIO_PATHS])
+def test_send_requests_steps_follow_request_api_settings(path: pathlib.Path) -> None:
+    """Every scenario that sends inference requests offers the Request API and
+    Streaming settings as advanced inputs, and every such step uses them —
+    checked by task class, so a new send_requests alias is covered too."""
+    from harness.tasks.inference import API_PATHS, SendRequestsTask
+    from harness.tasks.subscription_check import SendRequestsToEachModelTask
+
+    raw = yaml.safe_load(path.read_text())
+    steps = [
+        t for t in raw.get("tasks") or []
+        if issubclass(REGISTRY[t["name"]], (SendRequestsTask, SendRequestsToEachModelTask))
+    ]
+    if not steps:
+        return
+    config, inputs = raw.get("config") or {}, raw.get("inputs") or {}
+    assert config.get("request_api") == "chat_completions", f"{path.name}: request_api must default to chat"
+    assert config.get("stream") is False, f"{path.name}: stream must default to false"
+    assert inputs.get("request_api", {}).get("advanced"), f"{path.name}: request_api must be an advanced input"
+    assert inputs.get("stream", {}).get("advanced"), f"{path.name}: stream must be an advanced input"
+    assert set(inputs["request_api"].get("choices") or []) == set(API_PATHS), path.name
+    for step in steps:
+        params = step.get("params") or {}
+        assert params.get("api") == "${config.request_api}", f"{path.name}: {step['name']} ignores request_api"
+        assert params.get("stream") == "${config.stream}", f"{path.name}: {step['name']} ignores stream"
 
 
 def test_previous_names_are_unique_and_retired() -> None:

@@ -191,6 +191,9 @@ class SendRequestsToEachModelTask(Task):
                     "prompt": prompt,
                     "retries": 0,
                     "result_key": result_key,
+                    # The scenario's Request API / Streaming settings.
+                    "api": self.params.get("api"),
+                    "stream": self.params.get("stream"),
                 },
             ).run(ctx)
             ctx.shared_state["_traffic"][result_key]["label"] = m["ref"]
