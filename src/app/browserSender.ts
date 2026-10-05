@@ -247,11 +247,9 @@ export function blockedMessage(url: string, error: string | null | undefined): s
   } catch {
     // keep the raw URL
   }
-  return (
-    `Blocked by the browser: no readable answer from ${host}` +
-    (error ? ` (${error})` : '') +
-    ' — the gateway did not allow a cross-origin call from this page, or is not reachable from this machine.'
-  );
+  // A short, groupable error reason, like the harness's own — the step's
+  // finding and verdict explain what it means (CORS, or unreachable).
+  return `Blocked by the browser: no readable answer from ${host}` + (error ? ` (${error})` : '');
 }
 
 export interface BurstCallbacks {

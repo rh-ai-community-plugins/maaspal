@@ -221,3 +221,12 @@ async def test_unsupported_modes_say_so(results_dir, extra) -> None:
         await SendRequestsTask("send_requests", {
             "count": 1, "url": "http://m.test", "token": "sk-t", "from_browser": True, **extra,
         }).run(_ctx())
+
+
+async def test_a_browser_error_reason_is_never_cut_short(results_dir) -> None:
+    ctx = _ctx()
+    reason = "Blocked by the browser: no readable answer from maas.apps.example.com (TypeError: Failed to fetch) " + "x" * 300
+    await _run(SendRequestsTask("send_requests", {
+        "count": 2, "url": "http://m.test", "token": "sk-t", "from_browser": True,
+    }), ctx, results_dir, [_ok(0.0), {"t0_offset_s": 0.1, "latency_ms": 1.0, "error": reason}])
+    assert ctx.shared_state["inference_results"]["error_samples"][0]["message"] == reason

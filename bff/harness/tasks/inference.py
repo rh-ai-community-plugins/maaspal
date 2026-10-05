@@ -488,7 +488,8 @@ def _outcome_from_browser(rec: dict, start: float) -> _Outcome:
             t0=t0, latency_ms=latency, status=status, error_message=message,
             origin=failure_origin(status, headers, body),
         )
-    return _Outcome(t0=t0, latency_ms=latency, error_message=str(rec.get("error") or "no response")[:200])
+    # Same cap as the BFF accepts (api/routes/browser.py) — never cut silently below it.
+    return _Outcome(t0=t0, latency_ms=latency, error_message=str(rec.get("error") or "no response")[:500])
 
 
 def _exc_failure_origin(exc: APIStatusError) -> tuple[str, str]:
