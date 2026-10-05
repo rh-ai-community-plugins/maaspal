@@ -50,6 +50,8 @@ export interface Scenario {
   // Always present — the backend defaults a scenario with no `category:`
   // field to "Custom" (api/routes/scenarios.py).
   category: string;
+  // Not one of the scenarios MaaS:PAL ships with (api/routes/scenarios.py).
+  custom?: boolean;
   kind?: 'verify' | 'explore';
   // What kinds of cluster objects a run creates/changes.
   mutates?: string[];

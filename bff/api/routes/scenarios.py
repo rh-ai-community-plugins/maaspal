@@ -13,6 +13,41 @@ router = APIRouter()
 # evolve without touching harness/config.py.
 _LIST_FIELDS = ("mutates", "requires", "needs_rbac", "previous_names")
 
+# The scenario categories the UI knows, in display order — mirrored by
+# CATEGORY_ORDER in src/app/components/ScenarioCatalog.tsx; keep both in sync.
+KNOWN_CATEGORIES = (
+    "Quick check",
+    "Rate limits",
+    "Access control",
+    "API keys",
+    "Usage metrics",
+    "Performance",
+    "Diagnostics",
+)
+CUSTOM_CATEGORY = "Custom"
+
+# The scenarios shipped with MaaS:PAL. Any other scenario file is someone's
+# own and is listed as custom: labelled "Custom" in the catalog and shown
+# ahead of the built-in ones.
+BUILTIN_SCENARIOS = frozenset(
+    {
+        "api_key_lifecycle",
+        "denied_without_auth_policy",
+        "gateway_overhead",
+        "keys_share_user_budget",
+        "load_test",
+        "model_config_health",
+        "multi_model_load",
+        "rate_limit_per_user_or_shared",
+        "rate_limit_window_recovery",
+        "smoke_test",
+        "subscription_auto_selection",
+        "usage_metrics_accuracy",
+        "verify_subscription",
+        "verify_subscription_rate_limit",
+    }
+)
+
 
 def _scenarios_dir() -> Path:
     return Path(os.environ.get("SCENARIOS_DIR", "scenarios"))
@@ -31,6 +66,7 @@ async def list_scenarios() -> list[dict]:
             continue
         raw = yaml.safe_load(f.read_text())
         name = raw.get("name", f.stem)
+        category = raw.get("category")
         result.append(
             {
                 "name": name,
@@ -38,11 +74,10 @@ async def list_scenarios() -> list[dict]:
                 "summary": raw.get("summary") or "",
                 "description": raw.get("description", ""),
                 "config": resolve_config_defaults(raw.get("config", {}) or {}, env),
-                # A scenario with no explicit category (e.g. one someone
-                # writes themselves) lands in "Custom" automatically — the
-                # UI always shows that bucket, so this is the only default
-                # needed to make it "just work".
-                "category": raw.get("category") or "Custom",
+                # A scenario may join a built-in category; with no category,
+                # or one the UI doesn't know, it lands in "Custom".
+                "category": category if category in KNOWN_CATEGORIES else CUSTOM_CATEGORY,
+                "custom": name not in BUILTIN_SCENARIOS,
                 # "verify": checks the cluster's existing setup (only creates
                 # API keys). "explore": creates temporary models/subscriptions/
                 # identities to probe how MaaS itself behaves.

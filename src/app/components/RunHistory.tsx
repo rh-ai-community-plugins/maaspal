@@ -83,7 +83,6 @@ export function RunHistory({ onViewRun }: Props) {
 
   return (
     <>
-      <p className="maaspal-section-heading">Run History</p>
       <Table aria-label="Run history">
         <Thead>
           <Tr>
@@ -98,7 +97,7 @@ export function RunHistory({ onViewRun }: Props) {
         <Tbody>
           {runs.length === 0 ? (
             <Tr>
-              <Td colSpan={6} style={{ color: '#888', fontStyle: 'italic' }}>
+              <Td colSpan={6} style={{ color: 'var(--pf-t--global--text--color--subtle)', fontStyle: 'italic' }}>
                 No runs yet.
               </Td>
             </Tr>
@@ -114,10 +113,10 @@ export function RunHistory({ onViewRun }: Props) {
                   </Td>
                   <Td>{titleFor(r.scenario)}</Td>
                   <Td><StatusBadge status={r.status} /></Td>
-                  <Td style={{ fontSize: '0.85rem', color: '#555' }}>
+                  <Td style={{ fontSize: '0.85rem', color: 'var(--pf-t--global--text--color--subtle)' }}>
                     {new Date(r.created_at).toLocaleString()}
                   </Td>
-                  <Td style={{ fontSize: '0.85rem', color: '#555' }}>
+                  <Td style={{ fontSize: '0.85rem', color: 'var(--pf-t--global--text--color--subtle)' }}>
                     {!isActive && typeof r.duration_ms === 'number' ? formatDuration(r.duration_ms) : '—'}
                   </Td>
                   <Td>

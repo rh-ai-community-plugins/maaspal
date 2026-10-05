@@ -4,6 +4,7 @@ import re
 import pytest
 import yaml
 
+from api.routes.scenarios import BUILTIN_SCENARIOS, CUSTOM_CATEGORY, KNOWN_CATEGORIES
 from harness.config import load_scenario
 from harness.tasks.registry import REGISTRY
 
@@ -17,20 +18,9 @@ _REQUIRED_FIELDS = {"name", "description", "tasks", "cleanup"}
 # once after the pre-run snapshot, harness on every poll tick) — so they're expected
 # to survive here, unlike ${config.x}, which must always be fully resolved by load time.
 _ALLOWED_UNRESOLVED_PREFIXES = ("${baseline.", "${harness.")
-# Mirrors the fixed display order in src/app/components/ScenarioList.tsx — keeps
-# the two lists from drifting apart silently. "Custom" is the API's own
-# default for any scenario with no `category:` field (api/routes/scenarios.py),
-# so it's deliberately not required on any file here.
-_KNOWN_CATEGORIES = {
-    "Quick check",
-    "Rate limits",
-    "Access control",
-    "API keys",
-    "Usage metrics",
-    "Performance",
-    "Diagnostics",
-    "Custom",
-}
+# The API's category list (mirrored by src/app/components/ScenarioCatalog.tsx).
+# "Custom" is the API's own default for any scenario with no known `category:`.
+_KNOWN_CATEGORIES = {*KNOWN_CATEGORIES, CUSTOM_CATEGORY}
 # Display/launch metadata every built-in scenario declares (ADR-025) — a
 # custom scenario may omit them all (the API falls back to sane defaults).
 _REQUIRED_METADATA = {"title", "summary", "kind"}
@@ -93,7 +83,7 @@ def test_scenario_declares_known_category(path: pathlib.Path) -> None:
     category = raw.get("category")
     assert category in _KNOWN_CATEGORIES, (
         f"{path.name}: category {category!r} not in {sorted(_KNOWN_CATEGORIES)} "
-        "— update both this test and src/app/components/ScenarioList.tsx together"
+        "— update both this test and src/app/components/ScenarioCatalog.tsx together"
     )
 
 
@@ -170,3 +160,11 @@ def test_every_mode_combination_loads(path: pathlib.Path, monkeypatch: pytest.Mo
             assert scenario["tasks"], f"{path.name}: {key}={choice} leaves no tasks"
             for task_def in scenario["tasks"]:
                 assert task_def["name"] in REGISTRY
+
+
+def test_every_builtin_scenario_has_a_file() -> None:
+    """BUILTIN_SCENARIOS decides what the catalog labels "Custom" — a renamed
+    or removed built-in must be updated there too. (A subset check, so extra
+    scenario files someone adds never break this.)"""
+    names = {yaml.safe_load(p.read_text()).get("name", p.stem) for p in _SCENARIO_PATHS}
+    assert names >= BUILTIN_SCENARIOS, sorted(BUILTIN_SCENARIOS - names)

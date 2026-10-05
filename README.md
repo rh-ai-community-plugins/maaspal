@@ -8,8 +8,9 @@ questions like "is my subscription's rate limit actually enforced?" or "does my
 subscription reach every model it covers?". It acts through MaaS's own
 user-facing APIs, the way a real user would.
 
-In the dashboard, open **Community plugins → MaaS:PAL**. Pick a scenario under
-**Test runs**, adjust its settings and launch it. The run executes in the
+In the dashboard, open **Community plugins → MaaS:PAL**. Pick a scenario from
+the **Scenarios** catalog (search, or filter by category, custom/built-in and
+type), adjust its settings and launch it. **Runs** lists every run. The run executes in the
 cluster as a Kubernetes Job, and its page shows what happened step by step:
 live progress, traffic charts, the checks, a plain-language verdict, and what
 the run created and cleaned up. **MaaS setup** shows the cluster's MaaS

@@ -155,7 +155,7 @@ for entry in data:
 "
 ```
 
-Then open the dashboard: **Community plugins → MaaS:PAL → Test runs** lists
+Then open the dashboard: **Community plugins → MaaS:PAL → Scenarios** lists
 the scenarios. Launch `smoke_test` as a first check.
 
 ## Permissions

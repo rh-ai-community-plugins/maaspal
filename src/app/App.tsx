@@ -1,48 +1,60 @@
-import palLogo from './assets/pal-logo.png';
-import { useState } from 'react';
-import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
-import { Grid, GridItem, PageSection } from '@patternfly/react-core';
+import { useState, type ReactNode } from 'react';
+import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Button, PageSection, Title } from '@patternfly/react-core';
 import CommunityBanner from './components/CommunityBanner';
 import { MaasOverviewPage } from './components/maas/MaasOverviewPage';
 import { RunDetail } from './components/RunDetail';
 import { RunHistory } from './components/RunHistory';
 import { RunTrigger } from './components/RunTrigger';
-import { ScenarioList } from './components/ScenarioList';
+import { ScenarioCatalog } from './components/ScenarioCatalog';
+import { useRotatingLogo } from './logos';
 import type { Scenario } from './api/client';
 import './styles/theme.css';
 
 // Rendered by the RHOAI dashboard at /maaspal/* (src/rhoai/extensions.ts). The
-// dashboard owns the page chrome — masthead, sidebar (where "Test runs" and
-// "MaaS setup" live) and the scroll container — so this renders content only.
-// Paths are absolute so they work under the host's router and the standalone
-// dev router (basename /maaspal) alike.
+// dashboard owns the page chrome — masthead, sidebar (where "Scenarios",
+// "Runs" and "MaaS setup" live) and the scroll container — so this renders
+// content only. Paths are absolute so they work under the host's router and
+// the standalone dev router (basename /maaspal) alike.
+const SCENARIOS_PATH = '/maaspal/scenarios';
 const RUNS_PATH = '/maaspal/runs';
 
 function PageHeader() {
+  // A different mascot on every page, from the set that shows up on the
+  // current theme (src/app/logos.ts).
+  const logo = useRotatingLogo(useLocation().pathname);
   return (
     <div className="maaspal-page-header">
-      <img src={palLogo} alt="MaaS:PAL" className="maaspal-page-header__logo" />
-      <span className="maaspal-page-header__subtitle">RHOAI MaaS test harness</span>
+      <img src={logo.src} alt="MaaS:PAL logo" className="maaspal-page-header__logo" />
+      <Title headingLevel="h1" size="2xl" className="maaspal-page-header__title">
+        MaaS:PAL
+      </Title>
     </div>
   );
 }
 
-export function RunsPage() {
+function PageIntro({ title, children, actions }: { title: string; children: ReactNode; actions?: ReactNode }) {
+  return (
+    <div className="maaspal-page-intro">
+      <div>
+        <Title headingLevel="h2" size="xl">{title}</Title>
+        <p className="maaspal-page-intro__text">{children}</p>
+      </div>
+      {actions}
+    </div>
+  );
+}
+
+export function ScenariosPage() {
   const navigate = useNavigate();
   const [triggerScenario, setTriggerScenario] = useState<Scenario | null>(null);
 
   return (
-    <>
-      <PageSection>
-        <Grid hasGutter>
-          <GridItem span={4}>
-            <ScenarioList onRun={setTriggerScenario} />
-          </GridItem>
-          <GridItem span={8}>
-            <RunHistory onViewRun={(runId) => navigate(`${RUNS_PATH}/${runId}`)} />
-          </GridItem>
-        </Grid>
-      </PageSection>
+    <PageSection>
+      <PageIntro title="Scenarios">
+        Each scenario asks one question about your MaaS setup. Pick one to configure and run it.
+      </PageIntro>
+      <ScenarioCatalog onRun={setTriggerScenario} />
 
       {triggerScenario !== null && (
         <RunTrigger
@@ -54,7 +66,26 @@ export function RunsPage() {
           onCancel={() => setTriggerScenario(null)}
         />
       )}
-    </>
+    </PageSection>
+  );
+}
+
+export function RunsPage() {
+  const navigate = useNavigate();
+  return (
+    <PageSection>
+      <PageIntro
+        title="Runs"
+        actions={
+          <Button variant="secondary" onClick={() => navigate(SCENARIOS_PATH)}>
+            Run a scenario
+          </Button>
+        }
+      >
+        Every scenario run, newest first. Open one for its results, checks and logs.
+      </PageIntro>
+      <RunHistory onViewRun={(runId) => navigate(`${RUNS_PATH}/${runId}`)} />
+    </PageSection>
   );
 }
 
@@ -73,11 +104,12 @@ function App() {
       <div className="community-plugin-content maaspal-plugin">
         <PageHeader />
         <Routes>
-          <Route path="/" element={<Navigate to={RUNS_PATH} replace />} />
+          <Route path="/" element={<Navigate to={SCENARIOS_PATH} replace />} />
+          <Route path="scenarios" element={<ScenariosPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
           <Route path="setup/*" element={<MaasOverviewPage />} />
-          <Route path="*" element={<Navigate to={RUNS_PATH} replace />} />
+          <Route path="*" element={<Navigate to={SCENARIOS_PATH} replace />} />
         </Routes>
       </div>
     </div>

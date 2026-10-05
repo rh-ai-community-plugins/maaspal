@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The **Test runs** page is split into **Scenarios** (a catalog with search and
+  category / custom-or-built-in / type filters) and **Runs** (run history, full
+  width). `/maaspal` now opens Scenarios.
+- Scenarios that aren't shipped with MaaS:PAL are labelled **Custom** and listed
+  first: under their own `category:` if it's a built-in one, otherwise in a
+  Custom category at the top.
+- The header reads **MaaS:PAL**, with a mascot logo that changes on every page,
+  drawn from a light-theme or dark-theme set.
+
 ## 0.1.0
 
 - MaaS:PAL becomes an RHOAI Dashboard community plugin (ADR-026): a Module

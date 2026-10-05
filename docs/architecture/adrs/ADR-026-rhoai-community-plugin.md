@@ -17,7 +17,7 @@ Two things in MaaS:PAL don't map directly onto the seed:
 
 ### Plugin only
 
-The UI becomes a Module Federation remote (`maaspal`, route prefix `/maaspal`), loaded under the shared **Community plugins** sidebar section with two entries, **Test runs** (`/maaspal/runs`) and **MaaS setup** (`/maaspal/setup`). The standalone Route, the Vite build and FastAPI's static file mount are removed: one UI, one way to reach it.
+The UI becomes a Module Federation remote (`maaspal`, route prefix `/maaspal`), loaded under the shared **Community plugins** sidebar section with two entries, **Test runs** (`/maaspal/runs`) and **MaaS setup** (`/maaspal/setup`) — later three: **Scenarios** (`/maaspal/scenarios`), **Runs** (`/maaspal/runs`) and **MaaS setup**. The standalone Route, the Vite build and FastAPI's static file mount are removed: one UI, one way to reach it.
 
 - Webpack 5 with the seed's config. React, react-dom, react-router-dom, `@patternfly/react-core` and `@openshift/dynamic-plugin-sdk` are shared singletons from the host. PatternFly 5 → 6 (the host's version).
 - Hash routing (`#run/<id>`, `#maas`) becomes react-router routes under the host's router. The custom masthead and `<Page>` are gone: the dashboard owns the page chrome and the scroll container. The plugin shows the required **Community Plugin** banner.

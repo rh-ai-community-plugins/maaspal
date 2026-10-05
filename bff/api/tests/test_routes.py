@@ -88,6 +88,23 @@ async def test_scenarios_category_defaults_to_custom(client, tmp_path, monkeypat
     assert [(s["name"], s["category"]) for s in data] == [("no_category", "Custom")]
 
 
+async def test_scenarios_not_shipped_are_marked_custom(client, tmp_path, monkeypatch) -> None:
+    """Any scenario that isn't a built-in is custom. It keeps a built-in
+    category it names; an unknown category lands in "Custom"."""
+    for name, category in [("smoke_test", "Quick check"), ("team_limits", "Rate limits"), ("nightly", "Team")]:
+        (tmp_path / f"{name}.yaml").write_text(
+            f"name: {name}\ncategory: {category}\ndescription: test\ntasks: []\n"
+        )
+    monkeypatch.setenv("SCENARIOS_DIR", str(tmp_path))
+
+    data = {s["name"]: (s["category"], s["custom"]) for s in (await client.get("/api/scenarios")).json()}
+    assert data == {
+        "smoke_test": ("Quick check", False),
+        "team_limits": ("Rate limits", True),
+        "nightly": ("Custom", True),
+    }
+
+
 async def test_create_run_returns_run_id(client) -> None:
     resp = await client.post("/api/runs", json={"scenario": "load_test"})
     assert resp.status_code == 201

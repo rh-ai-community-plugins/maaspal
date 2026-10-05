@@ -35,7 +35,7 @@ import {
   type ConfigValues,
 } from '../launchForm';
 import { scenarioTitle } from '../scenarioTitles';
-import { ScenarioBadges } from './ScenarioList';
+import { ScenarioBadges } from './ScenarioCatalog';
 
 interface Props {
   scenario: Scenario;

@@ -25,5 +25,7 @@ Accepted
 - The category-order lists live in two places (`ui/src/components/ScenarioList.tsx`'s `CATEGORY_ORDER` and `harness/tests/test_scenarios.py`'s `_KNOWN_CATEGORIES`) with no shared source of truth across the Python/TypeScript boundary — adding a 6th built-in category means remembering to update both by hand. Acceptable at 5 categories; would be worth deriving one from the other (or a small shared JSON) if this grows much further.
 - No UI affordance yet for a user to *set* a scenario's category without hand-editing YAML — appropriate for now since MaaS:PAL has no scenario-authoring UI at all, just a YAML-drop-in convention.
 
+**Update (2026-10-05):** "Custom" is now a label as well as a category. `GET /api/scenarios` sends `custom: true` for any scenario not in `BUILTIN_SCENARIOS` (`api/routes/scenarios.py`, which also owns `KNOWN_CATEGORIES` now — `test_scenarios.py` imports it). A custom scenario whose `category:` is a built-in one is listed there, ahead of the built-ins; otherwise it goes in the Custom category, which is listed first rather than last and only shown when non-empty. The list became a catalog (`src/app/components/ScenarioCatalog.tsx`) on its own **Scenarios** page, with search and category / source / type filters kept in the URL.
+
 **Neutral:**
 - This is purely a display/organization change — it doesn't affect `POST /api/runs`, task execution, or assertion evaluation in any way.

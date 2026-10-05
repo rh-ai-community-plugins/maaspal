@@ -32,11 +32,22 @@ export const maaspalSectionExtension = {
   },
 };
 
-export const testRunsNavExtension = {
+export const scenariosNavExtension = {
+  type: 'app.navigation/href' as const,
+  properties: {
+    id: 'maaspal-scenarios',
+    title: 'Scenarios',
+    href: '/maaspal/scenarios',
+    section: 'maaspal',
+    path: '/maaspal/scenarios/*',
+  },
+};
+
+export const runsNavExtension = {
   type: 'app.navigation/href' as const,
   properties: {
     id: 'maaspal-runs',
-    title: 'Test runs',
+    title: 'Runs',
     href: '/maaspal/runs',
     section: 'maaspal',
     path: '/maaspal/runs/*',
@@ -66,7 +77,8 @@ export const extensions = [
   communityPluginsSectionExtension,
   maaspalAreaExtension,
   maaspalSectionExtension,
-  testRunsNavExtension,
+  scenariosNavExtension,
+  runsNavExtension,
   maasSetupNavExtension,
   maaspalRouteExtension,
 ];

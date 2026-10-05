@@ -12,21 +12,33 @@
 .maaspal-page-header {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
   padding: 1rem 1.5rem 0;
 }
 
 .maaspal-page-header__logo {
-  height: 36px;
+  height: 40px;
   width: auto;
   display: block;
 }
 
-.maaspal-page-header__subtitle {
+.maaspal-page-header__title {
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+
+/* Page title + one-line explanation, with an optional action on the right. */
+.maaspal-page-intro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.maaspal-page-intro__text {
+  margin: 0.25rem 0 0;
   color: var(--pf-t--global--text--color--subtle);
-  font-size: 0.8rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 /* ---------- Primary button — red ---------- */
@@ -35,18 +47,152 @@
 .maaspal-plugin .pf-v6-c-button.pf-m-primary,
 .maaspal-modal .pf-v6-c-button.pf-m-primary {
   --pf-v6-c-button--m-primary--BackgroundColor: #c62828;
+  /* The dark theme's default primary text colour is dark, unreadable on red. */
+  --pf-v6-c-button--m-primary--Color: #fff;
+  --pf-v6-c-button--m-primary--hover--Color: #fff;
+  --pf-v6-c-button--m-primary--clicked--Color: #fff;
   --pf-v6-c-button--m-primary--hover--BackgroundColor: #b71c1c;
   --pf-v6-c-button--m-primary--clicked--BackgroundColor: #9b1818;
 }
 
-/* ---------- Scenario cards ---------- */
-.maaspal-scenario-card > .pf-v6-c-card {
-  border-left: 4px solid #c62828;
+/* ---------- Scenario catalog: filter rail + card gallery ---------- */
+.maaspal-catalog {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+.maaspal-catalog__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  position: sticky;
+  top: 1rem;
+}
+
+.maaspal-catalog__rail-heading {
+  margin: 1rem 0 0.25rem;
+}
+
+.maaspal-catalog__categories {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.maaspal-catalog__category {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  border: 0;
+  border-left: 3px solid transparent;
+  background: none;
+  color: var(--pf-t--global--text--color--regular);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.maaspal-catalog__category:hover {
+  background: var(--pf-t--global--background--color--secondary--hover);
+}
+
+.maaspal-catalog__category[aria-current='true'] {
+  border-left-color: #c62828;
+  background: var(--pf-t--global--background--color--secondary--default);
+  font-weight: 600;
+}
+
+.maaspal-catalog__count {
+  color: var(--pf-t--global--text--color--subtle);
+  font-weight: 400;
+}
+
+.maaspal-catalog__clear {
+  align-self: flex-start;
+  margin-top: 0.5rem;
+}
+
+.maaspal-catalog__group + .maaspal-catalog__group {
+  margin-top: 2rem;
+}
+
+.maaspal-catalog__group-heading {
+  margin-bottom: 0.15rem;
+}
+
+.maaspal-catalog__blurb {
+  margin: 0 0 0.75rem;
+  color: var(--pf-t--global--text--color--subtle);
+  font-size: 0.85rem;
+}
+
+.maaspal-catalog-card {
+  cursor: pointer;
+  border-top: 3px solid #c62828;
   transition: box-shadow 0.15s ease, transform 0.1s ease;
 }
-.maaspal-scenario-card > .pf-v6-c-card:hover {
+
+.maaspal-catalog-card[data-custom='true'] {
+  border-top-color: #8476d1;
+}
+
+.maaspal-catalog-card:hover {
   box-shadow: 0 4px 14px rgba(198, 40, 40, 0.18);
   transform: translateY(-1px);
+}
+
+.maaspal-catalog-card__summary {
+  margin: 0;
+  color: var(--pf-t--global--text--color--subtle);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.maaspal-catalog-card__footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.maaspal-catalog__note {
+  margin: 2rem 0 0;
+  color: var(--pf-t--global--text--color--subtle);
+  font-size: 0.8rem;
+}
+
+/* Narrow: the rail sits above the gallery, so keep it short — categories
+   become wrapping pills. After the base rules so it overrides them. */
+@media (max-width: 900px) {
+  .maaspal-catalog {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+  .maaspal-catalog__rail {
+    position: static;
+  }
+  .maaspal-catalog__categories {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .maaspal-catalog__category {
+    gap: 0.4rem;
+    width: auto;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid var(--pf-t--global--border--color--default);
+    border-radius: 999px;
+  }
+  .maaspal-catalog__category[aria-current='true'] {
+    border-color: #c62828;
+  }
 }
 
 .maaspal-scenario-name {
@@ -204,7 +350,7 @@
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: #888;
+  color: var(--pf-t--global--text--color--subtle);
   margin-bottom: 0.6rem;
 }
 

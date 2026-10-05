@@ -12,11 +12,12 @@ Tests are composed of atomic **tasks** (e.g., provision API key, send inference 
                   RHOAI Dashboard (host) — loads /_mf/maaspal/remoteEntry.js
                   Plugin UI (React + TypeScript + PatternFly 6, Module Federation remote,
                   nginx Deployment "maaspal" :8080)
-                  - Pick scenario, override config params, start run
+                  - Scenarios catalog (search; category, custom/built-in, type filters);
+                    pick a scenario, override config params, start run
                   - Live log polling (REST, 1s interval) with smart scroll
                   - Live assertion status panel (2s poll, independent of logs)
                   - Task progress pipeline (2s poll)
-                  - Results history + per-run detail view; routes /maaspal/runs[/<id>], /maaspal/setup
+                  - Results history + per-run detail view; routes /maaspal/scenarios, /maaspal/runs[/<id>], /maaspal/setup
                   - Run page narration: verdict/finding, steps with per-resource
                     cleanup status, traffic and metrics charts, collapsible logs
                           |  /maaspal/api/*  → dashboard proxyService (authorize: true,
@@ -64,10 +65,11 @@ maaspal/
 ├── src/                        # Frontend: Module Federation remote (React 18 + TypeScript + PatternFly 6), built by webpack to dist/
 │   ├── index.ts → bootstrap.tsx # Standalone dev entry only: mounts App at /maaspal/* like the dashboard does
 │   ├── rhoai/
-│   │   ├── extensions.ts       # Exposed as ./extensions: Community plugins section (shared), MaaS:PAL section, "Test runs"/"MaaS setup" links, /maaspal/* route
+│   │   ├── extensions.ts       # Exposed as ./extensions: Community plugins section (shared), MaaS:PAL section, "Scenarios"/"Runs"/"MaaS setup" links, /maaspal/* route
 │   │   └── CommunityNavIcon.tsx # [SHARED] community plugins icon — never edit
 │   └── app/
-│       ├── App.tsx             # react-router routes under /maaspal: runs, runs/:runId, setup; CommunityBanner; no <Page> (the dashboard owns the chrome)
+│       ├── App.tsx             # react-router routes under /maaspal: scenarios, runs, runs/:runId, setup; "MaaS:PAL" header; CommunityBanner; no <Page> (the dashboard owns the chrome)
+│       ├── logos.ts            # Header mascot: light/dark logo sets (assets/logos/), follows the dashboard's pf-v6-theme-dark class, new pick on every page
 │       ├── api/client.ts       # Typed fetch wrappers + types for every route; API_BASE = /maaspal/api (the dashboard's proxyService)
 │       ├── launchForm.ts       # Launch-form helpers: autofill, show_if, required gating, plan sentence
 │       ├── scenarioTitles.ts   # Scenario id → title (incl. previous_names), name formatting
@@ -76,7 +78,7 @@ maaspal/
 │       └── components/
 │           ├── CommunityBanner.tsx/.css # [SHARED] required "Community Plugin" banner — never edit
 │           ├── MaaspalNavIcon.tsx    # Sidebar icon, exposed as ./Icon
-│           ├── ScenarioList.tsx      # Scenario cards by category, with badges
+│           ├── ScenarioCatalog.tsx   # Scenarios page: filter rail (search, categories, custom/built-in, type) + card gallery, filters in the URL
 │           ├── RunTrigger.tsx        # Launch modal: labelled inputs, ⓘ help, Advanced section, autofill, "What this run will do"
 │           ├── RunHistory.tsx        # Past runs (titles via scenarioTitles)
 │           ├── RunDetail.tsx         # Run page: metadata bar, verdict/finding, chips, steps, traffic, tables, checks, logs panel
@@ -487,7 +489,7 @@ The dashboard owns the page chrome (masthead, sidebar, scroll container), so the
 
 ### Scenario Categories (ADR-020, regrouped by ADR-025)
 
-`ScenarioList.tsx` groups scenarios by a `category:` field (optional in the YAML, defaulted to `"Custom"` by `api/routes/scenarios.py` when absent) into sections organised by the user's question: Quick check, Rate limits, Access control, API keys, Usage metrics, Performance, Diagnostics, and an always-rendered Custom bucket (shown even when empty). Within a category, `kind: verify` scenarios sort before `explore`, then by `order`. Cards show `title`, `summary` and badges (uses your setup / creates temporary resources / read-only, needs extra RBAC, duration). The category order lives in two places kept in sync by hand — `CATEGORY_ORDER` in `src/app/components/ScenarioList.tsx` and `_KNOWN_CATEGORIES` in `harness/tests/test_scenarios.py`.
+The **Scenarios** page (`ScenarioCatalog.tsx`) is a catalog: a left rail with search, categories (with counts), Source (Custom / Built-in, shown only when custom scenarios exist) and Type (uses your setup / creates temporary resources / read-only) filters, all kept in the URL so Back from a run restores them, and a card gallery grouped by category. The categories are organised by the user's question: Quick check, Rate limits, Access control, API keys, Usage metrics, Performance, Diagnostics. **Custom**: `GET /api/scenarios` sends `custom: true` for any scenario not in `BUILTIN_SCENARIOS` (`api/routes/scenarios.py`). A custom scenario carries a Custom label; if its `category:` is a built-in one it's listed there ahead of the built-ins, otherwise it goes in the Custom category, which comes first and only appears when non-empty. Within a category: custom first, then `kind: verify` before `explore`, then `order`. Cards show `title`, `summary` and badges (custom, uses your setup / creates temporary resources / read-only, needs extra RBAC, duration); clicking a card or Run opens the launch form. The category order lives in two places kept in sync by hand — `CATEGORY_ORDER` in `src/app/components/ScenarioCatalog.tsx` and `KNOWN_CATEGORIES` in `bff/api/routes/scenarios.py` (used by `harness/tests/test_scenarios.py`). Adding a built-in scenario means adding its name to `BUILTIN_SCENARIOS` too (`test_every_builtin_scenario_has_a_file` checks the other direction).
 
 ### Frontend Monaco Setup
 
