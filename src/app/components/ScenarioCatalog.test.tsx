@@ -181,16 +181,30 @@ test('shows a no-match state that clears the filters', async () => {
   expect(screen.getByText('Is MaaS working end to end?')).toBeInTheDocument();
 });
 
-test('clicking a card or its Run button launches that scenario', async () => {
+test('clicking anywhere on a card launches that scenario; there is no separate Run button', async () => {
   mockListScenarios.mockResolvedValue([smoke]);
   const onRun = jest.fn();
   renderCatalog('/maaspal/scenarios', onRun);
 
-  await userEvent.click(await screen.findByRole('button', { name: /run is maas working/i }));
-  await userEvent.click(screen.getByText('The 30-second check.'));
+  await userEvent.click(await screen.findByText('The 30-second check.'));
+  await userEvent.click(screen.getByText('Is MaaS working end to end?'));
 
   expect(onRun).toHaveBeenCalledTimes(2);
   expect(onRun).toHaveBeenCalledWith(smoke);
+  expect(screen.queryByText(/^Run$/)).not.toBeInTheDocument();
+});
+
+test('a card can be launched from the keyboard', async () => {
+  mockListScenarios.mockResolvedValue([smoke]);
+  const onRun = jest.fn();
+  renderCatalog('/maaspal/scenarios', onRun);
+
+  const card = await screen.findByRole('button', { name: /run is maas working/i });
+  card.focus();
+  await userEvent.keyboard('{Enter}');
+  await userEvent.keyboard(' ');
+
+  expect(onRun).toHaveBeenCalledTimes(2);
 });
 
 test('renders empty state when no scenarios are returned', async () => {

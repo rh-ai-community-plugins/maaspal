@@ -158,12 +158,24 @@ export function ScenarioBadges({ scenario }: { scenario: Scenario }) {
 
 function ScenarioCard({ scenario, onRun }: { scenario: Scenario; onRun: (s: Scenario) => void }) {
   const title = scenarioTitle(scenario);
+  // The whole card opens the launch form: a button for keyboard and screen
+  // readers, without PF's clickable-card overlay (it would swallow the
+  // badge/summary tooltips).
   return (
     <Card
       className="maaspal-catalog-card"
       isCompact
       isFullHeight
+      role="button"
+      tabIndex={0}
+      aria-label={`Run ${title}`}
       onClick={() => onRun(scenario)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onRun(scenario);
+        }
+      }}
       data-custom={scenario.custom ? 'true' : undefined}
     >
       <CardHeader>
@@ -174,19 +186,8 @@ function ScenarioCard({ scenario, onRun }: { scenario: Scenario; onRun: (s: Scen
           <p className="maaspal-catalog-card__summary">{scenario.summary || scenario.description}</p>
         </Tooltip>
       </CardBody>
-      <CardFooter className="maaspal-catalog-card__footer">
+      <CardFooter>
         <ScenarioBadges scenario={scenario} />
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={(e) => {
-            e.stopPropagation();
-            onRun(scenario);
-          }}
-          aria-label={`Run ${title}`}
-        >
-          Run
-        </Button>
       </CardFooter>
     </Card>
   );
