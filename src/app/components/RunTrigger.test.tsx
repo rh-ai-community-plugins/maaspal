@@ -424,7 +424,7 @@ const requestApiScenario: Scenario = {
   config: { request_count: 3, request_api: 'chat_completions', stream: false },
 };
 
-test('Request API shows endpoint paths, Streaming is a checkbox, and both are sent as typed values', async () => {
+test('Request API shows endpoint paths, Streaming is a switch, and both are sent as typed values', async () => {
   mockFetch();
 
   await act(async () => {

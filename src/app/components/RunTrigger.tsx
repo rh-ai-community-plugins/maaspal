@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import {
   Alert,
   Button,
-  Checkbox,
   ExpandableSection,
   FormSelect,
   FormSelectOption,
@@ -358,16 +357,24 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
     }
 
     if (typeof defaultVal === 'boolean') {
+      // Same shape as every other field — small label row on top, the control
+      // where an input would be — so it lines up in the grid.
       return (
         <div key={key} className="maaspal-config-form__field">
           <div className="maaspal-config-form__label-row">
-            <Checkbox
+            <label className="maaspal-config-form__label" htmlFor={`cfg-${key}`}>
+              {labelFor(key)}
+            </label>
+            {infoFor(key)}
+          </div>
+          <div className="maaspal-config-form__toggle">
+            <Switch
               id={`cfg-${key}`}
-              label={labelFor(key)}
+              aria-label={inputs[key]?.label ?? humanizeKey(key)}
+              hasCheckIcon
               isChecked={Boolean(values[key])}
               onChange={(_e, checked) => handleCheck(key, checked)}
             />
-            {infoFor(key)}
           </div>
           {help(key)}
         </div>

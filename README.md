@@ -31,7 +31,7 @@ configuration (models, subscriptions, auth policies, rate limiting, networking).
 |---|---|---|
 | Quick check | `smoke_test` | Is MaaS working end to end? |
 | Quick check | `verify_subscription` | Does my subscription work for every model it covers? |
-| Quick check | `request_types` | Which request types does my model support (and if one fails, was it MaaS or the model)? |
+| Quick check | `request_types` | Which request types does my model support (and if one fails, was it MaaS or the model; did streams really stream)? |
 | Rate limits | `verify_subscription_rate_limit` | Is my subscription's rate limit enforced? |
 | Rate limits | `keys_share_user_budget` | Do all my keys share one budget? |
 | Rate limits | `rate_limit_window_recovery` | Does access come back after the rate-limit window? |

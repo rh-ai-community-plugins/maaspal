@@ -1313,3 +1313,52 @@ def test_failure_origin(status: int, headers: dict, text: str, origin: str) -> N
     from harness.tasks.inference import failure_origin
 
     assert failure_origin(status, headers, text)[0] == origin
+
+
+class _SlowStream(_Stream):
+    """Chunks arriving `gap_s` apart, like a model generating token by token."""
+
+    def __init__(self, chunks: list, gap_s: float) -> None:
+        super().__init__(chunks)
+        self._gap_s = gap_s
+
+    async def __anext__(self) -> Any:
+        await asyncio.sleep(self._gap_s)
+        return await super().__anext__()
+
+
+async def test_stream_delivery_streamed_vs_all_at_once() -> None:
+    from harness.tasks.inference import delivery_text
+
+    chunks = [_chunk("a"), _chunk("b"), _chunk("c"), _chunk(None, _usage(1, 3))]
+    m = MagicMock()
+    m.chat.completions.create = AsyncMock(side_effect=lambda **kw: _SlowStream(list(chunks), 0.02))
+    paced = await _run({"stream": "true"}, m)
+    assert paced["streamed_reply_count"] == 2 and paced["all_at_once_reply_count"] == 0
+    assert paced["p50_stream_chunks"] == 3
+    assert paced["p50_tpot_ms"] >= 15  # ~20 ms between 3 tokens
+    assert 15 <= paced["p50_itl_ms"] <= paced["p95_itl_ms"]
+    assert delivery_text(paced).startswith("✓ Streamed — 3 chunks over")
+
+    m.chat.completions.create = AsyncMock(side_effect=lambda **kw: _Stream(list(chunks)))
+    burst = await _run({"stream": "true"}, m)
+    assert burst["all_at_once_reply_count"] == 2 and burst["streamed_reply_count"] == 0
+    assert delivery_text(burst).startswith("⚠ All at once — 3 chunks within")
+    assert "p50_ms_per_output_token" in burst
+
+
+async def test_timeout_and_stop_after_a_hang() -> None:
+    """A request that gets no HTTP answer stops the burst when asked to, and
+    the per-request timeout reaches the SDK client."""
+    m = MagicMock()
+    m.chat.completions.create = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+    with patch("harness.tasks.inference.AsyncOpenAI", return_value=m) as mock_cls:
+        ctx = _make_ctx()
+        await SendRequestsTask(
+            "send_requests",
+            {"count": "3", "concurrency": "1", "url": "http://m.test", "token": "sk-t",
+             "timeout_s": "7", "stop_after_transport_errors": "1"},
+        ).run(ctx)
+    assert mock_cls.call_args.kwargs["timeout"] == 7.0
+    ir = ctx.shared_state["inference_results"]
+    assert ir["total_requests"] == 1 and ir["transport_error_count"] == 1

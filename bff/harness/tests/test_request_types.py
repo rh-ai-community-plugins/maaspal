@@ -183,3 +183,31 @@ async def test_probe_types_get_a_traffic_card_too() -> None:
     card = ctx.shared_state["_traffic"]["request_type_tokenize"]
     assert card["label"] == "Tokenize" and card["timeline"] == [[0.1, 3, "ok", 12.0]]
     assert "timeline" not in ctx.shared_state["request_type_tokenize"]
+
+
+def test_delivery_says_who_held_a_stream_back() -> None:
+    from harness.tasks.request_types import _BY_ID, _delivery
+
+    t = _BY_ID["chat_stream"]
+    burst = {"stream": True, "success_count": 3, "p50_stream_spread_ms": 0.4, "p50_stream_chunks": 45,
+             "all_at_once_reply_count": 3, "streamed_reply_count": 0}
+    paced = {**burst, "p50_stream_spread_ms": 900.0, "all_at_once_reply_count": 0, "streamed_reply_count": 3}
+    assert _delivery(t, burst, paced).endswith("MaaS held it back")
+    assert _delivery(t, burst, burst).endswith("(MaaS isn't the cause)")
+    assert _delivery(t, paced, paced).startswith("✓ Streamed")
+    assert _delivery(_BY_ID["chat"], burst, None) == "One response (not streamed)"
+
+
+def test_maas_holding_the_models_error_is_called_out() -> None:
+    """Live: the model answers 404 at once, but through MaaS the connection
+    hangs ~60 s and is dropped — the model refused it, and MaaS hung."""
+    from harness.tasks.request_types import maas_hung
+
+    maas = _result(0, other_error_count=1, transport_error_count=1, failure_origins={},
+                   error_samples=[{"message": "RemoteProtocolError: peer closed", "count": 1, "median_ms": 59999.0}])
+    direct = _result(0, not_found_count=3, failure_origins={"model": 3},
+                     error_samples=[{"message": "HTTP 404 Not Found", "count": 3}])
+    assert maas_hung(maas)
+    outcome, failed_at, why = attribute(maas, direct)
+    assert (outcome, failed_at) == ("unsupported_by_model", "model (and MaaS hung)")
+    assert "never came back" in why and "after 60 s" in why

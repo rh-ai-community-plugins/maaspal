@@ -753,6 +753,14 @@
   gap: 0.3rem;
 }
 
+/* An on/off setting: the switch sits where the other fields' inputs do,
+   vertically centred on an input's height. */
+.maaspal-config-form__toggle {
+  display: flex;
+  align-items: center;
+  min-height: 2.25rem;
+}
+
 .maaspal-config-form__info {
   background: none;
   border: none;

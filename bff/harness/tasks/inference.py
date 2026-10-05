@@ -3,11 +3,11 @@ import contextlib
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 from openai.types.chat import ChatCompletionMessageParam
 
 from harness.durations import parse_duration_s
@@ -154,6 +154,8 @@ def _summary_line(r: dict, planned: int | None) -> str:
         parts.append(f"{r['usage_missing_count']} replies without token usage")
     if "p50_ttft_ms" in r:
         parts.append(f"first token p50 {r['p50_ttft_ms']:,.0f} ms")
+    if r.get("all_at_once_reply_count", 0) > r.get("streamed_reply_count", 0):
+        parts.append("streamed replies arrived all at once")
     if "tokens_before_first_429" in r:
         parts.append(f"first 429 after {r['tokens_before_first_429']} tokens")
     samples = r.get("error_samples") or []
@@ -274,12 +276,23 @@ def _truthy(value: object) -> bool:
 class _Reply:
     """What one successful request reported: token usage (None when the
     server sent none — a stream without a usage chunk) and, when streamed,
-    the time to the first generated text."""
+    when the generated text arrived: the first and last text-carrying chunk
+    (ms since the request started) and how many there were. Chunks that all
+    land within a few ms came back in one piece, not streamed."""
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
     ttft_ms: float | None = None
+    last_text_ms: float | None = None
+    text_chunks: int = 0
+    chunk_gaps: list[float] = field(default_factory=list)
+
+    @property
+    def spread_ms(self) -> float | None:
+        if self.ttft_ms is None or self.last_text_ms is None:
+            return None
+        return self.last_text_ms - self.ttft_ms
 
 
 def _int_attr(obj: object, *names: str) -> int | None:
@@ -290,17 +303,26 @@ def _int_attr(obj: object, *names: str) -> int | None:
     return None
 
 
-def _reply_from_usage(usage: object, ttft_ms: float | None = None) -> _Reply:
+def _reply_from_usage(usage: object, arrivals: list[float] | None = None) -> _Reply:
     """Chat/completions/embeddings report prompt/completion/total tokens;
-    the Responses API reports input/output/total."""
+    the Responses API reports input/output/total. `arrivals`: when each
+    text-carrying chunk of a streamed reply arrived."""
+    arrivals = arrivals or []
+    reply = _Reply(
+        ttft_ms=arrivals[0] if arrivals else None,
+        last_text_ms=arrivals[-1] if arrivals else None,
+        text_chunks=len(arrivals),
+        chunk_gaps=[b - a for a, b in zip(arrivals, arrivals[1:], strict=False)],
+    )
     if usage is None:
-        return _Reply(ttft_ms=ttft_ms)
+        return reply
     prompt_tokens = _int_attr(usage, "prompt_tokens", "input_tokens")
     completion_tokens = _int_attr(usage, "completion_tokens", "output_tokens")
     total = _int_attr(usage, "total_tokens")
     if total is None and prompt_tokens is not None:
         total = prompt_tokens + (completion_tokens or 0)
-    return _Reply(prompt_tokens, completion_tokens, total, ttft_ms)
+    reply.prompt_tokens, reply.completion_tokens, reply.total_tokens = prompt_tokens, completion_tokens, total
+    return reply
 
 
 async def _send_one(
@@ -328,15 +350,15 @@ async def _send_one(
             reply = await client.responses.create(model=model, input=prompt)
             return _reply_from_usage(getattr(reply, "usage", None))
         reply = await client.responses.create(model=model, input=prompt, stream=True)
-        ttft_ms: float | None = None
+        arrivals: list[float] = []
         usage = None
         async for event in reply:
             kind = getattr(event, "type", "")
-            if ttft_ms is None and kind == "response.output_text.delta":
-                ttft_ms = (time.monotonic() - t0) * 1000
+            if kind == "response.output_text.delta":
+                arrivals.append((time.monotonic() - t0) * 1000)
             if kind == "response.completed":
                 usage = getattr(getattr(event, "response", None), "usage", None)
-        return _reply_from_usage(usage, ttft_ms)
+        return _reply_from_usage(usage, arrivals)
     messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": prompt}]
     if not stream:
         reply = await client.chat.completions.create(model=model, messages=messages)
@@ -348,14 +370,34 @@ async def _send_one(
 
 
 async def _read_stream(chunks: Any, t0: float, has_text: Callable[[Any], bool]) -> _Reply:
-    ttft_ms: float | None = None
+    arrivals: list[float] = []
     usage = None
     async for chunk in chunks:
-        if ttft_ms is None and has_text(chunk):
-            ttft_ms = (time.monotonic() - t0) * 1000
+        if has_text(chunk):
+            arrivals.append((time.monotonic() - t0) * 1000)
         if getattr(chunk, "usage", None) is not None:
             usage = chunk.usage
-    return _reply_from_usage(usage, ttft_ms)
+    return _reply_from_usage(usage, arrivals)
+
+
+# A streamed reply whose text chunks all arrived within this many ms came
+# back in one piece — something along the way (or the model itself) sent the
+# whole answer at once.
+STREAM_SPREAD_MIN_MS = 10.0
+
+
+def delivery_text(r: dict) -> str:
+    """How a burst's streamed replies arrived: "Streamed — 43 chunks over
+    1,204 ms" or "All at once — 45 chunks within 0.4 ms" (p50s)."""
+    if not r.get("stream"):
+        return "One response (not streamed)"
+    if "p50_stream_spread_ms" not in r:
+        return "—"
+    chunks = int(r.get("p50_stream_chunks") or 0)
+    spread = float(r["p50_stream_spread_ms"])
+    if r.get("all_at_once_reply_count", 0) > r.get("streamed_reply_count", 0):
+        return f"⚠ All at once — {chunks} chunks within {spread:,.1f} ms"
+    return f"✓ Streamed — {chunks} chunks over {spread:,.0f} ms"
 
 
 def failure_origin(status: int | None, headers: Mapping[str, str], text: str) -> tuple[str, str]:
@@ -431,6 +473,13 @@ class SendRequestsTask(Task):
         # to exhaust whatever limit it's pointed at) without hammering the
         # gateway for the rest of it once the answer is already in.
         stop_after_429s = int(self.params.get("stop_after_429s", 0))
+        # Stop once this many requests got no HTTP answer at all (timeout,
+        # dropped connection) — 0 = never. One hang is enough to report it;
+        # waiting it out for every remaining request only makes the run slow.
+        stop_after_transport_errors = int(self.params.get("stop_after_transport_errors") or 0)
+        # Per-request timeout in seconds (the SDK's own default is 600 s).
+        timeout_param = self.params.get("timeout_s")
+        timeout_s = float(timeout_param) if timeout_param not in (None, "") else None
         # Rate-limit bursts: keep sending until MaaS throttles, as fast as
         # needed to use the limit up within one window (a fixed window resets
         # otherwise, and the limit is never reached). The limit and window come
@@ -533,6 +582,7 @@ class SendRequestsTask(Task):
                 api_key=api_key,
                 base_url=base_url,
                 max_retries=retries,
+                timeout=timeout_s if timeout_s else NOT_GIVEN,
                 http_client=DefaultAsyncHttpxClient(
                     event_hooks={"request": [_mark_attempt_start], "response": [_count_attempt]},
                     verify=not insecure_tls,
@@ -668,6 +718,19 @@ class SendRequestsTask(Task):
         usage_missing_count = 0
         # Time to the first generated text, per streamed reply.
         ttfts: list[float] = []
+        # Per streamed reply: ms from first to last text chunk, how many text
+        # chunks, and time per token after the first (inter-token latency).
+        stream_spreads: list[float] = []
+        stream_chunks: list[float] = []
+        inter_token_ms: list[float] = []
+        # Gaps between consecutive text chunks of streamed replies (ITL).
+        chunk_gaps: list[float] = []
+        # Failures with no HTTP answer at all (timeouts, dropped connections).
+        transport_error_count = 0
+        streamed_reply_count = 0
+        all_at_once_reply_count = 0
+        # Per successful reply: total latency ÷ output tokens.
+        ms_per_output_token: list[float] = []
         # Who answered each failed HTTP request (failure_origin), and one
         # example of the evidence per origin.
         failure_origins: dict[str, int] = {}
@@ -740,8 +803,13 @@ class SendRequestsTask(Task):
             nonlocal seconds_to_first_429, successes_after_first_429, skipped
             nonlocal first_429_at, concurrency_at_first_429, max_tokens_per_request
             nonlocal final_http_failures, usage_missing_count
+            nonlocal streamed_reply_count, all_at_once_reply_count, transport_error_count
             async with sem:
-                if (stop_after_429s and rate_limited_count >= stop_after_429s) or stop_reason:
+                if (
+                    (stop_after_429s and rate_limited_count >= stop_after_429s)
+                    or (stop_after_transport_errors and transport_error_count >= stop_after_transport_errors)
+                    or stop_reason
+                ):
                     skipped += 1
                     return
                 t0 = time.monotonic()
@@ -810,6 +878,7 @@ class SendRequestsTask(Task):
                 except Exception as exc:
                     fail += 1
                     other_error_count += 1
+                    transport_error_count += 1
                     status_class = "error"
                     error_message = _error_message(exc)
                     error_counts[error_message] = error_counts.get(error_message, 0) + 1
@@ -817,6 +886,21 @@ class SendRequestsTask(Task):
 
                 latency_ms = (time.monotonic() - t0) * 1000
                 latencies.append(latency_ms)
+                if reply is not None:
+                    if reply.completion_tokens:
+                        ms_per_output_token.append(latency_ms / reply.completion_tokens)
+                    spread = reply.spread_ms
+                    if spread is not None:
+                        stream_spreads.append(spread)
+                        stream_chunks.append(reply.text_chunks)
+                        if reply.text_chunks > 1 and spread >= STREAM_SPREAD_MIN_MS:
+                            streamed_reply_count += 1
+                        else:
+                            all_at_once_reply_count += 1
+                        if reply.completion_tokens and reply.completion_tokens > 1:
+                            inter_token_ms.append(spread / (reply.completion_tokens - 1))
+                        if len(chunk_gaps) < _TIMELINE_CAP:
+                            chunk_gaps.extend(reply.chunk_gaps)
                 if error_message is not None:
                     error_latencies.setdefault(error_message, []).append(latency_ms)
                 if stage_levels:
@@ -882,6 +966,24 @@ class SendRequestsTask(Task):
                     ttft_pct = _percentiles(ttfts)
                     result_data["p50_ttft_ms"] = ttft_pct["p50_latency_ms"]
                     result_data["p95_ttft_ms"] = ttft_pct["p95_latency_ms"]
+                if ms_per_output_token:
+                    result_data["p50_ms_per_output_token"] = _percentiles(ms_per_output_token)["p50_latency_ms"]
+                if stream_spreads:
+                    result_data["p50_stream_spread_ms"] = _percentiles(stream_spreads)["p50_latency_ms"]
+                    result_data["p50_stream_chunks"] = _percentiles(stream_chunks)["p50_latency_ms"]
+                    result_data["streamed_reply_count"] = streamed_reply_count
+                    result_data["all_at_once_reply_count"] = all_at_once_reply_count
+                if inter_token_ms:
+                    # TPOT: time per output token after the first, from the
+                    # stream itself — (last text − first text) ÷ (tokens − 1).
+                    result_data["p50_tpot_ms"] = _percentiles(inter_token_ms)["p50_latency_ms"]
+                if chunk_gaps:
+                    # ITL: the actual gaps between text chunks, so jitter
+                    # (a p95 far above the p50) shows, not just an average.
+                    gaps = _percentiles(chunk_gaps)
+                    result_data["p50_itl_ms"] = gaps["p50_latency_ms"]
+                    result_data["p95_itl_ms"] = gaps["p95_latency_ms"]
+                result_data["transport_error_count"] = transport_error_count
                 # Only present once a 429 has actually happened — an absent
                 # key (not a 0/None placeholder) is what keeps a referencing
                 # assertion honestly PENDING instead of misreading "not yet

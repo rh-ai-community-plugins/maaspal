@@ -14,7 +14,10 @@ from harness.tasks.registry import REGISTRY
 
 _DIRECT_PORT = 8000
 _DIRECT_CHECK_TIMEOUT_S = 5.0
-_PROBE_TIMEOUT_S = 60.0
+# Per-request timeout. Generous for a ~300-word answer from a real model,
+# but well under the ~60 s a MaaS gateway can hold an error reply before
+# dropping the connection (confirmed live, see attribute()).
+_DEFAULT_REQUEST_TIMEOUT_S = 30.0
 # A placeholder bearer for direct calls: the model's own service doesn't
 # check MaaS keys, and a real key has no business leaving the MaaS path.
 _DIRECT_TOKEN = "maaspal-direct"
@@ -76,26 +79,29 @@ def _root(base_url: str) -> str:
 
 
 async def _probe(
-    t: RequestType, base_url: str, model: str, token: str, count: int, prompt: str, insecure: bool
+    t: RequestType, base_url: str, model: str, token: str, count: int, prompt: str, insecure: bool,
+    timeout_s: float = _DEFAULT_REQUEST_TIMEOUT_S,
 ) -> dict:
     """N plain-HTTP requests to a non-SDK endpoint, summarised in the same
-    shape SendRequestsTask writes, so both kinds attribute the same way."""
+    shape SendRequestsTask writes, so both kinds attribute the same way.
+    Stops after the first request that gets no HTTP answer at all."""
     url = _root(base_url) + t.path
     r: dict = {
         "total_requests": 0, "success_count": 0, "fail_count": 0, "rate_limited_count": 0,
         "unauthorized_count": 0, "not_found_count": 0, "server_error_count": 0,
         "other_error_count": 0, "total_tokens_sent": 0, "prompt_tokens_sent": 0,
-        "completion_tokens_sent": 0, "failure_origins": {},
+        "completion_tokens_sent": 0, "transport_error_count": 0, "failure_origins": {},
         "failure_origin_evidence": {},
     }
     latencies: list[float] = []
     errors: dict[str, int] = {}
+    error_ms: dict[str, list[float]] = {}
     # [t_offset_s, cumulative_tokens, status_class, latency_ms] — the same
     # shape SendRequestsTask records, for the run page's traffic card.
     timeline: list[list] = []
     start = time.monotonic()
     headers = {"Authorization": f"Bearer {token}", "anthropic-version": "2023-06-01"}
-    async with httpx.AsyncClient(verify=not insecure, timeout=_PROBE_TIMEOUT_S) as client:
+    async with httpx.AsyncClient(verify=not insecure, timeout=timeout_s) as client:
         for _ in range(count):
             t0 = time.monotonic()
             r["total_requests"] += 1
@@ -104,10 +110,13 @@ async def _probe(
             except httpx.HTTPError as exc:
                 r["fail_count"] += 1
                 r["other_error_count"] += 1
+                r["transport_error_count"] += 1
+                took_ms = (time.monotonic() - t0) * 1000
                 msg = f"{type(exc).__name__}: {str(exc)[:100]}"
                 errors[msg] = errors.get(msg, 0) + 1
-                timeline.append([round(time.monotonic() - start, 3), r["total_tokens_sent"], "error", 0.0])
-                continue
+                error_ms.setdefault(msg, []).append(took_ms)
+                timeline.append([round(time.monotonic() - start, 3), r["total_tokens_sent"], "error", round(took_ms, 1)])
+                break
             latency_ms = (time.monotonic() - t0) * 1000
             latencies.append(latency_ms)
             if resp.status_code < 400:
@@ -148,7 +157,8 @@ async def _probe(
             ])
     r["timeline"] = timeline
     r["error_samples"] = [
-        {"message": m, "count": c} for m, c in sorted(errors.items(), key=lambda kv: -kv[1])[:3]
+        {"message": m, "count": c, **_inference._latency_spread(error_ms.get(m) or [])}
+        for m, c in sorted(errors.items(), key=lambda kv: -kv[1])[:3]
     ]
     r.update(_inference._percentiles(latencies))
     return r
@@ -174,10 +184,37 @@ def _http_failed(r: dict) -> bool:
     return r.get("success_count", 0) == 0 and http_fails > 0
 
 
+def maas_hung(maas: dict) -> bool:
+    """Through MaaS nothing came back at all — every failure a timeout or a
+    dropped connection, no HTTP status. Confirmed live (2026-10-05): when the
+    model answers with an error (no usage in the body), Kuadrant's wasm-shim
+    fails to read /usage/total_tokens and the gateway holds the reply ~60 s,
+    then drops the connection — for every subscription except the one whose
+    limit sorts last in the model's TokenRateLimitPolicy."""
+    return (
+        maas.get("success_count", 0) == 0
+        and maas.get("transport_error_count", 0) > 0
+        and not maas.get("failure_origins")
+    )
+
+
+def _took(r: dict) -> str:
+    samples = r.get("error_samples") or []
+    median = samples[0].get("median_ms") if samples else None
+    return f" after {median / 1000:,.0f} s" if median and median >= 1000 else ""
+
+
 def attribute(maas: dict, direct: dict | None) -> tuple[str, str, str]:
     """(outcome, failed at, why) for one request type. A direct call to the
     model, when it worked, decides; otherwise the MaaS-side failures' own
     origin markers (inference.failure_origin) give a "likely" answer."""
+    if maas_hung(maas) and direct is not None and _http_failed(direct):
+        return (
+            "unsupported_by_model",
+            "model (and MaaS hung)",
+            f"The model answers {_outcome_text(direct)}, but through MaaS that answer never came back — "
+            f"the connection was dropped{_took(maas)}",
+        )
     if maas.get("success_count", 0) > 0:
         why = ""
         if direct is not None and direct.get("success_count", 0) == 0:
@@ -224,6 +261,7 @@ class SendRequestsEachTypeTask(Task):
         count = int(self.params.get("requests_per_type", 3))
         prompt = str(self.params.get("prompt", "Hello, world!"))
         batch_size = max(2, int(self.params.get("batch_size") or 4))
+        timeout_s = float(self.params.get("request_timeout_s") or _DEFAULT_REQUEST_TIMEOUT_S)
         model_name = str(self.params.get("model_name") or "")
         model_namespace = str(self.params.get("model_namespace") or "")
         compare_direct = _inference._truthy(self.params.get("compare_direct", True))
@@ -253,25 +291,34 @@ class SendRequestsEachTypeTask(Task):
         rows: list[list[str]] = []
         table = {
             "columns": ["Request type", "Endpoint", "Via MaaS", "Direct", "Outcome", "Failed at", "Why",
-                        "p50 latency", "p50 first token", "Tokens"],
+                        "Latency (p50)", "First token (p50)", "Per token (p50)", "Delivery", "Tokens"],
             "rows": rows,
         }
         ctx.shared_state.setdefault("_tables", {})["Request types"] = table
         by_outcome: dict[str, list[str]] = {k: [] for k in _OUTCOME_MARK}
+        held_back: list[str] = []
+        hung: list[str] = []
 
         for i, t in enumerate(types):
-            maas = await self._send(ctx, t, maas_url, model_id, key, count, prompt, batch_size, False, "")
+            maas = await self._send(
+                ctx, t, maas_url, model_id, key, count, prompt, batch_size, False, "", timeout_s
+            )
             direct = None
             if direct_url:
                 direct = await self._send(
                     ctx, t, direct_url, direct_model or model_id, _DIRECT_TOKEN, count, prompt, batch_size, True,
-                    "_direct",
+                    "_direct", timeout_s,
                 )
             outcome, failed_at, why = attribute(maas, direct)
+            if maas_hung(maas):
+                hung.append(t.label)
             counts["tried_count"] += 1
             counts[f"{outcome}_count"] += 1
             by_outcome[outcome].append(t.label)
             ttft = maas.get("p50_ttft_ms")
+            delivery = _delivery(t, maas, direct) if maas.get("success_count") else "—"
+            if delivery.startswith("⚠"):
+                held_back.append(f"{t.label}: {delivery[2:]}")
             rows.append([
                 t.label,
                 t.path,
@@ -282,6 +329,8 @@ class SendRequestsEachTypeTask(Task):
                 why,
                 f"{maas.get('p50_latency_ms', 0):,.0f} ms" if maas.get("success_count") else "—",
                 f"{ttft:,.0f} ms" if ttft is not None else "—",
+                _per_token_text(maas),
+                delivery,
                 f"{maas.get('total_tokens_sent', 0):,}",
             ])
             ctx.shared_state["task_progress"] = {"current": i + 1, "total": len(types), "unit": "types"}
@@ -293,6 +342,13 @@ class SendRequestsEachTypeTask(Task):
         sentence = _finding_text(by_outcome, len(types))
         if direct_note and not direct_url:
             sentence += f" ({direct_note}; failures attributed from the responses alone.)"
+        if hung:
+            sentence += (
+                " Through MaaS these got no answer at all — the connection hung until it was dropped: "
+                + ", ".join(hung) + "."
+            )
+        if held_back:
+            sentence += " Streamed replies that arrived all at once: " + "; ".join(held_back) + "."
         ctx.shared_state.setdefault("_findings", []).append(
             {"title": "Request types", "text": sentence, "outcome": "info"}
         )
@@ -303,12 +359,12 @@ class SendRequestsEachTypeTask(Task):
 
     async def _send(
         self, ctx: TaskContext, t: RequestType, url: str, model: str, token: str,
-        count: int, prompt: str, batch_size: int, direct: bool, suffix: str,
+        count: int, prompt: str, batch_size: int, direct: bool, suffix: str, timeout_s: float,
     ) -> dict:
         result_key = f"request_type_{t.id}{suffix}"
         if t.api is None:
             t0 = time.time()
-            r = await _probe(t, url, model, token, count, prompt, insecure=direct)
+            r = await _probe(t, url, model, token, count, prompt, insecure=direct, timeout_s=timeout_s)
             timeline = r.pop("timeline")
             ctx.shared_state[result_key] = r
             if not direct:
@@ -325,7 +381,9 @@ class SendRequestsEachTypeTask(Task):
                 "url": url, "model": model, "token": token, "count": count, "concurrency": 1,
                 "prompt": prompt, "retries": 0, "result_key": result_key, "api": t.api,
                 "stream": t.stream, "batch_size": batch_size if t.batch else 1,
-                "insecure_tls": direct, "label": t.label,
+                "insecure_tls": direct, "label": t.label, "timeout_s": timeout_s,
+                # One hang is enough to report; don't wait it out N times.
+                "stop_after_transport_errors": 1,
             },
         ).run(ctx)
         traffic = ctx.shared_state.get("_traffic") or {}
@@ -356,6 +414,35 @@ async def _check_direct(url: str) -> tuple[str | None, str, str | None]:
     with contextlib.suppress(ValueError, AttributeError, IndexError, KeyError, TypeError):
         served = str(resp.json()["data"][0]["id"])
     return url, "", served
+
+
+def _per_token_text(r: dict) -> str:
+    """Time per output token. Streamed: TPOT — (last text chunk − first) ÷
+    (output tokens − 1), the decode speed once text started — plus ITL, the
+    real gaps between chunks (p50/p95, so jitter shows). Not streamed there's
+    nothing to time per token; latency ÷ tokens is shown as a rough upper
+    bound, since it also includes the wait for the first token."""
+    if "p50_tpot_ms" in r:
+        text = f"TPOT {r['p50_tpot_ms']:,.1f} ms"
+        if "p50_itl_ms" in r:
+            text += f" · ITL p50 {r['p50_itl_ms']:,.1f} / p95 {r['p95_itl_ms']:,.1f} ms"
+        return text
+    if "p50_ms_per_output_token" in r:
+        return f"≤ {r['p50_ms_per_output_token']:,.1f} ms (latency ÷ tokens; stream to measure)"
+    return "—"
+
+
+def _delivery(t: RequestType, maas: dict, direct: dict | None) -> str:
+    """inference.delivery_text for the MaaS leg, plus — when the text came
+    back in one piece — who held it back, judged by the direct call."""
+    if not t.stream:
+        return "One response (not streamed)"
+    text = _inference.delivery_text(maas)
+    if not text.startswith("⚠") or not direct or not direct.get("success_count"):
+        return text
+    if direct.get("streamed_reply_count", 0) > direct.get("all_at_once_reply_count", 0):
+        return text + " — the model streams it, so MaaS held it back"
+    return text + " — the model sends it all at once too (MaaS isn't the cause)"
 
 
 def _finding_text(by_outcome: dict[str, list[str]], total: int) -> str:

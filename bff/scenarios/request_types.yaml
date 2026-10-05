@@ -5,7 +5,9 @@ summary: >-
   streamed and batched) and reports which work, and for each that doesn't,
   whether MaaS or the model refused it.
 description: >-
-  Creates one API key and sends a few requests of each type to the model
+  Creates a temporary subscription with an effectively unlimited token limit
+  for the chosen model (so a rate limit can't make a type look unsupported),
+  creates one API key on it, and sends a few requests of each type to the model
   through MaaS: chat completions, completions, and responses (each plain and
   streamed), completions with a batch of prompts in one call, embeddings, and
   vLLM's Anthropic-style messages, tokenize and rerank endpoints. A type that
@@ -15,16 +17,19 @@ description: >-
   this). If that service can't be reached, for example because a
   NetworkPolicy blocks it, the answer comes from the error responses alone
   and is marked "likely". Embeddings and rerank only work on embedding and
-  reranker models, so a chat model is expected to fail them.
+  reranker models, so a chat model is expected to fail them. For streamed
+  types the table also shows whether the reply really streamed (text chunks
+  spread over time) or came back all at once, and the time per token.
 category: "Quick check"
-kind: verify
+kind: explore
 order: 3
-mutates: [api_keys]
+mutates: [api_keys, subscriptions]
 requires: [target_model_name, target_model_namespace]
 est_duration: "~1 min"
 plan_template: >-
-  Create 1 API key and send ${config.requests_per_type} requests of each
-  request type to ${model}, through MaaS and directly to the model.
+  Create a temporary unlimited subscription for ${model} and 1 API key on it,
+  then send ${config.requests_per_type} requests of each request type,
+  through MaaS and directly to the model.
 inputs:
   target_model_name:
     label: "Model"
@@ -43,14 +48,34 @@ inputs:
     advanced: true
     help: "How many prompts the batched completions request carries in one call."
   compare_direct:
-    label: "Compare with a direct call to the model"
+    label: "Compare direct to model"
     advanced: true
     help: >-
       Also send each request type straight to the model's in-cluster service,
       skipping MaaS, to tell whether MaaS or the model refused a failing type.
   prompt:
     advanced: true
-    help: "The text sent in every request."
+    help: >-
+      The text sent in every request. Asks for a longer answer, so a
+      streamed reply has enough tokens to show whether it really streams.
+  request_timeout_s:
+    label: "Request timeout (s)"
+    advanced: true
+    help: >-
+      How long one request may take. A type whose request gets no answer in
+      time is reported and not retried — MaaS can hold a model's error reply
+      for about a minute before dropping the connection.
+  token_limit:
+    advanced: true
+    help: >-
+      The temporary subscription's token limit, per second. Deliberately far
+      above anything this run sends, so quota never throttles it.
+  new_subscription_name:
+    advanced: true
+    help: "Name of the temporary MaaSSubscription this run creates and deletes afterwards."
+  subscription_namespace:
+    advanced: true
+    help: "Namespace MaaSSubscriptions live in on this cluster (the MaaS tenant namespace)."
 config:
   target_model_name: ""
   target_model_namespace: ""
@@ -58,15 +83,30 @@ config:
   types: ""
   batch_size: 4
   compare_direct: true
-  prompt: "Hello, world!"
+  prompt: >-
+    Write a short story, about 300 words, about a lighthouse keeper who
+    finds a message in a bottle.
+  request_timeout_s: 30
+  token_limit: 1000000000
+  new_subscription_name: "maaspal-request-types"
+  subscription_namespace: "models-as-a-service"
 verdict:
   pass: "${harness.request_types.supported_count} of ${harness.request_types.selected_count} request types work through MaaS."
   fail: "Not every request type could be tried — see the step that failed below."
 tasks:
+  - name: apply_rate_limit_subscription
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.token_limit}"
+      token_window: "1s"
   - name: provision_api_key
     params:
       key_name: "maaspal-request-types-key"
       count: 1
+      subscription: "${config.new_subscription_name}"
   - name: send_requests_each_type
     params:
       model_name: "${config.target_model_name}"
@@ -75,6 +115,7 @@ tasks:
       requests_per_type: "${config.requests_per_type}"
       batch_size: "${config.batch_size}"
       compare_direct: "${config.compare_direct}"
+      request_timeout_s: "${config.request_timeout_s}"
       prompt: "${config.prompt}"
     assertions:
       tried_count:
