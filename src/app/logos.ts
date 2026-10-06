@@ -12,7 +12,7 @@ import whiteRed from './assets/logos/pal-white-red.png';
 
 // The PAL mascot comes in ten colourways. A white body vanishes on the light
 // theme and a black one on the dark theme, so each theme draws from its own set.
-const LOGO_SRC: Record<string, string> = {
+export const LOGO_SRC: Record<string, string> = {
   'black-blue': blackBlue,
   'black-red': blackRed,
   pink,

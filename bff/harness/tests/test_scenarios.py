@@ -28,9 +28,9 @@ _KNOWN_KINDS = {"verify", "explore"}
 _KNOWN_MUTATES = {"api_keys", "subscriptions", "auth_policies", "models", "service_accounts", "routes"}
 
 
-def test_exactly_fifteen_production_scenarios() -> None:
-    assert len(_SCENARIO_PATHS) == 15, (
-        f"Expected 15 scenario files, found {len(_SCENARIO_PATHS)}: "
+def test_exactly_sixteen_production_scenarios() -> None:
+    assert len(_SCENARIO_PATHS) == 16, (
+        f"Expected 16 scenario files, found {len(_SCENARIO_PATHS)}: "
         f"{[p.name for p in _SCENARIO_PATHS]}"
     )
 

@@ -70,6 +70,8 @@ export interface Scenario {
   // Older ids of this scenario, so history rows from before a rename still
   // resolve to its current title.
   previous_names?: string[];
+  // The PAL easter egg's own scenario: listed only once PAL has hatched.
+  easter_egg?: boolean;
 }
 
 export type CleanupStatus = 'pending' | 'cleaning' | 'skipped' | 'done' | 'failed';

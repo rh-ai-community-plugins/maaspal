@@ -1,0 +1,295 @@
+/* PAL the pet (easter egg): a strip under the header that PAL walks along.
+   Colours come from the --maaspal-pal-* tokens in styles/tokens.css. */
+
+.maaspal-pal {
+  position: relative;
+  height: 84px;
+  margin: 0.25rem 1.5rem 0;
+  overflow: hidden;
+  border-bottom: 2px dashed var(--maaspal-pal-floor);
+}
+
+/* ---- Walking ---- */
+
+.maaspal-pal__walker {
+  --pal-size: 32px;
+  --pal-walk: 40s;
+  position: absolute;
+  bottom: 2px;
+  left: 0;
+  animation: maaspal-pal-walk var(--pal-walk) linear infinite;
+}
+
+.maaspal-pal__walker[data-busy='true'] {
+  --pal-walk: 16s;
+}
+
+.maaspal-pal__walker[data-resting='true'],
+.maaspal-pal__walker[data-resting='true'] .maaspal-pal__sprite,
+.maaspal-pal__walker[data-resting='true'] .maaspal-pal__body {
+  animation-play-state: paused;
+}
+
+@keyframes maaspal-pal-walk {
+  0% { left: 0; }
+  50% { left: calc(100% - 64px); }
+  100% { left: 0; }
+}
+
+.maaspal-pal__body {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  outline: none;
+  animation: maaspal-pal-bob 0.5s ease-in-out infinite alternate;
+}
+
+.maaspal-pal__body:focus-visible {
+  outline: 2px solid var(--maaspal-pal-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.maaspal-pal__body[data-stage='baby'] { --pal-size: 28px; }
+.maaspal-pal__body[data-stage='child'] { --pal-size: 36px; }
+.maaspal-pal__body[data-stage='teen'] { --pal-size: 44px; }
+.maaspal-pal__body[data-stage='guardian'] { --pal-size: 54px; }
+
+@keyframes maaspal-pal-bob {
+  from { translate: 0 0; }
+  to { translate: 0 -3px; }
+}
+
+/* Faces the way it walks: flips at each end of the strip, in step with the walk. */
+.maaspal-pal__sprite {
+  height: var(--pal-size);
+  width: auto;
+  display: block;
+  transition: scale 0.6s ease;
+  animation: maaspal-pal-face var(--pal-walk, 40s) step-end infinite;
+}
+
+.maaspal-pal__walker[data-busy='true'] .maaspal-pal__sprite {
+  animation-duration: 16s;
+}
+
+@keyframes maaspal-pal-face {
+  0% { transform: scaleX(1); }
+  50% { transform: scaleX(-1); }
+}
+
+/* ---- Poses ---- */
+
+.maaspal-pal__body[data-pose='happy'] {
+  animation: maaspal-pal-hop 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes maaspal-pal-hop {
+  from { translate: 0 0; }
+  to { translate: 0 -8px; }
+}
+
+.maaspal-pal__body[data-pose='grumpy'] .maaspal-pal__sprite {
+  filter: saturate(0.5);
+}
+
+.maaspal-pal__body[data-pose='sleeping'] .maaspal-pal__sprite {
+  transform: rotate(-80deg);
+  animation: none;
+}
+
+.maaspal-pal__body[data-pose='panting'] {
+  animation: maaspal-pal-pant 0.25s ease-in-out infinite alternate;
+  animation-play-state: running !important;
+}
+
+@keyframes maaspal-pal-pant {
+  from { scale: 1 1; }
+  to { scale: 1.06 0.94; }
+}
+
+.maaspal-pal__body[data-pose='ghost'] {
+  opacity: 0.45;
+  animation: maaspal-pal-float 2s ease-in-out infinite alternate;
+  animation-play-state: running !important;
+}
+
+@keyframes maaspal-pal-float {
+  from { translate: 0 0; }
+  to { translate: 0 -12px; }
+}
+
+.maaspal-pal__body[data-sick='true'] .maaspal-pal__sprite {
+  filter: sepia(0.6) hue-rotate(50deg) saturate(1.4);
+}
+
+.maaspal-pal__prop,
+.maaspal-pal__crown {
+  position: absolute;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.maaspal-pal__prop {
+  right: -12px;
+  bottom: 2px;
+}
+
+.maaspal-pal__crown {
+  top: -10px;
+}
+
+/* ---- Speech bubble ---- */
+
+.maaspal-pal__bubble {
+  position: absolute;
+  bottom: calc(var(--pal-size) + 8px);
+  left: 50%;
+  translate: -50% 0;
+  padding: 2px 8px;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--maaspal-text);
+  background: var(--maaspal-pal-bubble);
+  border: 1px solid var(--maaspal-pal-border);
+  border-radius: 10px;
+  animation: maaspal-pal-pop 0.25s ease-out;
+}
+
+@keyframes maaspal-pal-pop {
+  from { scale: 0.6; opacity: 0; }
+  to { scale: 1; opacity: 1; }
+}
+
+/* ---- Litter: the keys cleanup left behind ---- */
+
+.maaspal-pal__litter {
+  position: absolute;
+  bottom: 3px;
+  padding: 0 4px;
+  font-family: var(--pf-t--global--font--family--mono, monospace);
+  font-size: 0.65rem;
+  color: var(--maaspal-pal-accent);
+  background: var(--maaspal-pal-bg);
+  border: 1px solid var(--maaspal-pal-border);
+  border-radius: 6px 2px 2px 6px;
+}
+
+.maaspal-pal__tip {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+/* ---- Hatching ---- */
+
+.maaspal-pal__hatch {
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  translate: -50% 0;
+  width: 40px;
+  height: 50px;
+}
+
+.maaspal-pal__drop {
+  height: 40px;
+  width: auto;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  animation: maaspal-pal-drop 0.5s cubic-bezier(0.5, 0, 0.9, 0.6) both;
+}
+
+@keyframes maaspal-pal-drop {
+  from { translate: 0 -80px; scale: 1; }
+  80% { translate: 0 0; scale: 1; }
+  to { translate: 0 0; scale: 0.6 0.9; }
+}
+
+.maaspal-pal__egg {
+  width: 40px;
+  height: 50px;
+  overflow: visible;
+  transform-origin: 50% 100%;
+}
+
+.maaspal-pal__egg--wobble {
+  animation: maaspal-pal-wobble 0.45s ease-in-out 2;
+}
+
+.maaspal-pal__egg--crack2 {
+  animation: maaspal-pal-wobble 0.25s ease-in-out 2;
+}
+
+@keyframes maaspal-pal-wobble {
+  0%, 100% { rotate: 0deg; }
+  25% { rotate: -12deg; }
+  75% { rotate: 12deg; }
+}
+
+.maaspal-pal__egg-shell {
+  fill: var(--maaspal-pal-egg);
+  stroke: var(--maaspal-pal-border);
+  stroke-width: 1.5;
+}
+
+.maaspal-pal__egg-spot {
+  fill: var(--maaspal-pal-accent);
+  opacity: 0.6;
+}
+
+.maaspal-pal__egg-crack {
+  fill: none;
+  stroke: var(--maaspal-text);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.maaspal-pal__egg-key {
+  fill: var(--maaspal-pal-key);
+  animation: maaspal-pal-glint 0.25s ease-in-out infinite alternate;
+}
+
+@keyframes maaspal-pal-glint {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+
+.maaspal-pal__shell-top {
+  animation: maaspal-pal-shell-top 0.7s ease-in forwards;
+}
+
+.maaspal-pal__shell-bottom {
+  animation: maaspal-pal-shell-bottom 0.7s ease-in forwards;
+}
+
+@keyframes maaspal-pal-shell-top {
+  to { translate: -14px -18px; rotate: -35deg; opacity: 0; }
+}
+
+@keyframes maaspal-pal-shell-bottom {
+  60% { opacity: 1; }
+  to { translate: 6px 6px; opacity: 0; }
+}
+
+.maaspal-pal__newborn {
+  position: absolute;
+  bottom: 0;
+  left: 6px;
+  height: 28px;
+  width: auto;
+  animation: maaspal-pal-newborn 0.7s cubic-bezier(0.3, 1.6, 0.6, 1) both;
+}
+
+@keyframes maaspal-pal-newborn {
+  from { scale: 0; translate: 0 10px; }
+  to { scale: 1; translate: 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .maaspal-pal *,
+  .maaspal-pal__walker {
+    animation: none !important;
+  }
+}

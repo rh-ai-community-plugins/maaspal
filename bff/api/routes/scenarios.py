@@ -33,6 +33,7 @@ BUILTIN_SCENARIOS = frozenset(
     {
         "api_key_lifecycle",
         "denied_without_auth_policy",
+        "feed_pal",
         "gateway_overhead",
         "keys_share_user_budget",
         "load_test",
@@ -88,6 +89,8 @@ async def list_scenarios() -> list[dict]:
                 "order": raw.get("order", 100),
                 "inputs": raw.get("inputs") or {},
                 "plan_template": raw.get("plan_template") or "",
+                # Listed by the UI only once the PAL easter egg is active.
+                "easter_egg": bool(raw.get("easter_egg")),
                 **{field: list(raw.get(field) or []) for field in _LIST_FIELDS},
             }
         )

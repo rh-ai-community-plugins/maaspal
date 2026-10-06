@@ -22,6 +22,7 @@ import {
 } from '@patternfly/react-core';
 import { listScenarios, type Scenario } from '../api/client';
 import { scenarioTitle } from '../scenarioTitles';
+import { usePal } from '../pal/usePal';
 
 // Fixed display order for the built-in categories — mirrors KNOWN_CATEGORIES in
 // bff/api/routes/scenarios.py; keep both in sync. Organised around the
@@ -38,8 +39,12 @@ const CATEGORY_ORDER = [
   'Diagnostics',
 ] as const;
 const CUSTOM_CATEGORY = 'Custom';
+// The PAL easter egg's own scenarios (`easter_egg: true`): listed only once
+// PAL has hatched, above everything else.
+const PAL_CATEGORY = 'PAL’s corner';
 
 const CATEGORY_BLURB: Record<string, string> = {
+  [PAL_CATEGORY]: 'You found PAL! It eats the tokens your runs send. This one is just for PAL.',
   [CUSTOM_CATEGORY]: 'Scenarios added for this cluster.',
   'Quick check': 'Start here — is MaaS working, and does my subscription work?',
   'Rate limits': 'Are token limits enforced the way my subscriptions say?',
@@ -83,6 +88,7 @@ function scenarioSource(s: Scenario): Source {
 }
 
 function knownCategory(s: Scenario): string {
+  if (s.easter_egg) return PAL_CATEGORY;
   return (CATEGORY_ORDER as readonly string[]).includes(s.category) ? s.category : CUSTOM_CATEGORY;
 }
 
@@ -98,7 +104,7 @@ function compareScenarios(a: Scenario, b: Scenario): number {
 }
 
 function groupByCategory(scenarios: Scenario[]): [string, Scenario[]][] {
-  return [CUSTOM_CATEGORY, ...CATEGORY_ORDER]
+  return [PAL_CATEGORY, CUSTOM_CATEGORY, ...CATEGORY_ORDER]
     .map((category): [string, Scenario[]] => [
       category,
       scenarios.filter((s) => knownCategory(s) === category).sort(compareScenarios),
@@ -122,6 +128,11 @@ export function ScenarioBadges({ scenario }: { scenario: Scenario }) {
   const type = scenarioType(scenario);
   return (
     <LabelGroup numLabels={5}>
+      {scenario.easter_egg && (
+        <Label className="maaspal-pal-label" isCompact>
+          Easter egg
+        </Label>
+      )}
       {scenario.custom && (
         <Tooltip content="Added for this cluster — not one of the scenarios MaaS:PAL ships with.">
           <Label color="purple" isCompact>
@@ -177,6 +188,7 @@ function ScenarioCard({ scenario, onRun }: { scenario: Scenario; onRun: (s: Scen
         }
       }}
       data-custom={scenario.custom ? 'true' : undefined}
+      data-pal={scenario.easter_egg ? 'true' : undefined}
     >
       <CardHeader>
         <CardTitle className="maaspal-scenario-name">{title}</CardTitle>
@@ -237,7 +249,12 @@ interface Props {
 }
 
 export function ScenarioCatalog({ onRun }: Props) {
-  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [allScenarios, setScenarios] = useState<Scenario[]>([]);
+  const palActive = usePal().active;
+  const scenarios = useMemo(
+    () => allScenarios.filter((s) => palActive || !s.easter_egg),
+    [allScenarios, palActive],
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const filters = useCatalogFilters();

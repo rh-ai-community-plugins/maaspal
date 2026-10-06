@@ -9,6 +9,8 @@ import { RunHistory } from './components/RunHistory';
 import { RunTrigger } from './components/RunTrigger';
 import { ScenarioCatalog } from './components/ScenarioCatalog';
 import { useRotatingLogo } from './logos';
+import { PalPet } from './pal/PalPet';
+import { PalProvider, usePal, useSecretClicks } from './pal/usePal';
 import type { Scenario } from './api/client';
 import './styles/tokens.css';
 import './styles/theme.css';
@@ -26,9 +28,18 @@ function PageHeader() {
   // A different mascot on every page, from the set that shows up on the
   // current theme (src/app/logos.ts).
   const logo = useRotatingLogo(useLocation().pathname);
+  // Easter egg: five quick clicks on the logo hatch PAL (src/app/pal/), five
+  // more put it away.
+  const { toggle } = usePal();
+  const secretClick = useSecretClicks();
   return (
     <div className="maaspal-page-header">
-      <img src={logo.src} alt="MaaS:PAL logo" className="maaspal-page-header__logo" />
+      <img
+        src={logo.src}
+        alt="MaaS:PAL logo"
+        className="maaspal-page-header__logo"
+        onClick={() => secretClick() && toggle(logo.name)}
+      />
       <Title headingLevel="h1" size="2xl" className="maaspal-page-header__title">
         MaaS:PAL
       </Title>
@@ -89,23 +100,26 @@ function RunDetailPage() {
 
 function App() {
   return (
-    <div className="community-plugin-layout">
-      {/* [SHARED] Do not remove — all community plugins must display the CommunityBanner */}
-      <CommunityBanner />
-      <div className="community-plugin-content maaspal-plugin">
-        <PageHeader />
-        <Routes>
-          <Route path="/" element={<Navigate to={SCENARIOS_PATH} replace />} />
-          <Route path="scenarios" element={<ScenariosPage />} />
-          <Route path="runs" element={<RunsPage />} />
-          <Route path="runs/:runId" element={<RunDetailPage />} />
-          <Route path="overview/*" element={<MaasOverviewPage />} />
-          {/* The MaaS overview's old path, kept for bookmarks. */}
-          <Route path="setup/*" element={<Navigate to={OVERVIEW_PATH} replace />} />
-          <Route path="*" element={<Navigate to={SCENARIOS_PATH} replace />} />
-        </Routes>
+    <PalProvider>
+      <div className="community-plugin-layout">
+        {/* [SHARED] Do not remove — all community plugins must display the CommunityBanner */}
+        <CommunityBanner />
+        <div className="community-plugin-content maaspal-plugin">
+          <PageHeader />
+          <PalPet />
+          <Routes>
+            <Route path="/" element={<Navigate to={SCENARIOS_PATH} replace />} />
+            <Route path="scenarios" element={<ScenariosPage />} />
+            <Route path="runs" element={<RunsPage />} />
+            <Route path="runs/:runId" element={<RunDetailPage />} />
+            <Route path="overview/*" element={<MaasOverviewPage />} />
+            {/* The MaaS overview's old path, kept for bookmarks. */}
+            <Route path="setup/*" element={<Navigate to={OVERVIEW_PATH} replace />} />
+            <Route path="*" element={<Navigate to={SCENARIOS_PATH} replace />} />
+          </Routes>
+        </div>
       </div>
-    </div>
+    </PalProvider>
   );
 }
 

@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { ScenarioCatalog } from './ScenarioCatalog';
 import * as client from '../api/client';
 import type { Scenario } from '../api/client';
+import { PalProvider } from '../pal/usePal';
 
 jest.mock('../api/client');
 
@@ -213,4 +214,44 @@ test('renders empty state when no scenarios are returned', async () => {
   renderCatalog();
 
   expect(await screen.findByText(/no scenarios available/i)).toBeInTheDocument();
+});
+
+describe('the PAL easter egg scenario', () => {
+  const feedPal: Scenario = {
+    name: 'feed_pal',
+    title: 'Is PAL hungry?',
+    description: 'd',
+    config: {},
+    category: 'Quick check',
+    kind: 'explore',
+    easter_egg: true,
+  };
+
+  afterEach(() => window.localStorage.clear());
+
+  test('is hidden until PAL has hatched', async () => {
+    mockListScenarios.mockResolvedValue([smoke, feedPal]);
+    renderCatalog();
+
+    expect(await screen.findByText('Is MaaS working end to end?')).toBeInTheDocument();
+    expect(screen.queryByText('Is PAL hungry?')).not.toBeInTheDocument();
+    expect(groupTitles()).toEqual(['Quick check']);
+  });
+
+  test('is listed first, in PAL’s own colour, once the egg is active', async () => {
+    window.localStorage.setItem('maaspal.pal.active', '1');
+    mockListScenarios.mockResolvedValue([smoke, feedPal]);
+    render(
+      <PalProvider>
+        <MemoryRouter initialEntries={['/maaspal/scenarios']}>
+          <ScenarioCatalog onRun={() => undefined} />
+        </MemoryRouter>
+      </PalProvider>,
+    );
+
+    expect(await screen.findByText('Is PAL hungry?')).toBeInTheDocument();
+    expect(groupTitles()).toEqual(['PAL’s corner', 'Quick check']);
+    expect(screen.getByRole('button', { name: 'Run Is PAL hungry?' })).toHaveAttribute('data-pal', 'true');
+    expect(screen.getByText('Easter egg')).toBeInTheDocument();
+  });
 });

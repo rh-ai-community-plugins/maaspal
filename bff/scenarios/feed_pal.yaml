@@ -1,0 +1,168 @@
+name: feed_pal
+title: "Is PAL hungry?"
+summary: >-
+  Feeds PAL, the MaaS:PAL mascot, a few real inference requests. PAL eats
+  every token they use. Binge mode lets PAL overeat until MaaS cuts it off.
+description: >-
+  The easter egg's own scenario. It is listed only once PAL has hatched (click
+  the MaaS:PAL logo five times). Snack mode creates one API key and sends a
+  few chat requests to the chosen model. Every token they use goes to PAL,
+  and a feed_pal run counts double. Binge mode creates a temporary
+  subscription with a tiny token budget and sends until MaaS throttles. That
+  is a real rate-limit check, and PAL takes it personally ("429 Too Many
+  Treats"). The subscription and key are removed afterwards.
+category: "Quick check"
+kind: explore
+easter_egg: true
+order: 0
+mutates: [api_keys, subscriptions]
+requires: [target_model_name, target_model_namespace]
+est_duration: "~20 s"
+plan_template: >-
+  Feed PAL from ${model}: in snack mode, ${config.treats} treats on
+  ${subscription}; in binge mode, until a temporary
+  ${config.binge_token_limit}-token-per-${config.binge_window} subscription
+  throttles. Current mode: ${config.mode}.
+inputs:
+  target_model_name:
+    label: "Model"
+    help: "What's on the menu."
+  mode:
+    label: "Meal"
+    choices: [snack, binge]
+    choice_labels:
+      snack: "Snack: a few treats"
+      binge: "Binge: eat until MaaS says 429"
+    help: >-
+      Binge creates a temporary subscription with a tiny token budget and
+      sends until MaaS throttles, then removes the subscription again.
+  treats:
+    label: "Treats"
+    show_if: {mode: snack}
+    help: "How many requests PAL gets."
+  binge_token_limit:
+    advanced: true
+    show_if: {mode: binge}
+    help: "The temporary subscription's token budget. Small, so PAL hits it in seconds."
+  binge_window:
+    advanced: true
+    show_if: {mode: binge}
+    help: "How long the binge budget lasts before it refills."
+  new_subscription_name:
+    advanced: true
+    show_if: {mode: binge}
+    help: "Name of the temporary MaaSSubscription a binge creates and deletes afterwards."
+  subscription_namespace:
+    advanced: true
+    show_if: {mode: binge}
+    help: "Namespace MaaSSubscriptions live in on this cluster (the MaaS tenant namespace)."
+  prompt:
+    advanced: true
+    help: "What PAL asks the model for."
+  request_api:
+    label: "Request API"
+    advanced: true
+    choices: [chat_completions, completions, responses, embeddings]
+    choice_labels:
+      chat_completions: "/v1/chat/completions"
+      completions: "/v1/completions"
+      responses: "/v1/responses"
+      embeddings: "/v1/embeddings"
+    help: >-
+      Which OpenAI-compatible endpoint the requests use. Embeddings only work
+      on an embedding model.
+  stream:
+    label: "Streaming"
+    advanced: true
+    help: >-
+      Stream each reply. Tokens are counted from the final usage chunk, and
+      the time to the first token is reported.
+  send_from_browser:
+    label: "Send from user browser"
+    advanced: true
+    show_if: {mode: snack}
+    help: >-
+      Feed PAL from your browser: the requests go straight to the MaaS gateway
+      instead of from the test pod. Keep this run's page open while it runs.
+      Snack mode only; a binge always sends from the pod.
+config:
+  target_model_name: ""
+  target_model_namespace: ""
+  mode: snack
+  treats: 3
+  binge_token_limit: 30
+  binge_window: "1m"
+  new_subscription_name: "maaspal-feed-pal"
+  subscription_namespace: "models-as-a-service"
+  prompt: "You are feeding a tiny digital pet named PAL. Describe its favourite snack in one sentence."
+  request_api: chat_completions
+  stream: false
+  send_from_browser: false
+verdict:
+  pass: "PAL ate ${harness.inference_results.total_tokens_sent} tokens. Nom."
+  fail: "PAL went hungry. See which step failed below."
+tasks:
+  # Snack: a key on whatever subscription MaaS picks, and a few treats.
+  - name: provision_api_key
+    when: {mode: snack}
+    params:
+      key_name: "maaspal-feed-pal-key"
+      count: 1
+  - name: send_requests
+    when: {mode: snack}
+    params:
+      api: "${config.request_api}"
+      stream: "${config.stream}"
+      from_browser: "${config.send_from_browser}"
+      count: "${config.treats}"
+      concurrency: 1
+      prompt: "${config.prompt}"
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      key_pool: true
+      label: "Treats"
+    assertions:
+      tokens_eaten:
+        label: "Tokens PAL ate"
+        unit: "tokens"
+        promql: "${harness.inference_results.total_tokens_sent}"
+        expect: "> 0"
+  # Binge: a tiny temporary budget, then eat until MaaS throttles.
+  - name: apply_rate_limit_subscription
+    when: {mode: binge}
+    params:
+      new_subscription_name: "${config.new_subscription_name}"
+      namespace: "${config.subscription_namespace}"
+      model_name: "${config.target_model_name}"
+      model_namespace: "${config.target_model_namespace}"
+      token_limit: "${config.binge_token_limit}"
+      token_window: "${config.binge_window}"
+  - name: provision_api_key
+    when: {mode: binge}
+    params:
+      key_name: "maaspal-feed-pal-key"
+      subscription: "${config.new_subscription_name}"
+  - name: send_requests
+    when: {mode: binge}
+    params:
+      api: "${config.request_api}"
+      stream: "${config.stream}"
+      from_browser: "${config.send_from_browser}"
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      concurrency: 1
+      prompt: "${config.prompt}"
+      key_pool: true
+      retries: 0
+      until_throttled: true
+      limit: "${config.binge_token_limit}"
+      window: "${config.binge_window}"
+      stop_after_429s: 2
+      chart: true
+      label: "Binge"
+    assertions:
+      too_many_treats:
+        label: "429 Too Many Treats"
+        description: "MaaS cut PAL off once the tiny budget was used up."
+        unit: "429s"
+        promql: "${harness.inference_results.rate_limited_count}"
+        expect: "> 0"
+cleanup: automatic

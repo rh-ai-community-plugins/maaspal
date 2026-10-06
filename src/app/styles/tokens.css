@@ -53,6 +53,15 @@
   /* ---- Labels ---- */
   --maaspal-custom: #6b4fbb; /* "Custom" scenarios */
 
+  /* ---- PAL the pet (easter egg, src/app/pal/) ---- */
+  --maaspal-pal-accent: #00796b; /* PAL's corner cards, litter keys, egg spots */
+  --maaspal-pal-bg: color-mix(in srgb, var(--maaspal-pal-accent) 9%, var(--maaspal-surface));
+  --maaspal-pal-border: color-mix(in srgb, var(--maaspal-pal-accent) 45%, var(--maaspal-surface));
+  --maaspal-pal-bubble: var(--maaspal-surface-floating);
+  --maaspal-pal-egg: #fff8e1;
+  --maaspal-pal-key: #c99700; /* the key glinting through the crack */
+  --maaspal-pal-floor: color-mix(in srgb, var(--maaspal-text) 15%, transparent);
+
   /* ---- Charts ---- */
   --maaspal-chart-series: var(--maaspal-info); /* the measured line (tokens, MaaS-reported) */
   --maaspal-chart-reference: #555; /* harness-sent reference (dashed), limit line */
@@ -90,6 +99,11 @@
   --maaspal-neutral-bg: color-mix(in srgb, var(--maaspal-neutral) 10%, var(--maaspal-surface));
 
   --maaspal-custom: #b3a3ee;
+
+  --maaspal-pal-accent: #4dd0c0;
+  --maaspal-pal-bg: color-mix(in srgb, var(--maaspal-pal-accent) 12%, var(--maaspal-surface));
+  --maaspal-pal-egg: #efe2bd;
+  --maaspal-pal-key: #f2c94c;
 
   --maaspal-chart-reference: #b8b8b8;
   --maaspal-chart-throttled: #f2925f;

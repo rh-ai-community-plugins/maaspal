@@ -157,6 +157,27 @@
   border-top-color: var(--maaspal-custom);
 }
 
+/* The PAL easter egg's scenario: its own colour, all over. */
+.maaspal-catalog-card[data-pal='true'] {
+  border: 1px solid var(--maaspal-pal-border);
+  border-top: 3px solid var(--maaspal-pal-accent);
+  background: var(--maaspal-pal-bg);
+}
+
+.maaspal-catalog-card[data-pal='true']:hover {
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--maaspal-pal-accent) 30%, transparent);
+}
+
+.maaspal-catalog-card[data-pal='true'] .maaspal-scenario-name {
+  color: var(--maaspal-pal-accent);
+}
+
+.maaspal-pal-label {
+  --pf-v6-c-label--BackgroundColor: var(--maaspal-pal-bg);
+  --pf-v6-c-label--Color: var(--maaspal-pal-accent);
+  --pf-v6-c-label--m-outline--BorderColor: var(--maaspal-pal-border);
+}
+
 .maaspal-catalog-card:focus-visible {
   outline: 2px solid var(--maaspal-accent);
   outline-offset: 2px;

@@ -37,11 +37,11 @@ async def client(_temp_db, _mock_k8s):
         yield c
 
 
-async def test_scenarios_returns_all_fifteen_with_metadata(client) -> None:
+async def test_scenarios_returns_all_sixteen_with_metadata(client) -> None:
     resp = await client.get("/api/scenarios")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 15
+    assert len(data) == 16
     by_name = {s["name"]: s for s in data}
     assert {"smoke_test", "verify_subscription", "verify_subscription_rate_limit", "load_test"} <= set(by_name)
     for s in data:
@@ -59,6 +59,14 @@ async def test_scenarios_returns_all_fifteen_with_metadata(client) -> None:
     assert rate_limit["inputs"]["limitador_namespace"]["from_model"] == "http_route"
 
 
+async def test_only_feed_pal_is_an_easter_egg(client) -> None:
+    """feed_pal is listed like any built-in, flagged so the UI shows it only
+    once the PAL easter egg is active."""
+    data = (await client.get("/api/scenarios")).json()
+    assert [s["name"] for s in data if s["easter_egg"]] == ["feed_pal"]
+    assert next(s for s in data if s["name"] == "feed_pal")["custom"] is False
+
+
 async def test_scenario_metadata_defaults_for_a_bare_custom_scenario(client, tmp_path, monkeypatch) -> None:
     """A user-written scenario with none of the display metadata still lists
     cleanly: title from its name, kind "verify", empty lists."""
@@ -71,6 +79,7 @@ async def test_scenario_metadata_defaults_for_a_bare_custom_scenario(client, tmp
     assert scenario["title"] == "My Check"
     assert scenario["kind"] == "verify"
     assert scenario["requires"] == [] and scenario["inputs"] == {}
+    assert scenario["easter_egg"] is False
 
 
 async def test_scenarios_category_defaults_to_custom(client, tmp_path, monkeypatch) -> None:

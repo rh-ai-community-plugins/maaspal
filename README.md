@@ -68,6 +68,8 @@ one of the categories above (`category: "Rate limits"`) to list it there, or
 leave `category:` out and it goes in a Custom category at the top. Scenarios are
 baked into the BFF image, so rebuild it.
 
+PAL, the mascot in the header, gets hungry. Try clicking it a few times.
+
 ## Quick Start
 
 **Prerequisites:** Helm, `oc` logged in with cluster-admin (the chart creates

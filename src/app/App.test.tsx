@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import App, { RunsPage, ScenariosPage } from './App';
 import * as client from './api/client';
@@ -46,4 +47,20 @@ test('runs page shows run history on its own', async () => {
   expect(screen.getByRole('heading', { name: 'Runs' })).toBeInTheDocument();
   expect(await screen.findByText(/no runs yet/i)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /run a scenario/i })).toBeInTheDocument();
+});
+
+test('five quick clicks on the logo hatch PAL, five more put it away', async () => {
+  const user = userEvent.setup();
+  const { container } = render(<App />);
+  const logo = screen.getByRole('img', { name: /maas:pal logo/i });
+
+  for (let i = 0; i < 4; i++) await user.click(logo);
+  expect(container.querySelector('.maaspal-pal')).toBeNull();
+
+  await user.click(logo);
+  expect(container.querySelector('.maaspal-pal')).not.toBeNull();
+
+  for (let i = 0; i < 5; i++) await user.click(logo);
+  expect(container.querySelector('.maaspal-pal')).toBeNull();
+  window.localStorage.clear();
 });
