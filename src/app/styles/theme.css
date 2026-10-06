@@ -892,6 +892,11 @@ button.maaspal-task-chip:hover {
   color: var(--maaspal-text-subtle);
 }
 
+.maaspal-steps__origin {
+  margin-right: 0.6rem;
+  vertical-align: text-bottom;
+}
+
 .maaspal-steps__text--muted {
   color: var(--maaspal-text-muted);
 }

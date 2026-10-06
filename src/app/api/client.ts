@@ -285,6 +285,9 @@ export type TrafficOutcome = 'ok' | 'throttled' | 'denied' | 'not_found' | 'serv
 export type TrafficPoint = [number, number, TrafficOutcome, number];
 
 export interface TrafficSummary {
+  // Request API (e.g. "chat_completions") and streaming, as sent.
+  api?: string;
+  stream?: boolean;
   total_requests?: number;
   http_attempts?: number;
   success_count?: number;
@@ -360,6 +363,9 @@ export interface TrafficBurst {
   t0?: number;
   // Who sent it: the harness pod, or the user's browser ("Send from user browser").
   origin?: 'pod' | 'browser';
+  // The endpoint path ("/v1/chat/completions") and whether replies were streamed.
+  request?: string | null;
+  stream?: boolean | null;
   planned?: number;
   summary: TrafficSummary;
   timeline: TrafficPoint[];

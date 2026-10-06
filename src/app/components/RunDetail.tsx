@@ -367,6 +367,7 @@ export function RunDetail({ runId, onBack }: Props) {
               tasks={taskProgress}
               resources={insights.resources ?? []}
               cleanupStatus={run?.cleanup_status}
+              traffic={insights.traffic ?? []}
             />
             <MetricsChartsPanel charts={insights.metrics_charts ?? []} />
             {(insights.tables ?? []).map((table) => (

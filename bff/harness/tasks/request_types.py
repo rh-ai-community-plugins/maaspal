@@ -372,6 +372,7 @@ class SendRequestsEachTypeTask(Task):
                 # page lists all the types it tried, not only the SDK ones.
                 ctx.shared_state.setdefault("_traffic", {})[result_key] = {
                     "chart": False, "chart_group": None, "label": t.label, "t0": t0,
+                    "request": t.path, "stream": t.stream,
                     "task": self.name, "planned": count, "timeline": timeline,
                 }
             return r

@@ -319,3 +319,49 @@ test('a grouped chart can be hidden and shown again', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Show chart' }));
   expect(screen.getByRole('img')).toBeInTheDocument();
 });
+
+test('steps say where each burst of requests was sent from', () => {
+  render(
+    <RunSteps
+      tasks={[
+        { name: 'provision_api_key', status: 'DONE', summary: 'Created 1 API key' },
+        { name: 'send_requests', status: 'FAIL', summary: '1 requests · 0 OK' },
+        { name: 'verify_other_keys_still_work', status: 'DONE', summary: '3 requests · 3 OK' },
+        { name: 'send_requests_after_window', status: 'DONE', summary: '3 requests · 3 OK' },
+      ]}
+      resources={[]}
+      traffic={[
+        { ...burst, task: 'send_requests', origin: 'browser' },
+        { ...burst, task: 'verify_other_keys_still_work', origin: 'pod' },
+        // A run from before the browser option: sent from the pod.
+        { ...burst, task: 'send_requests_after_window', origin: undefined },
+      ]}
+    />,
+  );
+  expect(screen.getAllByText('Sent from the browser')).toHaveLength(1);
+  expect(screen.getAllByText('Sent from the pod')).toHaveLength(2);
+});
+
+test('steps say which endpoint each step used and whether it streamed', () => {
+  render(
+    <RunSteps
+      tasks={[
+        { name: 'send_requests', status: 'DONE', summary: '3 requests · 3 OK' },
+        { name: 'send_requests_after_window', status: 'DONE', summary: '3 requests · 3 OK' },
+        { name: 'send_requests_each_type', status: 'DONE', summary: 'tried 3 types' },
+      ]}
+      resources={[]}
+      traffic={[
+        { ...burst, task: 'send_requests', request: '/v1/chat/completions', stream: true },
+        // An older run: only the summary knows what was sent.
+        { ...burst, task: 'send_requests_after_window', summary: { ...burst.summary, api: 'completions', stream: false } },
+        { ...burst, task: 'send_requests_each_type', request: '/v1/chat/completions', stream: false },
+        { ...burst, task: 'send_requests_each_type', request: '/v1/chat/completions', stream: true },
+        { ...burst, task: 'send_requests_each_type', request: '/tokenize', stream: false },
+      ]}
+    />,
+  );
+  expect(screen.getByText('/v1/chat/completions · streamed')).toBeInTheDocument();
+  expect(screen.getByText('/v1/completions · not streamed')).toBeInTheDocument();
+  expect(screen.getByText('3 request types')).toBeInTheDocument();
+});

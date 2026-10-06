@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button } from '@patternfly/react-core';
+import { Button, Label, Tooltip } from '@patternfly/react-core';
 import type {
   ErrorSample,
   LoadStage,
@@ -486,14 +486,98 @@ function StepResources({ resources }: { resources: RunResource[] }) {
   );
 }
 
+// Where a step's requests came from — when one fails, this says which path
+// to look at: the pod's in-cluster route, or the user's own browser.
+const ORIGIN_LABEL = {
+  pod: {
+    text: 'Sent from the pod',
+    color: 'grey' as const,
+    help:
+      'Sent by the test pod inside the cluster. A failure here is between the cluster ' +
+      'and the MaaS gateway or the model — not the user\'s network or browser.',
+  },
+  browser: {
+    text: 'Sent from the browser',
+    color: 'blue' as const,
+    help:
+      'Sent from the user\'s browser straight to the MaaS gateway, like an outside client. ' +
+      'A failure here can also come from the browser\'s side: a cross-origin (CORS) refusal, ' +
+      'the user\'s network, or the run page being closed.',
+  },
+};
+
+// Endpoint paths for runs from before bursts recorded their own path.
+const API_PATHS: Record<string, string> = {
+  chat_completions: '/v1/chat/completions',
+  completions: '/v1/completions',
+  responses: '/v1/responses',
+  embeddings: '/v1/embeddings',
+};
+
+// "/v1/chat/completions · streamed" — what one burst sent.
+function requestText(b: TrafficBurst): string | null {
+  const path = b.request ?? (b.summary.api ? API_PATHS[b.summary.api] ?? b.summary.api : null);
+  if (!path) return null;
+  const stream = b.stream ?? b.summary.stream;
+  return `${path} · ${stream ? 'streamed' : 'not streamed'}`;
+}
+
+// Which endpoint a step's requests used and whether replies were streamed;
+// a step that tried many (Which request types work?) gets one count label.
+function RequestLabel({ requests }: { requests: string[] }) {
+  if (requests.length === 0) return null;
+  if (requests.length > 2) {
+    return (
+      <Tooltip content={requests.join(', ')}>
+        <Label color="purple" variant="outline" isCompact className="maaspal-steps__origin">
+          {requests.length} request types
+        </Label>
+      </Tooltip>
+    );
+  }
+  return (
+    <>
+      {requests.map((r) => (
+        <Tooltip
+          key={r}
+          content={
+            r.endsWith('· streamed')
+              ? 'The endpoint these requests used. Streamed: each reply arrived in chunks as it was generated.'
+              : 'The endpoint these requests used. Not streamed: each reply arrived in one piece.'
+          }
+        >
+          <Label color="purple" variant="outline" isCompact className="maaspal-steps__origin">
+            {r}
+          </Label>
+        </Tooltip>
+      ))}
+    </>
+  );
+}
+
+function OriginLabel({ origin }: { origin: 'pod' | 'browser' }) {
+  const o = ORIGIN_LABEL[origin];
+  return (
+    <Tooltip content={o.help}>
+      <Label color={o.color} variant={origin === 'pod' ? 'outline' : 'filled'} isCompact className="maaspal-steps__origin">
+        {o.text}
+      </Label>
+    </Tooltip>
+  );
+}
+
 export function RunSteps({
   tasks,
   resources,
   cleanupStatus,
+  traffic = [],
 }: {
   tasks: TaskProgressEntry[];
   resources: RunResource[];
   cleanupStatus?: string;
+  // The run's request bursts — each step that sent requests is labelled
+  // with where they were sent from.
+  traffic?: TrafficBurst[];
 }) {
   const [collapsed, setCollapsed] = useState(false);
   if (!tasks.some((t) => t.summary) && resources.length === 0) return null;
@@ -503,6 +587,17 @@ export function RunSteps({
     byTask.set(key, [...(byTask.get(key) ?? []), r]);
   }
   const unattributed = byTask.get('') ?? [];
+  // Runs from before "Send from user browser" carry no origin: those were
+  // all sent from the pod.
+  const originsByTask = new Map<string, Set<'pod' | 'browser'>>();
+  const requestsByTask = new Map<string, Set<string>>();
+  for (const b of traffic) {
+    const set = originsByTask.get(b.task) ?? new Set();
+    set.add(b.origin === 'browser' ? 'browser' : 'pod');
+    originsByTask.set(b.task, set);
+    const request = requestText(b);
+    if (request) requestsByTask.set(b.task, (requestsByTask.get(b.task) ?? new Set()).add(request));
+  }
   const cleanup = cleanupSummary(resources, cleanupStatus);
   return (
     <section className="maaspal-panel" aria-label="What happened">
@@ -530,6 +625,10 @@ export function RunSteps({
               </span>
               <div>
                 <span className="maaspal-steps__task">{formatTaskName(t.name)}</span>
+                {[...(originsByTask.get(t.name) ?? [])].map((o) => (
+                  <OriginLabel key={o} origin={o} />
+                ))}
+                <RequestLabel requests={[...(requestsByTask.get(t.name) ?? [])]} />
                 {t.summary ? (
                   <span className="maaspal-steps__text">{t.summary}</span>
                 ) : (

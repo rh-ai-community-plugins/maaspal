@@ -851,6 +851,10 @@ class SendRequestsTask(Task):
             "chart_group": self.params.get("chart_group"),
             "label": self.params.get("label"),
             "t0": time.time(),
+            # What was sent, for the run page's step labels — known from the
+            # start, before any reply.
+            "request": API_PATHS[api],
+            "stream": stream,
         }
         if limit_tokens is not None:
             # The limit read off the subscription under test — the chart's

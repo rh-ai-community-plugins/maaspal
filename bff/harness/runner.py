@@ -313,6 +313,9 @@ def _traffic_snapshot(shared_state: dict, default_limit: object = None) -> list[
                 "t0": info.get("t0"),
                 # "browser" when the user's browser sent it (from_browser).
                 "origin": info.get("origin") or "pod",
+                # Endpoint path and whether replies were streamed.
+                "request": info.get("request"),
+                "stream": info.get("stream"),
             }
         )
     return out

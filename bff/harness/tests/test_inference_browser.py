@@ -265,3 +265,13 @@ async def test_a_failed_reply_body_is_kept_whole_in_results_and_logs(results_dir
         f"HTTP 500 Internal Server Error: {body}"
     )
     assert f"request failed: status=500 Internal Server Error {body}" in capsys.readouterr().out
+
+
+async def test_the_burst_records_its_endpoint_and_streaming_up_front(results_dir) -> None:
+    ctx = _ctx()
+    await _run(SendRequestsTask("send_requests", {
+        "count": 1, "url": "http://m.test", "token": "sk-t", "from_browser": True,
+        "api": "completions", "stream": True,
+    }), ctx, results_dir, [_ok(0.0)])
+    traffic = ctx.shared_state["_traffic"]["inference_results"]
+    assert (traffic["request"], traffic["stream"]) == ("/v1/completions", True)
