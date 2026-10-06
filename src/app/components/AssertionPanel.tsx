@@ -113,7 +113,7 @@ function AssertionGroup({
           </span>
         )}
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
+      <div className="maaspal-assertion-card-grid">
         {assertions.map((a) => (
           <AssertionCard key={a.name} a={a} muted={false} />
         ))}

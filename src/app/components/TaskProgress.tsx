@@ -6,8 +6,9 @@ import { toneColor } from '../styles/colors';
 
 interface Props {
   tasks: TaskProgressEntry[];
+  selectedView: string;
+  onSelect: (view: string) => void;
 }
-
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -27,19 +28,27 @@ function useTick(active: boolean): void {
   }, [active]);
 }
 
-
-
-export function TaskProgress({ tasks }: Props) {
+export function TaskProgress({ tasks, selectedView, onSelect }: Props) {
   useTick(tasks.some((t) => t.status === 'RUNNING' && !!t.started_at));
 
   if (tasks.length === 0) return null;
 
   return (
-    <>
     <div className="maaspal-task-pipeline">
+      <button
+        type="button"
+        className={`maaspal-overview-btn${selectedView === 'overview' ? ' maaspal-overview-btn--selected' : ''}`}
+        onClick={() => onSelect('overview')}
+        aria-pressed={selectedView === 'overview'}
+      >
+        <span className="maaspal-overview-btn__icon">≡</span>
+        <span className="maaspal-overview-btn__label">Overview</span>
+      </button>
+
       {tasks.map((task, i) => {
         const color = toneColor(statusStyle(task.status).tone);
         const isRunning = task.status === 'RUNNING';
+        const isSelected = selectedView === task.name;
         const total = task.progress?.total ?? null;
         // A DONE task's bar is full only when its total was the plan (N of N
         // requests) — a "tokens toward the limit" bar shows where it really
@@ -69,10 +78,13 @@ export function TaskProgress({ tasks }: Props) {
         return (
           <div key={task.name} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             {i > 0 && <span className="maaspal-task-pipeline__arrow">→</span>}
-            <div
-              className={`maaspal-task-chip maaspal-task-chip--${task.status.toLowerCase()}`}
+            <button
+              type="button"
+              className={`maaspal-task-chip maaspal-task-chip--${task.status.toLowerCase()}${isSelected ? ' maaspal-task-chip--selected' : ''}`}
               style={{ '--task-color': color } as React.CSSProperties}
               title={task.summary}
+              onClick={() => onSelect(task.name)}
+              aria-pressed={isSelected}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                 {isRunning ? (
@@ -105,11 +117,10 @@ export function TaskProgress({ tasks }: Props) {
                   <span className="maaspal-task-chip__progress-label">{progressLabel}</span>
                 </div>
               )}
-            </div>
+            </button>
           </div>
         );
       })}
     </div>
-    </>
   );
 }

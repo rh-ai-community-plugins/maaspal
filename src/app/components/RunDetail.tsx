@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Alert, Button, Grid, GridItem, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
+import { Alert, Button, PageSection, Spinner, Switch, Tooltip } from '@patternfly/react-core';
 import { AssertionPanel } from './AssertionPanel';
 import { LogStream } from './LogStream';
 import {
@@ -148,6 +148,7 @@ export function RunDetail({ runId, onBack }: Props) {
   const [runStartedAt, setRunStartedAt] = useState<string | undefined>(undefined);
   const [insights, setInsights] = useState<Omit<ProgressResponse, 'tasks' | 'run_started_at'>>({});
   const titleFor = useScenarioTitle();
+  const [selectedView, setSelectedView] = useState<string>('overview');
   const [stopping, setStopping] = useState(false);
   const [cleaningUp, setCleaningUp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -351,41 +352,69 @@ export function RunDetail({ runId, onBack }: Props) {
           )}
         </div>
 
-        {/* A scenario that finds something out leads with the finding; one
-            that checks an expectation leads with the verdict. */}
-        {(insights.findings ?? []).length > 0 ? (
-          <FindingsPanel findings={insights.findings ?? []} />
-        ) : (
-          insights.verdict && <VerdictBanner verdict={insights.verdict} />
-        )}
-
         <BrowserSendBanner state={browserSend} />
 
-        <TaskProgress tasks={taskProgress} />
+        <TaskProgress tasks={taskProgress} selectedView={selectedView} onSelect={setSelectedView} />
 
-        <Grid hasGutter>
-          <GridItem span={12} lg={8}>
+        {selectedView === 'overview' ? (
+          <>
+            {(insights.findings ?? []).length > 0 ? (
+              <FindingsPanel findings={insights.findings ?? []} />
+            ) : (
+              insights.verdict && <VerdictBanner verdict={insights.verdict} />
+            )}
             <RunSteps
               tasks={taskProgress}
               resources={insights.resources ?? []}
               cleanupStatus={run?.cleanup_status}
             />
             <MetricsChartsPanel charts={insights.metrics_charts ?? []} />
-            {groupTraffic(insights.traffic ?? []).map((group) =>
-              group.length > 1 ? (
-                <TrafficGroupPanel key={group[0].chart_group ?? group[0].result_key} bursts={group} />
-              ) : (
-                <TrafficPanel key={group[0].result_key} burst={group[0]} />
-              ),
-            )}
             {(insights.tables ?? []).map((table) => (
               <DetailTable key={table.title} table={table} />
             ))}
-          </GridItem>
-          <GridItem span={12} lg={4}>
-            <AssertionPanel assertions={assertions} taskProgress={taskProgress} />
-          </GridItem>
-        </Grid>
+          </>
+        ) : (
+          <>
+            {(() => {
+              const taskAssertions = assertions.filter((a) => a.task === selectedView);
+              const taskTraffic = groupTraffic(
+                (insights.traffic ?? []).filter((b) => b.task === selectedView),
+              );
+              const selectedTask = taskProgress.find((t) => t.name === selectedView);
+              const isActive =
+                selectedTask?.status === 'RUNNING' || selectedTask?.status === 'PENDING';
+              const trafficNodes = taskTraffic.map((group) =>
+                group.length > 1 ? (
+                  <TrafficGroupPanel key={group[0].chart_group ?? group[0].result_key} bursts={group} />
+                ) : (
+                  <TrafficPanel key={group[0].result_key} burst={group[0]} />
+                ),
+              );
+
+              const assertionNode =
+                taskAssertions.length > 0 ? (
+                  <AssertionPanel assertions={taskAssertions} taskProgress={taskProgress} />
+                ) : (
+                  <p className="maaspal-empty" style={{ padding: '0.5rem 0' }}>
+                    {isActive ? 'Waiting for assertion data…' : 'No assertions defined for this step.'}
+                  </p>
+                );
+
+              // Always put traffic first; side-by-side whenever traffic exists alongside assertions
+              return taskTraffic.length > 0 && taskAssertions.length > 0 ? (
+                <div className="maaspal-task-split">
+                  <div className="maaspal-task-split__main">{trafficNodes}</div>
+                  <div className="maaspal-task-split__aside">{assertionNode}</div>
+                </div>
+              ) : (
+                <>
+                  {trafficNodes}
+                  {assertionNode}
+                </>
+              );
+            })()}
+          </>
+        )}
 
         <div style={{ marginTop: '1rem' }}>
           <LogsPanel runId={runId} failed={run?.status.toUpperCase() === 'FAIL'} />

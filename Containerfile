@@ -7,7 +7,7 @@ COPY --chown=default:root package*.json ./
 RUN npm ci
 
 COPY --chown=default:root . .
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 # Production stage
 FROM registry.access.redhat.com/ubi9/nginx-124:latest

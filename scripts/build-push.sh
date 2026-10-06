@@ -142,7 +142,7 @@ process_target() {
     log_info "--- ${target} ---"
 
     log_info "Building image: ${full_image}"
-    podman build -t "${full_image}" -f "${containerfile}" "${context}"
+    podman build --platform linux/amd64 -t "${full_image}" -f "${containerfile}" "${context}"
     log_success "Image built: ${full_image}"
 
     log_info "Pushing image: ${full_image}"
