@@ -29,13 +29,21 @@ Alternatives rejected:
 
 ### The browser gets the run's temporary key, nothing more
 
-The claim response is the only place a key value leaves the cluster: `Cache-Control: no-store`, behind the same `require_user` gate as every route, and only while the run is `RUNNING`. The status poll carries no keys. The order file is group-readable only (`0640`, because the BFF and Job pods may run as different UIDs) and is deleted when the step ends, including on Stop. The keys are revoked at cleanup as always. The harness refuses to hand its own ServiceAccount token to a browser: a browser step needs an API key (`key_pool`, `key_index` or `token`). Records are raw outcomes, size-capped and validated by pydantic. The Job recomputes every number from them, and only `server`/`x-ext-auth-reason` headers are kept.
+The claim response is the only place a key value leaves the cluster: `Cache-Control: no-store`, behind the same `require_user` gate as every route, and only while the run is `RUNNING`. The status poll carries no keys. The order file is group-readable only (`0640`, because the BFF and Job pods may run as different UIDs) and is deleted when the step ends, including on Stop. The keys are revoked at cleanup as always. The harness refuses to hand its own ServiceAccount token to a browser: a browser step needs an API key (`key_pool`, `key_index` or `token`). Records are raw outcomes, validated by pydantic (at most 500 per post). The Job recomputes every number from them, and only `server`/`x-ext-auth-reason` headers are kept. Response text is never capped: bodies, status text and browser errors have no length limit anywhere on the way.
 
 ### What a browser can't do, reported as such
 
-- **CORS.** The page (`rh-ai.<apps>`) calls `maas.<apps>` cross-origin with an `Authorization` header, so the browser sends a preflight first. If no readable answer comes back, the browser can't tell a CORS refusal from an unreachable host. So the first request is sent alone, and if it gets no readable answer the step ends with reason `blocked`. The step then **fails** with a finding and verdict: "no readable answer … a browser client there can't use MaaS as it is set up". No cluster change is made or suggested.
+- **CORS.** The page (`rh-ai.<apps>`) calls `maas.<apps>` cross-origin with an `Authorization` header, so the browser sends a preflight first. If no readable answer comes back, the browser can't tell a CORS refusal from an unreachable host. So the first request is sent alone, and if it gets no readable answer the step ends with reason `blocked`. The step then **fails** with a finding, verdict and log line: "Blocked by the browser: no readable answer from `<gateway host>` (`<the browser's error>`) — the gateway did not allow a cross-origin call from `<page origin>`, or is not reachable from the user's machine." No cluster change is made or suggested.
 - **Hidden headers.** Response headers the gateway doesn't expose to cross-origin callers can't be read, so `failure_origin()` falls back to status and body.
 - **No open page.** If nothing claims the order within `browser_claim_timeout_s` (default 120), or the tab goes quiet for `browser_idle_timeout_s` (default 60), the step fails and says why.
+
+### Messages are reported exactly as received
+
+What a request got back reaches the run log and the run results unchanged: the status line and the **whole** body of a failed reply, or the browser's own error (`TypeError: Failed to fetch`) when no answer could be read. Nothing is shortened, reflowed or reworded, and the run page wraps long or multi-line text instead of cutting it. The same now holds for pod-sent requests: `_error_message()` used to cut bodies to 80 characters and transport causes to 100. Explanations, like the "Blocked by the browser" sentence, go into findings and verdicts next to the raw message, never in its place.
+
+### Where a step's requests came from
+
+In "What happened", every step that sent requests carries a label: **Sent from the pod** or **Sent from the browser**, with a tooltip saying which side a failure can come from. A second label gives the endpoint and streaming (`/v1/chat/completions · streamed`), or `N request types` for a step that tries many. Both come from the burst's traffic record (`origin`, `request`, `stream`), which the harness writes when the step starts, from the step's resolved `api`/`stream`. Runs from before this have no `origin` (all were pod-sent) and fall back to the summary's `api`/`stream`.
 
 ### Scope
 

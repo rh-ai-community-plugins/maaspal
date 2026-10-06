@@ -50,9 +50,17 @@ configuration (models, subscriptions, auth policies, rate limiting, networking).
 probe how MaaS behaves. Everything a run creates is removed afterwards, unless
 you turn auto cleanup off.
 
-Every scenario that sends inference requests has two advanced settings:
+Every scenario that sends inference requests has these advanced settings:
 **Request API** (`/v1/chat/completions` by default, or `/v1/completions`,
-`/v1/responses`, `/v1/embeddings`) and **Streaming** (off by default).
+`/v1/responses`, `/v1/embeddings`), **Streaming** (off by default), and
+**Send from user browser** — the run page sends the requests from your
+browser straight to the MaaS gateway, like an outside client, instead of from
+the test pod. It is on by default for the small quick checks and off for rate
+limits and load; `gateway_overhead` and `request_types` always send from the
+pod. Keep the run page open while it sends. If the gateway doesn't accept
+calls from a browser (CORS), the step fails and says so — that is the result.
+On the run page, "What happened" labels each sending step with where it sent
+from and which endpoint it used.
 
 **Your own scenarios:** a new YAML file in `bff/scenarios/` shows up in the
 Scenarios catalog with a **Custom** label, ahead of the built-in ones. Give it

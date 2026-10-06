@@ -135,6 +135,8 @@ is dark in both themes too, matching the logs.
 | Bordered content block on the run page | `.maaspal-panel` (+ `.maaspal-panel__header`, `.maaspal-panel__title`) |
 | Clickable tile | PF `Card` (see `.maaspal-catalog-card`) |
 | Status badge in a table | PF `Label` with `color={statusLabelColor(status)}` |
+| Step facts in "What happened" | Compact PF `Label`: sent from the pod (grey outline) / the browser (blue); endpoint + streaming (purple outline) |
+| Raw error text (error samples) | `<code>` with `white-space: pre-wrap` — shown whole, never truncated |
 | Status icon or text | `statusStyle(status)` → `toneColor(tone)` + `icon` |
 | Tinted status block (verdict, check card, task chip) | `toneColor(tone)` for the stripe/border, `toneBg(tone)` for the fill |
 | Muted text, "—" | `.maaspal-text-muted` (or `COLOR.muted` in an inline style) |

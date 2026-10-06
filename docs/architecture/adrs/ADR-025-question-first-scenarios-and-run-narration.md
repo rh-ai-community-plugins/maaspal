@@ -116,5 +116,5 @@ Categories are now organised by question: Quick check, Rate limits, Access contr
 - **Window recovery, and per user or shared,** draw both bursts on one timeline (`chart_group`).
 - **Gateway overhead's direct leg is a passthrough Route to the model**, after a live check showed `status.addresses` only lists gateway URLs. Failures now explain themselves (`error_samples`, a 404 bucket).
 - **Run page:**
-  - "What happened" groups large resource lists by kind and status, and can be collapsed.
+  - "What happened" groups large resource lists by kind and status, and can be collapsed. Later (ADR-027), each sending step also shows where its requests were sent from and which endpoint/streaming it used.
   - Logs are a panel with a clear Show/Hide button, a line count and a last-line preview.
