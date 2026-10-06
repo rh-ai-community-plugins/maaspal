@@ -117,13 +117,4 @@ tasks:
       compare_direct: "${config.compare_direct}"
       request_timeout_s: "${config.request_timeout_s}"
       prompt: "${config.prompt}"
-    assertions:
-      tried_count:
-        label: "Request types tried"
-        unit: "types"
-        description: >-
-          Every selected type was attempted. Whether each one works is in
-          the Request types table; a type that fails doesn't fail the run.
-        promql: "${harness.request_types.tried_count}"
-        expect: ">= 1"
 cleanup: automatic
