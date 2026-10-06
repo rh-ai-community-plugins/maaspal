@@ -49,7 +49,7 @@ class ClaimRequest(BaseModel):
 
 class BrowserAttempt(BaseModel):
     status: int | None = Field(None, ge=100, le=599)
-    reason: str = Field("", max_length=200)
+    reason: str = ""
     ms: float = Field(0.0, ge=0)
 
 
@@ -58,10 +58,12 @@ class BrowserRecord(BaseModel):
     latency_ms: float = Field(ge=0, le=86_400_000)
     ok: bool = False
     status: int | None = Field(None, ge=100, le=599)
-    reason: str = Field("", max_length=200)
-    error: str | None = Field(None, max_length=500)
+    # Response text and browser errors are kept exactly as received —
+    # no length caps, so nothing is ever cut short.
+    reason: str = ""
+    error: str | None = None
     headers: dict[str, str] = Field(default_factory=dict, max_length=50)
-    body: str = Field("", max_length=2000)
+    body: str = ""
     usage: dict[str, int] | None = Field(None, max_length=10)
     arrivals: list[float] = Field(default_factory=list, max_length=20_000)
     attempts: list[BrowserAttempt] = Field(default_factory=list, max_length=20)
@@ -73,7 +75,7 @@ class BrowserResults(BaseModel):
     records: list[BrowserRecord] = Field(default_factory=list, max_length=500)
     done: bool = False
     reason: Literal["finished", "blocked", "stopped", "error"] = "finished"
-    detail: str = Field("", max_length=500)
+    detail: str = ""
 
 
 @router.get("/api/runs/{run_id}/browser-work")

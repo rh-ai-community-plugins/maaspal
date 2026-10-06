@@ -6,7 +6,6 @@
 // replies read to the end with a final usage chunk.
 import type { BrowserDoneReason, BrowserOrder, BrowserRecord, BrowserTarget, RequestApi } from './api/client';
 
-const MAX_BODY_CHARS = 2000;
 const MAX_ARRIVALS = 20000;
 const MAX_BATCH = 500;
 export const FLUSH_MS = 500;
@@ -191,11 +190,8 @@ export async function sendOne(
           await sleep(retryDelayMs(null, attempt));
           continue;
         }
-        const e = err as Error;
-        const error = timeout.signal.aborted
-          ? `Timeout: no answer within ${order.timeout_s}s`
-          : `${e.name || 'Error'}: ${e.message}`;
-        return { ...base, latency_ms: now() - t0, error, attempts };
+        // The browser's own error, unchanged (e.g. "TypeError: Failed to fetch").
+        return { ...base, latency_ms: now() - t0, error: String(err), attempts };
       }
       attempts.push({ status: response.status, reason: response.statusText, ms: now() - attemptStart });
       if (!response.ok) {
@@ -204,7 +200,8 @@ export async function sendOne(
           await sleep(retryDelayMs(response, attempt));
           continue;
         }
-        const text = (await response.text().catch(() => '')).slice(0, MAX_BODY_CHARS);
+        // The whole body, exactly as received.
+        const text = await response.text().catch(() => '');
         return {
           ...base,
           latency_ms: now() - t0,
@@ -229,27 +226,14 @@ export async function sendOne(
         };
       } catch (err) {
         if (signal.aborted) throw err;
-        const e = err as Error;
         // The answer started but broke off — no complete reply.
-        return { ...base, latency_ms: now() - t0, error: `${e.name || 'Error'} while reading the reply: ${e.message}`, attempts };
+        return { ...base, latency_ms: now() - t0, error: String(err), attempts };
       }
     } finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
     }
   }
-}
-
-export function blockedMessage(url: string, error: string | null | undefined): string {
-  let host = url;
-  try {
-    host = new URL(url).host;
-  } catch {
-    // keep the raw URL
-  }
-  // A short, groupable error reason, like the harness's own — the step's
-  // finding and verdict explain what it means (CORS, or unreachable).
-  return `Blocked by the browser: no readable answer from ${host}` + (error ? ` (${error})` : '');
 }
 
 export interface BurstCallbacks {
@@ -328,8 +312,9 @@ export async function runBurst(
       const firstTarget = order.targets[order.plan[0]];
       const first = await sendOne(order, firstTarget, inner.signal, burstStart, deps);
       if (first.status == null) {
+        // The harness turns this into the "Blocked by the browser" finding;
+        // the record itself keeps the browser's error unchanged.
         detail = first.error ?? '';
-        first.error = blockedMessage(firstTarget.url, first.error);
         reason = 'blocked';
         record(first);
       } else {

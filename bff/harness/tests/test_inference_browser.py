@@ -230,3 +230,38 @@ async def test_a_browser_error_reason_is_never_cut_short(results_dir) -> None:
         "count": 2, "url": "http://m.test", "token": "sk-t", "from_browser": True,
     }), ctx, results_dir, [_ok(0.0), {"t0_offset_s": 0.1, "latency_ms": 1.0, "error": reason}])
     assert ctx.shared_state["inference_results"]["error_samples"][0]["message"] == reason
+
+
+async def test_the_blocked_message_is_whole_and_names_the_gateway(results_dir, capsys) -> None:
+    ctx = _ctx()
+    result, _ = await _run(SendRequestsTask("send_requests", {
+        "count": 1, "url": "https://maas.apps.example.com/v1", "token": "sk-t", "from_browser": True,
+    }), ctx, results_dir, [{"t0_offset_s": 0.0, "latency_ms": 3.0, "error": "TypeError: Failed to fetch"}],
+        reason="blocked", detail="TypeError: Failed to fetch")
+
+    expected = (
+        "Blocked by the browser: no readable answer from maas.apps.example.com (TypeError: Failed to fetch)"
+        " — the gateway did not allow a cross-origin call from https://rh-ai.test, or is not reachable from"
+        " the user's machine."
+    )
+    assert result.error == expected
+    assert ctx.shared_state["_findings"][0]["text"] == expected
+    assert ctx.shared_state["_verdict_text"] == expected
+    # The browser's own error stays exactly as reported, in results and logs.
+    assert ctx.shared_state["inference_results"]["error_samples"][0]["message"] == "TypeError: Failed to fetch"
+    out = capsys.readouterr().out
+    assert "(browser) request failed: TypeError: Failed to fetch\n" in out
+    assert expected in out
+
+
+async def test_a_failed_reply_body_is_kept_whole_in_results_and_logs(results_dir, capsys) -> None:
+    body = '{"error": {"message": "' + "y" * 3000 + '"}}\n'
+    ctx = _ctx()
+    await _run(SendRequestsTask("send_requests", {
+        "count": 1, "url": "http://m.test", "token": "sk-t", "from_browser": True,
+    }), ctx, results_dir, [{**_failed(0.0, 500, body), "reason": "Internal Server Error"}])
+
+    assert ctx.shared_state["inference_results"]["error_samples"][0]["message"] == (
+        f"HTTP 500 Internal Server Error: {body}"
+    )
+    assert f"request failed: status=500 Internal Server Error {body}" in capsys.readouterr().out

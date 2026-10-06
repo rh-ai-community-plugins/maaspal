@@ -120,6 +120,13 @@ test('retries like the SDK and reports every attempt', async () => {
   expect(rec.attempts?.map((a) => a.status)).toEqual([503, 429, 200]);
 });
 
+test('a failed request keeps its whole body, unchanged', async () => {
+  const body = '{"error":\n  "' + 'x'.repeat(5000) + '"}\n';
+  const fetchImpl = jest.fn().mockResolvedValue(reply(500, body));
+  const rec = await sendOne(order(), order().targets[0], new AbortController().signal, 0, deps(fetchImpl));
+  expect(rec.body).toBe(body);
+});
+
 test('a failed request keeps status, body and the readable headers', async () => {
   const fetchImpl = jest
     .fn()
@@ -171,7 +178,8 @@ test('no readable answer at all stops after the first request: blocked', async (
   );
   expect(reason).toBe('blocked');
   expect(fetchImpl).toHaveBeenCalledTimes(1);
-  expect(flushed[0].error).toContain('Blocked by the browser: no readable answer from maas.test');
+  // The record keeps the browser's own error, unchanged.
+  expect(flushed[0].error).toBe('TypeError: Failed to fetch');
   expect(doneWith).toEqual({ reason: 'blocked', detail: 'TypeError: Failed to fetch' });
 });
 

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
@@ -130,17 +131,18 @@ def _status_class(status_code: int | None) -> str:
 
 
 def _error_message(exc: Exception) -> str:
-    """A short, groupable description of why a request failed. The OpenAI
+    """Why a request failed, exactly as the response or exception gave it —
+    status line plus the full body, never shortened or reworded. The OpenAI
     SDK reports every transport failure as a bare "Connection error." — the
     real reason (DNS, refused, TLS, timeout) is on its __cause__."""
     if isinstance(exc, APIStatusError):
-        body = (getattr(exc.response, "text", "") or "").strip().replace("\n", " ")
+        body = getattr(exc.response, "text", "") or ""
         reason = getattr(exc.response, "reason_phrase", "") or ""
-        return f"HTTP {exc.status_code} {reason}".strip() + (f": {body[:80]}" if body else "")
+        return f"HTTP {exc.status_code} {reason}".strip() + (f": {body}" if body else "")
     cause = exc.__cause__ or exc.__context__
     if cause is not None and str(exc).strip().lower().startswith("connection error"):
-        return f"{type(cause).__name__}: {str(cause)[:100]}"
-    return f"{type(exc).__name__}: {str(exc)[:100]}"
+        return f"{type(cause).__name__}: {cause}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _summary_line(r: dict, planned: int | None) -> str:
@@ -439,12 +441,12 @@ def failure_origin(status: int | None, headers: Mapping[str, str], text: str) ->
     lowered = {k.lower(): v for k, v in headers.items()}
     reason = lowered.get("x-ext-auth-reason")
     if reason:
-        return "gateway", f"the MaaS auth layer denied it ({reason[:80]})"
+        return "gateway", f"the MaaS auth layer denied it ({reason})"
     if status == 429:
         return "gateway", "throttled by the MaaS rate limit (429)"
     server = lowered.get("server", "")
     if server and "envoy" not in server.lower():
-        return "model", f"answered by the model server itself (server: {server[:40]})"
+        return "model", f"answered by the model server itself (server: {server})"
     body: object = None
     with contextlib.suppress(ValueError):
         body = json.loads(text) if text.strip() else None
@@ -482,14 +484,13 @@ def _outcome_from_browser(rec: dict, start: float) -> _Outcome:
         body = str(rec.get("body") or "")
         message = None
         if status != 429:
-            flat = body.strip().replace("\n", " ")
-            message = f"HTTP {status} {rec.get('reason') or ''}".strip() + (f": {flat[:80]}" if flat else "")
+            message = f"HTTP {status} {rec.get('reason') or ''}".strip() + (f": {body}" if body else "")
         return _Outcome(
             t0=t0, latency_ms=latency, status=status, error_message=message,
             origin=failure_origin(status, headers, body),
         )
-    # Same cap as the BFF accepts (api/routes/browser.py) — never cut silently below it.
-    return _Outcome(t0=t0, latency_ms=latency, error_message=str(rec.get("error") or "no response")[:500])
+    # Exactly what the browser reported — never shortened or reworded.
+    return _Outcome(t0=t0, latency_ms=latency, error_message=str(rec.get("error") or "no response"))
 
 
 def _exc_failure_origin(exc: APIStatusError) -> tuple[str, str]:
@@ -1231,15 +1232,18 @@ class SendRequestsTask(Task):
                             skipped = max(0, count - (success + fail))
                             if reason == "blocked":
                                 detail = str(rec.get("detail") or "")
+                                host = urlsplit(targets[plan[0]]["url"] if plan else url).netloc
                                 # A browser can't tell CORS from an unreachable
-                                # host — both are an unreadable answer.
+                                # host — both are an unreadable answer. `detail`
+                                # is the browser's own error, unchanged.
                                 browser_failure = (
-                                    "Your browser got no readable answer from the MaaS gateway: it did not "
-                                    f"allow a cross-origin call from {claim.get('origin') or 'the dashboard'}, "
-                                    "or isn't reachable from the user's machine"
+                                    f"Blocked by the browser: no readable answer from {host}"
                                     + (f" ({detail})" if detail else "")
-                                    + ". A browser client there can't use MaaS as it is set up."
+                                    + " — the gateway did not allow a cross-origin call from "
+                                    + f"{claim.get('origin') or 'the dashboard'}, or is not reachable from "
+                                    + "the user's machine."
                                 )
+                                print(f"[send_requests] {browser_failure}", flush=True)
                                 ctx.shared_state.setdefault("_findings", []).append(
                                     {"title": "Blocked by the browser", "text": browser_failure, "outcome": "blocked"}
                                 )
@@ -1255,11 +1259,13 @@ class SendRequestsTask(Task):
                                     attempt["status"], str(attempt.get("reason") or ""), float(attempt.get("ms") or 0)
                                 )
                         if o.reply is None:
-                            what = f"status={o.status} " if o.status is not None else ""
-                            print(
-                                f"[send_requests] (browser) request failed: {what}{o.error_message or ''}".rstrip(),
-                                flush=True,
-                            )
+                            # What the browser got back, unchanged: status line
+                            # and body, or its own error when there was no answer.
+                            if o.status is not None:
+                                got = f"status={o.status} {rec.get('reason') or ''} {rec.get('body') or ''}"
+                            else:
+                                got = str(rec.get("error") or "no response")
+                            print(f"[send_requests] (browser) request failed: {got}", flush=True)
                         await record_outcome(o)
                     if time.monotonic() - last_seen >= idle_timeout_s:
                         browser_failure = (

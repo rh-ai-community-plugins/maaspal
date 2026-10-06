@@ -1362,3 +1362,14 @@ async def test_timeout_and_stop_after_a_hang() -> None:
     assert mock_cls.call_args.kwargs["timeout"] == 7.0
     ir = ctx.shared_state["inference_results"]
     assert ir["total_requests"] == 1 and ir["transport_error_count"] == 1
+
+
+def test_error_messages_keep_the_whole_response_body() -> None:
+    from harness.tasks.inference import _error_message
+
+    body = '{"detail": "' + "z" * 2000 + '"}\nsecond line'
+    request = httpx.Request("POST", "http://m.test/v1/chat/completions")
+    exc = APIStatusError(
+        "boom", response=httpx.Response(502, request=request, text=body), body=None  # type: ignore[arg-type]
+    )
+    assert _error_message(exc) == f"HTTP 502 Bad Gateway: {body}"
