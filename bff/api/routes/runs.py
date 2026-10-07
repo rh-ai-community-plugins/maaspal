@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from api.cleanup import run_manual_cleanup
 from api.db import get_db_path
 from api.k8s import create_job, stop_run
+from api.scenario_store import scenario_path
 from harness.cleanup_state import write_auto_cleanup_flag
 
 router = APIRouter()
@@ -36,6 +37,9 @@ class AutoCleanupRequest(BaseModel):
 
 @router.post("/api/runs", status_code=201)
 async def create_run(body: RunRequest) -> dict:
+    path = scenario_path(body.scenario)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"No scenario called {body.scenario}")
     run_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     overrides_json = json.dumps(body.config_overrides) if body.config_overrides else None
@@ -54,7 +58,7 @@ async def create_run(body: RunRequest) -> dict:
 
     status = "PENDING"
     try:
-        create_job(body.scenario, run_id, body.config_overrides)
+        create_job(body.scenario, run_id, body.config_overrides, scenario_path=str(path.resolve()))
         status = "RUNNING"
     except Exception:
         print(f"[api] K8s job creation FAILED\n{traceback.format_exc()}", flush=True)

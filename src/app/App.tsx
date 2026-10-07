@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Button, PageSection, Title } from '@patternfly/react-core';
+import { Button, PageSection, Spinner, Title } from '@patternfly/react-core';
 import CommunityBanner from './components/CommunityBanner';
 import { PageIntro } from './components/PageIntro';
 import { MaasOverviewPage } from './components/maas/MaasOverviewPage';
@@ -20,6 +20,11 @@ import './styles/theme.css';
 // "Runs" and "MaaS overview" live) and the scroll container — so this renders
 // content only. Paths are absolute so they work under the host's router and
 // the standalone dev router (basename /maaspal) alike.
+// Code-split: the import dialog's editor pulls in Monaco.
+const ImportScenarioModal = lazy(() =>
+  import('./components/ImportScenarioModal').then((m) => ({ default: m.ImportScenarioModal })),
+);
+
 const SCENARIOS_PATH = '/maaspal/scenarios';
 const RUNS_PATH = '/maaspal/runs';
 const OVERVIEW_PATH = '/maaspal/overview';
@@ -50,13 +55,35 @@ function PageHeader() {
 export function ScenariosPage() {
   const navigate = useNavigate();
   const [triggerScenario, setTriggerScenario] = useState<Scenario | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   return (
     <PageSection>
-      <PageIntro title="Scenarios">
+      <PageIntro
+        title="Scenarios"
+        actions={
+          <Button variant="secondary" onClick={() => setImporting(true)}>
+            Import scenario
+          </Button>
+        }
+      >
         Each scenario asks one question about your MaaS setup. Pick one to configure and run it.
       </PageIntro>
-      <ScenarioCatalog onRun={setTriggerScenario} />
+      <ScenarioCatalog onRun={setTriggerScenario} reloadKey={reloadKey} />
+
+      {importing && (
+        <Suspense fallback={<Spinner size="lg" aria-label="Loading import dialog" />}>
+          <ImportScenarioModal
+            onClose={() => setImporting(false)}
+            onImported={(scenario) => {
+              setImporting(false);
+              setReloadKey((k) => k + 1);
+              setTriggerScenario(scenario);
+            }}
+          />
+        </Suspense>
+      )}
 
       {triggerScenario !== null && (
         <RunTrigger
@@ -66,6 +93,10 @@ export function ScenariosPage() {
             navigate(`${RUNS_PATH}/${runId}`);
           }}
           onCancel={() => setTriggerScenario(null)}
+          onDeleted={() => {
+            setTriggerScenario(null);
+            setReloadKey((k) => k + 1);
+          }}
         />
       )}
     </PageSection>

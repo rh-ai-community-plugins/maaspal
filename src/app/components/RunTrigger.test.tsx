@@ -448,3 +448,29 @@ test('Request API shows endpoint paths, Streaming is a switch, and both are sent
   expect(body.config_overrides.request_api).toBe('completions');
   expect(body.config_overrides.stream).toBe(true);
 });
+
+test('imported scenarios can be deleted after a confirm; built-in ones cannot', async () => {
+  mockFetch();
+  const onDeleted = jest.fn();
+  const { unmount } = render(
+    <RunTrigger scenario={plainScenario} onConfirm={jest.fn()} onCancel={jest.fn()} onDeleted={onDeleted} />,
+  );
+  expect(screen.queryByRole('button', { name: 'Delete scenario' })).not.toBeInTheDocument();
+  unmount();
+
+  render(
+    <RunTrigger
+      scenario={{ ...plainScenario, name: 'my_check', custom: true, imported: true }}
+      onConfirm={jest.fn()}
+      onCancel={jest.fn()}
+      onDeleted={onDeleted}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Delete scenario' }));
+  expect(global.fetch).not.toHaveBeenCalledWith('/maaspal/api/scenarios/my_check', expect.anything());
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+  });
+  expect(global.fetch).toHaveBeenCalledWith('/maaspal/api/scenarios/my_check', { method: 'DELETE' });
+  await waitFor(() => expect(onDeleted).toHaveBeenCalled());
+});

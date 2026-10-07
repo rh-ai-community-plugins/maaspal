@@ -62,11 +62,17 @@ calls from a browser (CORS), the step fails and says so — that is the result.
 On the run page, "What happened" labels each sending step with where it sent
 from and which endpoint it used.
 
-**Your own scenarios:** a new YAML file in `bff/scenarios/` shows up in the
-Scenarios catalog with a **Custom** label, ahead of the built-in ones. Give it
+**Your own scenarios:** click **Import scenario** on the Scenarios page and
+upload a scenario YAML or paste one in (a built-in one's run settings, from a
+run page, are a good start; give it a new `name:`). The BFF checks that it
+loads and uses known tasks, then stores it on the plugin's PVC
+(`/data/scenarios/`), so no rebuild is needed and it survives restarts. It shows
+up in the catalog with a **Custom** label, ahead of the built-in ones. Give it
 one of the categories above (`category: "Rate limits"`) to list it there, or
-leave `category:` out and it goes in a Custom category at the top. Scenarios are
-baked into the BFF image, so rebuild it.
+leave `category:` out and it goes in a Custom category at the top. Re-importing
+the same name offers to replace it; **Delete scenario** in its launch form
+removes it. Anyone with access to MaaS:PAL can import. A YAML file added to
+`bff/scenarios/` and baked into the BFF image is listed as custom too.
 
 PAL, the mascot in the header, gets hungry. Try clicking it a few times.
 

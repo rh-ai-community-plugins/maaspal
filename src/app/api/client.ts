@@ -55,6 +55,8 @@ export interface Scenario {
   category: string;
   // Not one of the scenarios MaaS:PAL ships with (api/routes/scenarios.py).
   custom?: boolean;
+  // Imported from the UI (stored on the plugin's PVC), so it can be deleted.
+  imported?: boolean;
   kind?: 'verify' | 'explore';
   // What kinds of cluster objects a run creates/changes.
   mutates?: string[];
@@ -113,6 +115,33 @@ export async function listScenarios(): Promise<Scenario[]> {
   const r = await fetch(`${API_BASE}/scenarios`);
   if (!r.ok) throw await apiError(r, 'listScenarios');
   return r.json() as Promise<Scenario[]>;
+}
+
+// Thrown by importScenario when the name is taken; `builtIn` false means an
+// earlier import, which the user may replace.
+export class ScenarioNameTaken extends Error {
+  constructor(message: string, readonly builtIn: boolean) {
+    super(message);
+  }
+}
+
+export async function importScenario(yaml: string, replace = false): Promise<Scenario> {
+  const r = await fetch(`${API_BASE}/scenarios/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ yaml, replace }),
+  });
+  if (r.status === 409) {
+    const { message } = await apiError(r, 'importScenario');
+    throw new ScenarioNameTaken(message, /built-in/i.test(message));
+  }
+  if (!r.ok) throw await apiError(r, 'importScenario');
+  return r.json() as Promise<Scenario>;
+}
+
+export async function deleteScenario(name: string): Promise<void> {
+  const r = await fetch(`${API_BASE}/scenarios/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!r.ok) throw await apiError(r, 'deleteScenario');
 }
 
 export async function createRun(

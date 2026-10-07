@@ -1086,3 +1086,30 @@ button.maaspal-task-chip:hover {
 .maaspal-traffic-line__toggle {
   margin-left: auto;
 }
+
+/* Import scenario dialog */
+.maaspal-import__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.maaspal-import__file {
+  color: var(--maaspal-text-subtle);
+  font-size: 0.85rem;
+}
+
+.maaspal-import__error {
+  margin-top: 0.75rem;
+}
+
+/* The BFF's reason, as received — keep its line breaks. */
+.maaspal-import__error-text {
+  white-space: pre-wrap;
+}
+
+/* Launch form: "Delete scenario" (imported only) sits apart from Launch/Cancel. */
+.maaspal-run-trigger__delete {
+  margin-inline-start: auto;
+}

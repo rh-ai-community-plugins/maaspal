@@ -50,7 +50,14 @@ def _api_server_node(k8s: object) -> str | None:
     return None
 
 
-def create_job(scenario: str, run_id: str, config_overrides: dict | None = None) -> None:
+def create_job(
+    scenario: str,
+    run_id: str,
+    config_overrides: dict | None = None,
+    scenario_path: str | None = None,
+) -> None:
+    """scenario_path: the file the harness reads — a built-in one in the image
+    by default, or an imported one on the PVC (api/scenario_store.py)."""
     k8s = _kube()
     batch = k8s.BatchV1Api()
     node_name = _api_server_node(k8s)
@@ -75,7 +82,8 @@ def create_job(scenario: str, run_id: str, config_overrides: dict | None = None)
                 command=["python", "-m", "harness.main"],
                 args=[
                     "--scenario",
-                    f"{os.environ.get('SCENARIOS_DIR', '/app/scenarios')}/{scenario}.yaml",
+                    scenario_path
+                    or f"{os.environ.get('SCENARIOS_DIR', '/app/scenarios')}/{scenario}.yaml",
                     "--run-id",
                     run_id,
                 ],

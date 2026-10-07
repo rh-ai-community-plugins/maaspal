@@ -17,7 +17,7 @@ def _mock_k8s(monkeypatch) -> None:
 
     monkeypatch.setattr(
         api.routes.runs, "create_job",
-        lambda scenario, run_id, config_overrides=None: None,
+        lambda scenario, run_id, config_overrides=None, scenario_path=None: None,
     )
     # Log capture is a background thread that talks to a real cluster — not
     # available in this test environment. get_log_lines() reading a nonexistent

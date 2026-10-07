@@ -16,6 +16,7 @@ import {
 import { OutlinedQuestionCircleIcon } from '@patternfly/react-icons';
 import {
   createRun,
+  deleteScenario,
   getMaasModels,
   getMaasSubscriptions,
   type MaasModel,
@@ -45,12 +46,17 @@ interface Props {
   scenario: Scenario;
   onConfirm: (runId: string) => void;
   onCancel: () => void;
+  // Imported scenarios can be deleted from here (the catalog card itself is
+  // one big button).
+  onDeleted?: () => void;
 }
 
 const noteStyle = { color: COLOR.muted, fontSize: '0.75rem', margin: '0.25rem 0 0' };
 
-export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
+export function RunTrigger({ scenario, onConfirm, onCancel, onDeleted }: Props) {
   const [loading, setLoading] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [values, setValues] = useState<ConfigValues>(() => initValues(scenario.config));
   const [autoCleanup, setAutoCleanup] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -138,6 +144,18 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
       const result = await createRun(scenario.name, values, autoCleanup);
       onConfirm(result.run_id);
     } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleDelete() {
+    setLoading(true);
+    setDeleteError(null);
+    try {
+      await deleteScenario(scenario.name);
+      onDeleted?.();
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e));
       setLoading(false);
     }
   }
@@ -507,6 +525,28 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
             .join(', ')}
         </p>
       )}
+
+      {confirmDelete && (
+        <Alert
+          variant="warning"
+          isInline
+          title={`Delete the imported scenario "${scenarioTitle(scenario)}"?`}
+          style={{ marginTop: '1rem' }}
+          actionLinks={
+            <>
+              <Button variant="link" isDanger isInline onClick={() => void handleDelete()} isDisabled={loading}>
+                Delete
+              </Button>
+              <Button variant="link" isInline onClick={() => setConfirmDelete(false)} isDisabled={loading}>
+                Keep it
+              </Button>
+            </>
+          }
+        >
+          It disappears from the catalog. Past runs of it stay in the run history.
+          {deleteError && <p style={{ ...noteStyle, color: toneColor('danger') }}>{deleteError}</p>}
+        </Alert>
+      )}
       </ModalBody>
       <ModalFooter>
         <Button
@@ -521,6 +561,18 @@ export function RunTrigger({ scenario, onConfirm, onCancel }: Props) {
         <Button key="cancel" variant="link" onClick={onCancel} isDisabled={loading}>
           Cancel
         </Button>
+        {scenario.imported && onDeleted && (
+          <Button
+            key="delete"
+            variant="link"
+            isDanger
+            onClick={() => setConfirmDelete(true)}
+            isDisabled={loading || confirmDelete}
+            className="maaspal-run-trigger__delete"
+          >
+            Delete scenario
+          </Button>
+        )}
       </ModalFooter>
     </Modal>
   );

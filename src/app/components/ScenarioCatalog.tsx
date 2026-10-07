@@ -246,9 +246,11 @@ function toggle<T>(list: T[], value: T, on: boolean): T[] {
 
 interface Props {
   onRun: (scenario: Scenario) => void;
+  // Changing it reloads the list (after an import or a delete).
+  reloadKey?: number;
 }
 
-export function ScenarioCatalog({ onRun }: Props) {
+export function ScenarioCatalog({ onRun, reloadKey = 0 }: Props) {
   const [allScenarios, setScenarios] = useState<Scenario[]>([]);
   const palActive = usePal().active;
   const scenarios = useMemo(
@@ -268,7 +270,7 @@ export function ScenarioCatalog({ onRun }: Props) {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, reloadKey]);
 
   // Everything but the category filter — what the rail's counts are based on.
   const filtered = useMemo(
