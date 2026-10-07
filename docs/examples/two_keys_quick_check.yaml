@@ -1,0 +1,76 @@
+name: two_keys_quick_check
+title: "Do two fresh API keys both work?"
+summary: >-
+  Creates two API keys and spreads a small burst of requests across them,
+  checking errors and latency.
+description: >-
+  A small custom scenario imported from the UI. Lists the models MaaS exposes,
+  creates two API keys (MaaS picks the subscription), and sends requests
+  round-robin across both keys. Both keys are revoked when the run finishes.
+category: "API keys"
+kind: verify
+mutates: [api_keys]
+est_duration: "~30 s"
+plan_template: >-
+  Create 2 API keys on ${subscription} and send ${config.request_count}
+  requests to ${model}, alternating between the keys.
+inputs:
+  target_model_name:
+    label: "Model"
+    placeholder: "Cluster default model"
+    help: "Leave blank to use the cluster's default model."
+  request_count:
+    label: "Requests"
+  max_p95_ms:
+    label: "Slowest acceptable p95 latency (ms)"
+    advanced: true
+  prompt:
+    advanced: true
+    help: "The chat message sent in every request."
+config:
+  request_count: 10
+  concurrency: 2
+  max_p95_ms: 5000
+  prompt: "Say hi in five words."
+  target_model_name: ""
+  target_model_namespace: ""
+verdict:
+  pass: "Both keys worked: ${harness.inference_results.success_count} requests succeeded."
+  fail: "At least one check failed — see which step below."
+tasks:
+  - name: check_platform_health
+    assertions:
+      model_count:
+        label: "Models visible through MaaS"
+        unit: "models"
+        promql: "${harness.platform_health.model_count}"
+        expect: ">= 1"
+  - name: provision_api_key
+    params:
+      key_name: "maaspal-two-keys"
+      count: 2
+    assertions:
+      keys_created:
+        label: "Keys created"
+        unit: "keys"
+        promql: "${harness.key_provision_checks.total_keys}"
+        expect: "== 2"
+  - name: send_requests
+    params:
+      count: "${config.request_count}"
+      concurrency: "${config.concurrency}"
+      prompt: "${config.prompt}"
+      model: "${config.target_model_namespace}/${config.target_model_name}"
+      key_pool: true
+    assertions:
+      error_rate_pct:
+        label: "Inference error rate"
+        unit: "%"
+        promql: "${harness.inference_results.error_rate_pct}"
+        expect: "< 5"
+      p95_latency_ms:
+        label: "p95 latency"
+        unit: "ms"
+        promql: "${harness.inference_results.p95_latency_ms}"
+        expect: "< ${config.max_p95_ms}"
+cleanup: automatic
