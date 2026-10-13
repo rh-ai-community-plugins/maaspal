@@ -1,27 +1,41 @@
 # MaaS:PAL (MaaS: **P**olicies, **A**ccess, & **L**imits)
 
-MaaS:PAL (MaaS: Policies, Access, & Limits) is a community plugin for the **Red Hat OpenShift AI (RHOAI) Dashboard**
-that tests a **Models as a Service (MaaS)** setup on a live cluster. It answers
-questions like "is my subscription's rate limit actually enforced?" or "does my
-subscription reach every model it covers?". It acts through MaaS's own
-user-facing APIs, the way a real user would.
+MaaS:PAL is a community plugin for **Red Hat OpenShift AI (RHOAI)** that checks a **Models as a Service (MaaS)** setup on a live cluster. It answers questions like "is my subscription's rate limit really enforced at the limit I set?" or "does my subscription reach every model it should?", through MaaS's own user-facing
+APIs, the way a real user would.
 
-In the dashboard, open **Community plugins → MaaS:PAL**. Pick a scenario from
-the **Scenarios** catalog (search, or filter by category, custom/built-in and
-type), adjust its settings and launch it. **Runs** lists every run. The run executes in the
-cluster as a Kubernetes Job, and its page shows what happened step by step:
-live progress, traffic charts, the checks, a plain-language verdict, and what
-the run created and cleaned up. **MaaS overview** shows the cluster's MaaS
-configuration (models, subscriptions, auth policies, rate limiting, networking).
+![The MaaS:PAL Scenarios catalog: a search and category rail beside cards asking "Is MaaS working end to end?", "Does my subscription work for every model it covers?" and "Which request types does my model support?"](docs/images/maaspal-scenarios.png)
 
-## What's Inside
+## What It Looks Like
 
-| Part | What it is |
-|---|---|
-| Frontend (`src/`) | React + PatternFly 6, loaded by the dashboard at runtime through Webpack Module Federation (`remoteEntry.js`, served by nginx) |
-| BFF (`bff/`) | FastAPI backend behind the dashboard's `proxyService` (`/maaspal/api` → `/api`). Launches and stops runs, captures their logs, keeps run history (SQLite on a PVC) and reads the MaaS setup. Every request is checked against the dashboard user's own token. |
-| Harness (`bff/harness/`) | The test runner. Each run is a Kubernetes Job using the BFF image. Scenarios are YAML files in `bff/scenarios/`. |
-| Helm chart (`chart/`) | Deploys the frontend, the BFF, the PVC and the RBAC the harness needs |
+In the dashboard, open **Community plugins → MaaS:PAL**.
+
+**Scenarios** is the catalog above. Each card asks one question about your MaaS
+setup; search it, or filter by category, source (custom or built-in) and type.
+Picking one opens a launch form where you adjust its settings and read what the
+run will do before it starts.
+
+**Runs** lists every run, newest first, with its status and duration. A run
+that is still going can be stopped and will automatically clean up.
+
+![The Runs page listing runs with RUNNING, FAIL, CANCELLED and PASS statuses, each with a run id, scenario question, start time and duration](docs/images/maaspal-runs.png)
+
+Each run executes in the cluster as a Kubernetes Job. Its page narrates what
+happened: live step progress, a plain-language verdict, the checks behind it,
+traffic charts, and every object the run created along with whether it was
+cleaned up afterwards.
+
+![A passing smoke test run: all three steps green, the verdict "Behaving as expected", and a "What happened" list ending in "Everything this run created was removed or put back."](docs/images/maaspal-run-success.png)
+
+When something is off, the run page names the finding directly. Here the MaaS
+gateway refused a cross-origin call from the user's browser.
+
+![A failing run with the finding "Blocked by the browser": no readable answer from the MaaS host, with the failing step and its error shown underneath](docs/images/maaspal-run-failure.png)
+
+**MaaS overview** is a read-only view of how MaaS is configured on this
+cluster: subscriptions, models, authorization policies, access control, rate
+limiting, networking and platform config. Nothing here changes the cluster.
+
+![The MaaS overview page, Subscriptions tab: two subscriptions with their priority, phase, model refs with rate limits and auth policy status, and who they are granted to](docs/images/maaspal-overview.png)
 
 ## Scenarios
 
@@ -51,18 +65,19 @@ you turn auto cleanup off.
 Every scenario that sends inference requests has these advanced settings:
 **Request API** (`/v1/chat/completions` by default, or `/v1/completions`,
 `/v1/responses`, `/v1/embeddings`), **Streaming** (off by default), and
-**Send from user browser** — the run page sends the requests from your
+**Send from user browser** which means that the run page sends the requests from your
 browser straight to the MaaS gateway, like an outside client, instead of from
 the test pod. It is on by default for the small quick checks and off for rate
 limits and load; `gateway_overhead` and `request_types` always send from the
-pod. Keep the run page open while it sends. If the gateway doesn't accept
-calls from a browser (CORS), the step fails and says so — that is the result.
-On the run page, "What happened" labels each sending step with where it sent
-from and which endpoint it used.
+pod. Keep the run page open while it sends. On the run page, "What happened" labels each sending step with where it sent from and which endpoint it used.
 
 **Your own scenarios:** click **Import scenario** on the Scenarios page and
-upload a scenario YAML or paste one in (a built-in one's run settings, from a
-run page, are a good start; give it a new `name:`). The BFF checks that it
+upload a scenario YAML or paste one in.
+[`docs/examples/two_keys_quick_check.yaml`](docs/examples/two_keys_quick_check.yaml)
+is a complete worked example that creates two API keys, a small burst of requests spread
+across them, with its inputs, checks and verdict; a built-in scenario's run
+settings, copied from a run page, are another good start.  
+Either way, give it a new `name:`. The BFF checks that it
 loads and uses known tasks, then stores it on the plugin's PVC
 (`/data/scenarios/`), so no rebuild is needed and it survives restarts. It shows
 up in the catalog with a **Custom** label, ahead of the built-in ones. Give it
@@ -149,6 +164,15 @@ show "You don't have access to MaaS:PAL".
 
 See [Deploying on OpenShift](docs/deployment/OPENSHIFT_DEPLOY.md) for the full
 guide: chart values, permissions, upgrading and uninstalling.
+
+## What's Inside
+
+| Part | What it is |
+|---|---|
+| Frontend (`src/`) | React + PatternFly 6, loaded by the dashboard at runtime through Webpack Module Federation (`remoteEntry.js`, served by nginx) |
+| BFF (`bff/`) | FastAPI backend behind the dashboard's `proxyService` (`/maaspal/api` → `/api`). Launches and stops runs, captures their logs, keeps run history (SQLite on a PVC) and reads the MaaS setup. Every request is checked against the dashboard user's own token. |
+| Harness (`bff/harness/`) | The test runner. Each run is a Kubernetes Job using the BFF image. Scenarios are YAML files in `bff/scenarios/`. |
+| Helm chart (`chart/`) | Deploys the frontend, the BFF, the PVC and the RBAC the harness needs |
 
 ## Permissions
 
