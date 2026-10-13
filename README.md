@@ -1,8 +1,6 @@
-# MaaS:PAL
+# MaaS:PAL (**P**olicies,**A**ccess, **L**inting)
 
-The testing harness that fights for you (to destruction).
-
-MaaS:PAL is a community plugin for the **Red Hat OpenShift AI (RHOAI) Dashboard**
+MaaS:"Policies, Access, Linting" or MaaS:PAL is a community plugin for the **Red Hat OpenShift AI (RHOAI) Dashboard**
 that tests a **Models as a Service (MaaS)** setup on a live cluster. It answers
 questions like "is my subscription's rate limit actually enforced?" or "does my
 subscription reach every model it covers?". It acts through MaaS's own
