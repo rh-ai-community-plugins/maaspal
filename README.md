@@ -1,4 +1,4 @@
-# MaaS:PAL (**P**olicies,**A**ccess, **L**inting)
+# MaaS:PAL (**P**olicies, **A**ccess, **L**inting)
 
 MaaS:"Policies, Access, Linting" or MaaS:PAL is a community plugin for the **Red Hat OpenShift AI (RHOAI) Dashboard**
 that tests a **Models as a Service (MaaS)** setup on a live cluster. It answers
