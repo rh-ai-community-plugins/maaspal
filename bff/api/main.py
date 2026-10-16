@@ -144,7 +144,7 @@ async def lifespan(_app: FastAPI):
 # ADR-026). The UI itself is a Module Federation remote served by its own nginx
 # container, so this app serves only the API.
 app = FastAPI(
-    title="MaaS:PAL", version="0.1.0", lifespan=lifespan, dependencies=[Depends(require_user)]
+    title="MaaS:PAL", version="1.0.0", lifespan=lifespan, dependencies=[Depends(require_user)]
 )
 app.include_router(scenarios_router)
 app.include_router(runs_router)

@@ -1,6 +1,6 @@
 {
   "name": "maaspal",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "MaaS:PAL — a testing harness for RHOAI Models as a Service, as an RHOAI Dashboard community plugin",
   "private": true,
   "module-federation": {

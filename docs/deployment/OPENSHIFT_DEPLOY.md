@@ -16,7 +16,7 @@ the RBAC its harness needs, then registers with the RHOAI dashboard.
 
 ```bash
 helm install maaspal oci://quay.io/rh-ai-community-plugins/maaspal-chart \
-  --version 0.1.0 \
+  --version 1.0.0 \
   --namespace cp-maaspal \
   --create-namespace
 

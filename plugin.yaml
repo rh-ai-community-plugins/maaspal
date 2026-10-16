@@ -2,7 +2,7 @@
 name: maaspal
 displayName: "MaaS:PAL"
 description: A testing harness for RHOAI Models as a Service — runs scenarios (rate limits, access control, API keys, usage metrics, load) against your live MaaS setup and explains the results
-version: 0.1.0
+version: 1.0.0
 
 # --- Maintainer (required) ---
 maintainer:
@@ -20,11 +20,11 @@ deployment_model: cluster-shared     # per-project | cluster-shared | both
 
 image:
   repository: quay.io/rh-ai-community-plugins/maaspal
-  tag: "0.1.0"
+  tag: "1.0.0"
 
 bff_image:                           # FastAPI backend; also the image every harness Job runs
   repository: quay.io/rh-ai-community-plugins/maaspal-bff
-  tag: "0.1.0"
+  tag: "1.0.0"
 
 # --- Installation (required) ---
 install:
