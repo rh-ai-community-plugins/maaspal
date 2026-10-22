@@ -116,13 +116,16 @@ throwaway models some scenarios deploy there.
 
 ### 2. Register with the RHOAI Dashboard
 
+The below command will add MaaS:PAL without overwriting any other community plugin entries you may have.
+
 ```bash
-oc get configmap federation-config \
-  -n redhat-ods-applications \
-  -o jsonpath='{.data.module-federation-config\.json}' \
+oc set env deployment/rhods-dashboard -n redhat-ods-applications --list \
+  | sed -n 's/^MODULE_FEDERATION_CONFIG=//p' \
+  | head -1 \
 | python3 -c "
 import json, sys
-config = json.load(sys.stdin)
+raw = sys.stdin.read().strip()
+config = json.loads(raw) if raw else []
 config.append({
   'name': 'maaspal',
   'backend': {
