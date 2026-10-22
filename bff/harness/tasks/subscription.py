@@ -2,6 +2,7 @@ import asyncio
 import random
 import time
 import traceback
+from typing import cast
 
 from kubernetes import client as k8s_client
 
@@ -84,13 +85,13 @@ _TRLP_POLL_INTERVAL_S = 3.0
 def _trlp_ready(api: k8s_client.CustomObjectsApi, model_name: str, model_namespace: str) -> bool:
     # Same label-selector lookup as harness/tasks/platform_health.py:
     # CheckModelHealthTask — found by label, not an assumed generated name.
-    items = api.list_namespaced_custom_object(
+    items = cast(dict, api.list_namespaced_custom_object(
         group=_KUADRANT_GROUP,
         version=_KUADRANT_VERSION,
         namespace=model_namespace,
         plural=_TRLP_PLURAL,
         label_selector=f"maas.opendatahub.io/model={model_name}",
-    ).get("items", [])
+    )).get("items", [])
     if not items:
         return False
     conditions = items[0].get("status", {}).get("conditions", [])

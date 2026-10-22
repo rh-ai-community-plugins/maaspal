@@ -68,6 +68,8 @@ class CreateUserTask(Task):
             resp = core_api.create_namespaced_service_account_token(
                 name=sa_name, namespace=namespace, body=token_request
             )
+            if resp.status is None or not resp.status.token:
+                raise RuntimeError(f"TokenRequest for {sa_name} returned no token")
             token = resp.status.token
             username = f"system:serviceaccount:{namespace}:{sa_name}"
             print(

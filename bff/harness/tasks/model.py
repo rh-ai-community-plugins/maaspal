@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 import traceback
+from typing import cast
 
 import httpx
 from kubernetes import client as k8s_client
@@ -101,10 +102,10 @@ async def _wait_for_isvc_ready(
     start = time.monotonic()
     while True:
         try:
-            obj = api.get_namespaced_custom_object(
+            obj = cast(dict, api.get_namespaced_custom_object(
                 group=_ISVC_GROUP, version=_ISVC_VERSION,
                 namespace=namespace, plural=_ISVC_PLURAL, name=name,
-            )
+            ))
             conditions = (obj or {}).get("status", {}).get("conditions", [])
             ready = next((c for c in conditions if c.get("type") == "Ready"), None)
             if ready and ready.get("status") == "True":
@@ -140,10 +141,10 @@ async def _wait_for_model_ref_runtime_ready(
     start = time.monotonic()
     while True:
         try:
-            obj = api.get_namespaced_custom_object(
+            obj = cast(dict, api.get_namespaced_custom_object(
                 group=_MAAS_GROUP, version=_MAAS_VERSION,
                 namespace=namespace, plural=_MODEL_REF_PLURAL, name=name,
-            )
+            ))
             conditions = (obj or {}).get("status", {}).get("conditions", [])
             runtime_ready = next((c for c in conditions if c.get("type") == "RuntimeReady"), None)
             if runtime_ready and runtime_ready.get("status") == "True":
@@ -400,9 +401,9 @@ class ExposeModelRouteTask(Task):
         host = None
         waited = 0.0
         while waited <= max_wait_s:
-            obj = api.get_namespaced_custom_object(
+            obj = cast(dict, api.get_namespaced_custom_object(
                 group=_ROUTE_GROUP, version=_ROUTE_VERSION, namespace=namespace, plural=_ROUTE_PLURAL, name=route_name
-            )
+            ))
             for ingress in (obj.get("status") or {}).get("ingress") or []:
                 if any(c.get("type") == "Admitted" and c.get("status") == "True" for c in ingress.get("conditions") or []):
                     host = ingress.get("host") or (obj.get("spec") or {}).get("host")
