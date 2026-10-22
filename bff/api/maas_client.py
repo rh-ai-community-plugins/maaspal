@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import httpx
 import yaml
@@ -109,7 +110,7 @@ def _list(group: str, version: str, plural: str) -> ResourceList:
     _kube()
     api = k8s.CustomObjectsApi()
     try:
-        result = api.list_cluster_custom_object(group=group, version=version, plural=plural)
+        result = cast(dict, api.list_cluster_custom_object(group=group, version=version, plural=plural))
         return ResourceList(available=True, items=result.get("items", []))
     except ApiException as exc:
         return ResourceList(available=False, reason=_reason_for(exc))
@@ -126,9 +127,9 @@ def _get(group: str, version: str, namespace: str, plural: str, name: str) -> di
     _kube()
     api = k8s.CustomObjectsApi()
     try:
-        return api.get_namespaced_custom_object(
+        return cast(dict, api.get_namespaced_custom_object(
             group=group, version=version, namespace=namespace, plural=plural, name=name
-        )
+        ))
     except Exception:
         return None
 
@@ -144,7 +145,7 @@ def _namespace_has_gateway_access_label(name: str) -> bool | None:
     api = k8s.CoreV1Api()
     try:
         ns = api.read_namespace(name)
-        labels = ns.metadata.labels or {}
+        labels = (ns.metadata and ns.metadata.labels) or {}
         return labels.get(_GATEWAY_ACCESS_LABEL) == "true"
     except Exception:
         return None
@@ -162,7 +163,7 @@ def _secret_has_label(namespace: str, name: str, label: str) -> bool | None:
     api = k8s.CoreV1Api()
     try:
         secret = api.read_namespaced_secret(name, namespace)
-        labels = secret.metadata.labels or {}
+        labels = (secret.metadata and secret.metadata.labels) or {}
         return labels.get(label) == "true"
     except Exception:
         return None

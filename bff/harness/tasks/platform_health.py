@@ -1,4 +1,5 @@
 import time
+from typing import cast
 
 import httpx
 from kubernetes import client as k8s_client
@@ -87,13 +88,13 @@ class CheckModelHealthTask(Task):
 
         api = k8s_client.CustomObjectsApi()
 
-        gateway = api.get_namespaced_custom_object(
+        gateway = cast(dict, api.get_namespaced_custom_object(
             group=_GATEWAY_GROUP,
             version=_GATEWAY_VERSION,
             namespace=gateway_namespace,
             plural="gateways",
             name=gateway_name,
-        )
+        ))
         gw_conditions = gateway.get("status", {}).get("conditions", [])
         ctx.shared_state["gateway_status"] = {
             "programmed": int(_condition_true(gw_conditions, "Programmed")),
@@ -182,13 +183,13 @@ class CheckModelHealthTask(Task):
 
     @staticmethod
     def _check_one(api: k8s_client.CustomObjectsApi, model_name: str, model_namespace: str) -> tuple[dict, dict]:
-        trlp_items = api.list_namespaced_custom_object(
+        trlp_items = cast(dict, api.list_namespaced_custom_object(
             group=_KUADRANT_GROUP,
             version=_KUADRANT_VERSION,
             namespace=model_namespace,
             plural="tokenratelimitpolicies",
             label_selector=f"maas.opendatahub.io/model={model_name}",
-        ).get("items", [])
+        )).get("items", [])
         trlp_found = bool(trlp_items)
         trlp_conditions = trlp_items[0].get("status", {}).get("conditions", []) if trlp_found else []
         trlp = {
@@ -197,13 +198,13 @@ class CheckModelHealthTask(Task):
             "enforced": int(_condition_true(trlp_conditions, "Enforced")),
         }
 
-        route_items = api.list_namespaced_custom_object(
+        route_items = cast(dict, api.list_namespaced_custom_object(
             group=_GATEWAY_GROUP,
             version=_GATEWAY_VERSION,
             namespace=model_namespace,
             plural="httproutes",
             label_selector=f"app.kubernetes.io/name={model_name}",
-        ).get("items", [])
+        )).get("items", [])
         route_found = bool(route_items)
         owner_refs = route_items[0].get("metadata", {}).get("ownerReferences", []) if route_found else []
         route = {
